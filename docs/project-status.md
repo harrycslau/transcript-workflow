@@ -31,7 +31,8 @@ standing rules.
   belonging to a `Transcript` (+ its whole-recording `Section`,
   NOT NULL; Step 6 section-level summaries reuse the scope). Constraints:
   `uniq_summary_ordinal (recording, ordinal)` and
-  `uniq_active_summary_in_scope (transcript, section, is_active)`.
+  conditional `uniq_active_summary_in_scope (transcript, section)` for
+  rows where `is_active=True`.
   The "current summary of a recording" is DERIVED: the active Summary
   of the active Transcript (`Recording.current_summary()`). Old
   transcripts' summaries stay `is_active=True` forever (historically
@@ -84,8 +85,11 @@ standing rules.
   auto-retry loop. `brain summarize ID` / `brain retry ID` are explicit;
   `brain summarize ID --regenerate` forces a new version.
 - `recover_interruptions` closes unfinished summarization attempts and
-  reconciles summary state idempotently (interrupted first attempt →
-  `missing`; interrupted regeneration → `current` + retryable warning).
+  reconciles summary state idempotently and by stage. An interrupted
+  first attempt becomes `failed`; an interrupted regeneration remains
+  `current` with a retryable warning. Both require explicit retry.
+  Unrelated routing/transcription recovery never changes summary
+  eligibility or summary failure markers.
 
 ### Tags
 
@@ -178,7 +182,7 @@ keeps the active transcript and sets `retranscription_failed`.
   -finite/out-of-order rejected, slight overlap tolerated), atomic
   versioned transcript persistence.
 - `pipeline.py` — orchestration (`run_pipeline` = recovery → ingest →
-  route → transcribe), `manual_route` (different profile on a
+  route → transcribe → summarize), `manual_route` (different profile on a
   transcribed recording ⇒ pending retranscription; same profile ⇒
   verify without retranscribing), `confirm_routing`, `retry`,
   `recover_interruptions` (unfinished attempts → `interrupted`; orphan
@@ -221,10 +225,11 @@ Step 4.
 
 ## Tests and verification status
 
-- 440 tests passing (`pytest`); no real MacWhisper, oMLX, network,
+- 495 tests passing (`pytest`); no real MacWhisper, oMLX, network,
   ffmpeg, or user audio; "must not happen" mocks raise.
 - Verified: `manage.py check`, `makemigrations --check`, fresh-process
-  CLI config errors (no traceback), `git diff --check`.
+  CLI config errors (no traceback), stage-aware cross-stage recovery,
+  error/secret hygiene, and `git diff --check`.
 - Sanitized MacWhisper fixtures: `tests/fixtures/macwhisper/`.
 
 ## Known limitations
@@ -245,8 +250,6 @@ Step 4.
 ## Step 3–6 roadmap (agreed)
 
 - **Step 4 (next)**: full web interface, review queue, transcript/summary
-  views, tag editing/filtering, manual routing controls.
-- **Step 4**: full web interface, review queue, transcript/summary
   views, tag editing/filtering, manual routing controls.
 - **Step 5**: FTS5 keyword search, local embeddings, semantic/hybrid
   search, Ask-with-citations.

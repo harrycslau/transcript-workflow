@@ -8,8 +8,8 @@ development phases of this project, not per-task status (see
 
 Brain is a **local-first, privacy-preserving transcript workflow** for
 personal WAV recordings: discover → route language → transcribe via
-MacWhisper (`mw` CLI) → (later) summarize/tag via a local oMLX
-OpenAI-compatible endpoint → (later) search, summarize, split.
+MacWhisper (`mw` CLI) → summarize/tag via a local oMLX
+OpenAI-compatible endpoint → (later) search and split.
 
 Non-negotiable principles:
 
@@ -30,8 +30,9 @@ Non-negotiable principles:
   - `src/brain/` — Django project (`settings.py` reads the shared
     config loader; localhost-only; `DEBUG=True` local dev).
   - `src/workflow/` — Django app: `models.py`, `services/` (ingest,
-    routing, transcription, audiosamples, statemachine, pipeline,
-    pipeline_lock), `views.py` (status page + `/health/`),
+    routing, transcription, summarize, chunking, rendering, tags,
+    audiosamples, statemachine, pipeline, pipeline_lock), `views.py`
+    (status page + `/health/`),
     `migrations/`.
   - `src/manage.py` — conventional entry point only; the CLI is
     `brain` (`brainlib.cli:main`).
@@ -57,16 +58,18 @@ Non-negotiable principles:
 ## Pipeline locking and concurrency
 
 - SQLite has no advisory locks. All mutating pipeline commands
-  (`ingest`, `route`, `transcribe`, `run`, `retry`) must hold the
+  (`ingest`, `route`, `transcribe`, `summarize`, `tags --sync`, `run`,
+  `retry`) must hold the
   exclusive `flock` at `data/temp/locks/pipeline.lock`
   (`workflow/services/pipeline_lock.py`); second process exits with
   code 3. Read-only commands (`status`, `review`, `transcripts`,
-  `doctor`, `serve`) never lock.
+  `summaries`, `summary`, `tags`, `doctor`, `serve`) never lock.
 - Run `recover_interruptions()` while holding the lock before new work
   in mutating commands; it is idempotent.
 - DB constraints are the second concurrency layer: at most one
   unfinished `ProcessingAttempt` per (recording, stage), one active
-  `Transcript` and one active `RoutingDecision` per recording.
+  `Transcript` and one active `RoutingDecision` per recording, and one
+  active `Summary` per (transcript, section) scope.
 
 ## Content identity, versioning, active-record invariants
 
@@ -85,6 +88,16 @@ Non-negotiable principles:
   (present/missing) are orthogonal; deleting a transcribed
   recording's WAV keeps it `transcribed` + `audio_status=missing`
   with all history intact.
+- Summaries are versioned structured data belonging to a Transcript and
+  Section. The current Recording summary is derived from the active
+  Transcript; summaries on old Transcripts remain historically active.
+  A replacement Summary becomes active only after complete successful
+  generation. Markdown/plain text are deterministic renderings, not the
+  canonical stored representation.
+- Tags are defined by YAML `tags.allowed` and synchronized explicitly;
+  removed definitions are retired, never deleted. Model suggestions are
+  versioned provenance. Manual/confirmed effective assignments are
+  user-owned and must not be silently removed by regeneration.
 
 ## Failure, retry, recovery
 
@@ -101,6 +114,17 @@ Non-negotiable principles:
   changed content under the old SHA-256, never spawn MacWhisper on an
   unverified path, never create a fake failure attempt for a deleted
   file.
+- Summarization state is orthogonal to `processing_status`. A new active
+  Transcript receives one automatic summary attempt. Failed or
+  interrupted summarization requires explicit retry; `brain run` must
+  never auto-retry it. Failed regeneration preserves the current
+  Summary and records `resummarization_failed` + `last_failed_attempt`.
+- Recovery is stage-aware: routing/transcription interruption must not
+  alter summary eligibility or failure markers. Only a recovered
+  summarization attempt receives summary interruption reconciliation.
+- Summarization uses the complete stored Transcript, never the WAV. Long
+  input is deterministically chunked and hierarchically reduced; it is
+  never silently truncated. Every request and response is bounded.
 
 ## Source-file and inbox safety
 
@@ -134,8 +158,9 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- `0001`/`0002` are applied; add NEW migrations, never edit applied
-  ones. Enforce invariants with DB constraints (partial uniques),
+- Migrations `0001`–`0004` define the current Steps 1–3 schema; add NEW
+  migrations, never edit existing/applied ones. Enforce invariants with
+  DB constraints (partial uniques),
   not just application logic. Run `makemigrations --check` in
   verification.
 
@@ -168,10 +193,10 @@ Non-negotiable principles:
 
 ## Scope boundaries
 
-- **Step 3** (next): structured JSON summaries rendered deterministically
-  as Markdown/plain text, configurable multi-select tags from YAML,
-  bounded chunking for long transcripts. No web UI beyond the existing
-  status page.
+- **Step 3** (complete): structured summaries rendered deterministically
+  as Markdown/plain text, configurable multi-select tags from YAML, and
+  bounded whole-transcript chunking/hierarchical reduction. The web UI
+  remains the minimal status page.
 - **Step 4**: full web interface, review queue, transcript/summary
   views, tag editing, manual routing controls.
 - **Step 5**: FTS5 keyword search, local embeddings, semantic/hybrid
