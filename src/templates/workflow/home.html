@@ -35,6 +35,16 @@
 </section>
 
 <section>
+  <h2>Pipeline</h2>
+  <ul>
+    <li><strong>Discovered/routing</strong>: {{ pipeline_counts.discovered }}</li>
+    <li><strong>Needs review</strong>: {{ pipeline_counts.needs_review }}</li>
+    <li><strong>Transcribed</strong>: {{ pipeline_counts.transcribed }}</li>
+    <li><strong>Failed</strong>: {{ pipeline_counts.failed }}</li>
+  </ul>
+</section>
+
+<section>
   <h2>Planned tags</h2>
   <p class="muted">{{ initial_tags|join:", "|default:"none configured" }}</p>
 </section>

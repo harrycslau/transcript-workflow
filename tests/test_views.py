@@ -31,6 +31,7 @@ def forbid_external_effects(monkeypatch):
 
 
 class TestHomePage:
+    @pytest.mark.django_db
     def test_home_renders_status(self, client):
         response = client.get("/")
         assert response.status_code == 200
@@ -42,12 +43,14 @@ class TestHomePage:
         assert "data/inbox" in content or "inbox" in content
         assert "(not configured)" in content  # blank models warn visually
 
+    @pytest.mark.django_db
     def test_home_does_not_expose_secrets(self, client, monkeypatch):
         monkeypatch.setenv("BRAIN_TEST_LLM_API_KEY", "super-secret-value")
         content = client.get("/").content.decode()
         assert "super-secret-value" not in content
         assert "BRAIN_TEST_LLM_API_KEY" not in content
 
+    @pytest.mark.django_db
     def test_home_reports_macwhisper_presence_without_spawning(self, client):
         content = client.get("/").content.decode()
         # Session test config points at a nonexistent mw binary.

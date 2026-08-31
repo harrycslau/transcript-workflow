@@ -85,6 +85,24 @@ _DEFAULTS: dict[str, Any] = {
         "language": "auto",
         "speakers": True,
         "output_format": "json",
+        "file_stable_seconds": 30,
+        "cli_timeout_seconds": 7200,
+        "routing": {
+            "enabled": True,
+            "auto_transcribe": True,
+            "confidence_threshold": 0.80,
+            "default_profile": "european",
+            "profiles": {
+                "cantonese": {"model": "apple:zh-HK", "language": None, "manual_only": False},
+                "mandarin": {"model": "apple:zh-CN", "language": None, "manual_only": False},
+                # `language: null` means "do not pass --language": the
+                # parakeet model rejects the value "multilingual" and
+                # detects language internally (validated against
+                # MacWhisper 14.7.1).
+                "european": {"model": "parakeet-pro:nvidia_parakeet-v3", "language": None, "manual_only": False},
+                "european_small": {"model": "parakeet-pro:nvidia_parakeet-v3_494MB", "language": None, "manual_only": True},
+            },
+        },
     },
     "llm": {
         "provider": "openai_compatible",
@@ -107,6 +125,7 @@ _DEFAULTS: dict[str, Any] = {
         "require_summary": True,
     },
     "initial_tags": [],
+    "timezone": "Europe/Helsinki",
 }
 
 
@@ -121,12 +140,39 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class RoutingProfile:
+    name: str
+    model: str
+    language: str | None  # None = do not pass --language
+    manual_only: bool = False
+
+
+@dataclass(frozen=True)
+class RoutingConfig:
+    enabled: bool
+    auto_transcribe: bool
+    confidence_threshold: float
+    default_profile: str
+    profiles: dict[str, RoutingProfile]
+
+    def profile(self, name: str) -> RoutingProfile | None:
+        return self.profiles.get(name)
+
+
+@dataclass(frozen=True)
 class MacWhisperConfig:
     command: str
-    model: str | None
+    model: str | None  # legacy key; see legacy_model_notice
     language: str
     speakers: bool
     output_format: str
+    file_stable_seconds: int
+    cli_timeout_seconds: int
+    routing: RoutingConfig
+    legacy_model_notice: str | None = None  # set when legacy key is used
+
+    def profile(self, name: str) -> RoutingProfile | None:
+        return self.routing.profile(name)
 
 
 @dataclass(frozen=True)
@@ -170,6 +216,7 @@ class AppConfig:
     embedding: EmbeddingConfig
     retention: RetentionConfig
     initial_tags: list[TagSpec] = field(default_factory=list)
+    timezone: str = "Europe/Helsinki"
 
     def api_key_for(self, api_key_env: str) -> str | None:
         """Return the secret named by ``api_key_env``, or None.
@@ -217,6 +264,125 @@ def _get_nonblank(section: dict[str, Any], name: str, path: str) -> str:
     return value
 
 
+def _parse_routing_profile(name: str, raw: Any) -> RoutingProfile:
+    if not isinstance(raw, dict):
+        raise ConfigError(f"[macwhisper.routing.profiles.{name}] must be a mapping, got {type(raw).__name__}")
+    language = raw.get("language")
+    if language is not None:
+        if not isinstance(language, str) or not language.strip():
+            raise ConfigError(f"[macwhisper.routing.profiles.{name}]: 'language' must be a non-blank string or null")
+        language = language.strip()
+    model = raw.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise ConfigError(f"[macwhisper.routing.profiles.{name}]: 'model' must be a non-blank string")
+    manual_only = raw.get("manual_only", False)
+    if not isinstance(manual_only, bool):
+        raise ConfigError(f"[macwhisper.routing.profiles.{name}]: 'manual_only' must be a boolean")
+    return RoutingProfile(name=name, model=model.strip(), language=language, manual_only=manual_only)
+
+
+def _parse_routing(macwhisper_section: dict[str, Any]) -> RoutingConfig:
+    s = dict(_DEFAULTS["macwhisper"]["routing"])
+    provided = macwhisper_section.get("routing")
+    if provided is not None:
+        if not isinstance(provided, dict):
+            raise ConfigError(f"[macwhisper.routing] must be a mapping, got {type(provided).__name__}")
+        s.update(provided)
+    enabled = _get(s, "enabled", "macwhisper.routing", bool)
+    auto_transcribe = _get(s, "auto_transcribe", "macwhisper.routing", bool)
+    threshold = _get_number(s, "confidence_threshold", "macwhisper.routing", (int, float))
+    if not 0.0 <= threshold <= 1.0:
+        raise ConfigError(f"[macwhisper.routing]: 'confidence_threshold' must be between 0 and 1, got {threshold}")
+    profiles_raw = s.get("profiles")
+    if not isinstance(profiles_raw, dict) or not profiles_raw:
+        raise ConfigError("[macwhisper.routing]: 'profiles' must be a non-empty mapping")
+    profiles: dict[str, RoutingProfile] = {}
+    for name, raw_profile in profiles_raw.items():
+        profiles[str(name)] = _parse_routing_profile(str(name), raw_profile)
+    default_profile = _get_nonblank(s, "default_profile", "macwhisper.routing")
+    if default_profile not in profiles:
+        raise ConfigError(
+            f"[macwhisper.routing]: 'default_profile' '{default_profile}' is not a configured profile "
+            f"(available: {', '.join(sorted(profiles))})"
+        )
+    if enabled:
+        # Automatic routing needs usable Cantonese/Mandarin/European
+        # profiles; each must exist and be auto-selectable.
+        for required in ("cantonese", "mandarin", "european"):
+            profile = profiles.get(required)
+            if profile is None:
+                raise ConfigError(
+                    f"[macwhisper.routing]: required profile '{required}' is missing "
+                    "(automatic routing is enabled)"
+                )
+            if profile.manual_only:
+                raise ConfigError(
+                    f"[macwhisper.routing]: required profile '{required}' must not be manual_only "
+                    "(automatic routing is enabled)"
+                )
+    return RoutingConfig(
+        enabled=enabled,
+        auto_transcribe=auto_transcribe,
+        confidence_threshold=float(threshold),
+        default_profile=default_profile,
+        profiles=profiles,
+    )
+
+
+def _parse_macwhisper(raw: dict[str, Any]) -> MacWhisperConfig:
+    s = _section(raw, "macwhisper")
+    model = s.get("model")
+    if model is not None and not isinstance(model, str):
+        raise ConfigError(f"[macwhisper]: 'model' must be a string or null, got {type(model).__name__}")
+    legacy_notice: str | None = None
+
+    routing_present = isinstance(raw.get("macwhisper"), dict) and "routing" in raw["macwhisper"]
+    routing = _parse_routing(s)
+    legacy_model = (model or "").strip()
+
+    if legacy_model:
+        if routing_present:
+            legacy_notice = (
+                "legacy 'macwhisper.model' is ignored because 'macwhisper.routing' is configured; "
+                "remove the legacy key"
+            )
+        else:
+            # Non-blank legacy model becomes a warned, manual-only profile.
+            routing.profiles["legacy"] = RoutingProfile(
+                name="legacy", model=legacy_model, language=None, manual_only=True
+            )
+            routing = RoutingConfig(
+                enabled=routing.enabled,
+                auto_transcribe=routing.auto_transcribe,
+                confidence_threshold=routing.confidence_threshold,
+                default_profile="legacy",
+                profiles=routing.profiles,
+            )
+            legacy_notice = (
+                "legacy 'macwhisper.model' mapped to manual-only 'legacy' profile; "
+                "migrate to macwhisper.routing.profiles"
+            )
+    elif not routing_present:
+        # Null/blank legacy model with no routing section: use the new
+        # default profiles and warn, never create an invalid profile.
+        legacy_notice = (
+            "'macwhisper.model' is no longer used; new default routing profiles are active - "
+            "migrate to macwhisper.routing.profiles"
+        )
+
+    return MacWhisperConfig(
+        command=_get_nonblank(s, "command", "macwhisper"),
+        model=model,
+        language=_get(s, "language", "macwhisper", str),
+        speakers=_get(s, "speakers", "macwhisper", bool),
+        output_format=_get_nonblank(s, "output_format", "macwhisper"),
+        file_stable_seconds=_get_number(s, "file_stable_seconds", "macwhisper", int, positive=True),
+        cli_timeout_seconds=_get_number(s, "cli_timeout_seconds", "macwhisper", int, positive=True),
+        routing=routing,
+        legacy_model_notice=legacy_notice,
+    )
+
+
 def _get_number(section: dict[str, Any], name: str, path: str, expected: type | tuple[type, ...], *, positive: bool = False) -> Any:
     """Numeric getter that rejects booleans (YAML true/false are ints in Python)."""
     if name not in section:
@@ -242,20 +408,6 @@ def _parse_storage(raw: dict[str, Any], base: Path) -> StorageConfig:
         value = _get_nonblank(section, key, "storage")
         fields[key] = _resolve(base, Path(value).expanduser())
     return StorageConfig(**fields)
-
-
-def _parse_macwhisper(raw: dict[str, Any]) -> MacWhisperConfig:
-    s = _section(raw, "macwhisper")
-    model = s.get("model")
-    if model is not None and not isinstance(model, str):
-        raise ConfigError(f"[macwhisper]: 'model' must be a string or null, got {type(model).__name__}")
-    return MacWhisperConfig(
-        command=_get_nonblank(s, "command", "macwhisper"),
-        model=model,
-        language=_get(s, "language", "macwhisper", str),
-        speakers=_get(s, "speakers", "macwhisper", bool),
-        output_format=_get(s, "output_format", "macwhisper", str),
-    )
 
 
 def _parse_llm(raw: dict[str, Any]) -> LLMConfig:
@@ -308,6 +460,25 @@ def _parse_tags(raw: dict[str, Any]) -> list[TagSpec]:
     return parsed
 
 
+def _parse_timezone(raw: dict[str, Any]) -> str:
+    """Timezone used to interpret filename-derived recording timestamps.
+
+    Defaults to Europe/Helsinki (the owner's local timezone); override
+    with a top-level ``timezone`` IANA zone name.
+    """
+    from zoneinfo import ZoneInfo
+
+    value = raw.get("timezone", _DEFAULTS["timezone"])
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError("[timezone] must be a non-blank IANA zone name")
+    value = value.strip()
+    try:
+        ZoneInfo(value)
+    except Exception:
+        raise ConfigError(f"[timezone]: unknown IANA timezone '{value}'") from None
+    return value
+
+
 def load_config(path: Path | None = None, *, env_file: Path | None = None) -> AppConfig:
     """Load, validate, and return the application configuration.
 
@@ -353,4 +524,5 @@ def load_config(path: Path | None = None, *, env_file: Path | None = None) -> Ap
         embedding=_parse_embedding(raw),
         retention=_parse_retention(raw),
         initial_tags=_parse_tags(raw),
+        timezone=_parse_timezone(raw),
     )

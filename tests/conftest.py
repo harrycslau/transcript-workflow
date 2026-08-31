@@ -35,6 +35,8 @@ macwhisper:
   language: auto
   speakers: true
   output_format: json
+  file_stable_seconds: 1
+  cli_timeout_seconds: 600
 
 llm:
   provider: openai_compatible

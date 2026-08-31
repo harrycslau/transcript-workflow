@@ -282,6 +282,78 @@ def check_models(
     return results
 
 
+def parse_mw_models_output(output: str) -> list[str]:
+    """Extract model IDs from ``mw models`` table output.
+
+    Lines look like ``  parakeet-pro:nvidia_parakeet-v3  Parakeet v3  1.24 GB``
+    with an optional leading ``▸`` marking the globally selected model.
+    """
+    ids: list[str] = []
+    for line in output.splitlines():
+        tokens = [t for t in line.split() if t and t != "▸"]
+        if not tokens:
+            continue
+        candidate = tokens[0]
+        if ":" in candidate and candidate.lower() not in ("id",) and not candidate.startswith("usage"):
+            ids.append(candidate)
+    return ids
+
+
+def check_transcription_profiles(
+    config: AppConfig,
+    runner: Callable[..., subprocess.CompletedProcess] | None = None,
+) -> CheckResult:
+    """Validate that every configured routing profile's model is installed.
+
+    WARN (never FAIL) when a model is missing - transcription simply
+    cannot use that profile until it is downloaded.
+    """
+    runner = runner or subprocess.run
+    try:
+        result = runner(
+            [config.macwhisper.command, "models"],
+            capture_output=True,
+            text=True,
+            timeout=MW_TIMEOUT_SECONDS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        return CheckResult("Transcription profiles", WARN, f"cannot list models: {type(exc).__name__}")
+    if result.returncode != 0:
+        return CheckResult("Transcription profiles", WARN, f"'mw models' exited with {result.returncode}")
+
+    installed = parse_mw_models_output(result.stdout or "")
+    missing = [
+        f"{name}: {profile.model}"
+        for name, profile in sorted(config.macwhisper.routing.profiles.items())
+        if profile.model not in installed
+    ]
+    if missing:
+        return CheckResult("Transcription profiles", WARN, f"models not installed: {', '.join(missing)}")
+    return CheckResult(
+        "Transcription profiles",
+        PASS,
+        f"all {len(config.macwhisper.routing.profiles)} profile model(s) installed",
+    )
+
+
+def check_audio_tooling() -> CheckResult:
+    """Check for macOS audio tools used by sample-based routing.
+
+    Both are built into macOS; absence is a WARN because routing falls
+    back to needs_review without them.
+    """
+    missing = [tool for tool in ("afinfo", "afconvert") if shutil.which(tool) is None]
+    if missing:
+        return CheckResult("Audio tooling", WARN, f"missing: {', '.join(missing)} (routing will need review)")
+    return CheckResult("Audio tooling", PASS, "afinfo and afconvert available")
+
+
+def check_legacy_config(config: AppConfig) -> CheckResult | None:
+    if config.macwhisper.legacy_model_notice:
+        return CheckResult("Legacy configuration", WARN, config.macwhisper.legacy_model_notice)
+    return None
+
+
 def redact_secret_check(config: AppConfig) -> CheckResult:
     """Report whether the configured LLM API key env var is set - name only."""
     env_name = config.llm.api_key_env
@@ -318,6 +390,11 @@ def run_doctor() -> tuple[list[CheckResult], int]:
     results.append(check_sqlite_connection(config))
     results.append(check_fts5())
     results.append(check_macwhisper(config))
+    results.append(check_transcription_profiles(config))
+    results.append(check_audio_tooling())
+    legacy = check_legacy_config(config)
+    if legacy is not None:
+        results.append(legacy)
     results.append(redact_secret_check(config))
 
     omlx_result, models, state = check_omlx(config.llm.base_url, config.llm.api_key_env)

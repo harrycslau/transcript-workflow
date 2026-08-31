@@ -60,12 +60,30 @@ def _lightweight_status(config: AppConfig) -> dict:
     }
 
 
+def _pipeline_counts() -> dict[str, int]:
+    """Lightweight DB aggregate for the status page (read-only, fast)."""
+    from django.db.models import Count
+
+    from workflow.models import ProcessingStatus, Recording
+
+    counts = dict(Recording.objects.values_list("processing_status").annotate(total=Count("pk")))
+    return {
+        "discovered": counts.get(ProcessingStatus.DISCOVERED, 0)
+        + counts.get(ProcessingStatus.HASHING, 0)
+        + counts.get(ProcessingStatus.ROUTING, 0),
+        "needs_review": counts.get(ProcessingStatus.NEEDS_REVIEW, 0),
+        "transcribed": counts.get(ProcessingStatus.TRANSCRIBED, 0),
+        "failed": counts.get(ProcessingStatus.FAILED, 0),
+    }
+
+
 def home(request):
     try:
         config = load_config()
     except ConfigError:
         config = django_settings.BRAIN_CONFIG_OBJ
     context = _lightweight_status(config)
+    context["pipeline_counts"] = _pipeline_counts()
     return render(request, "workflow/home.html", context)
 
 

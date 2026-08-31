@@ -12,10 +12,45 @@ storage:
 
 macwhisper:
   command: /usr/local/bin/mw
+  # Legacy key kept for backward compatibility; superseded by routing.profiles.
   model: null
   language: auto
   speakers: true
   output_format: json
+  # A file must be unchanged for this long before it is hashed.
+  file_stable_seconds: 30
+  # Hard maximum cap for a single `mw transcribe` run. Short audio gets
+  # a small minimum allowance; longer audio scales with duration but
+  # never exceeds this cap.
+  cli_timeout_seconds: 7200
+
+  routing:
+    enabled: true
+    # When false, automatic suggestions always wait for human review.
+    auto_transcribe: true
+    # Automatic routing requires confidence >= threshold. Note: this is a
+    # router score, not a calibrated probability.
+    confidence_threshold: 0.80
+    default_profile: european
+
+    # language: null means "do not pass --language". Validated against
+    # MacWhisper 14.7.1: parakeet rejects `--language multilingual` and
+    # detects language internally; apple zh models run without the flag.
+    profiles:
+      cantonese:
+        model: apple:zh-HK
+        language: null
+      mandarin:
+        model: apple:zh-CN
+        language: null
+      european:
+        model: parakeet-pro:nvidia_parakeet-v3
+        language: null
+      # Installed but not the default; manual selection only.
+      european_small:
+        model: parakeet-pro:nvidia_parakeet-v3_494MB
+        language: null
+        manual_only: true
 
 llm:
   provider: openai_compatible

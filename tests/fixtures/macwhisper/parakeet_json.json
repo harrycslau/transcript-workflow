@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "observed_from": "MacWhisper 14.7.1 (1476), parakeet-pro:nvidia_parakeet-v3, --format json",
+  "notes": {
+    "units": "segment/word start and end are MILLISECONDS",
+    "top_level": [
+      "segments",
+      "text"
+    ],
+    "segment_keys": [
+      "end",
+      "id",
+      "start",
+      "text",
+      "words"
+    ],
+    "speaker": "absent or null unless diarization produces it"
+  },
+  "example": {
+    "segments": [
+      {
+        "end": 5280,
+        "id": "14FCBA53-C9F8-4E8A-9462-638AA48A903D",
+        "start": 1,
+        "text": "This is a synthetic test sentence for validating the McWhisper command line output format.",
+        "words": [
+          {
+            "end": 320,
+            "start": 0,
+            "text": "This"
+          },
+          {
+            "end": 480,
+            "start": 320,
+            "text": "is"
+          },
+          {
+            "end": 640,
+            "start": 480,
+            "text": "a"
+          },
+          {
+            "end": 1280,
+            "start": 640,
+            "text": "synthetic"
+          },
+          {
+            "end": 1520,
+            "start": 1280,
+            "text": "test"
+          },
+          {
+            "end": 1920,
+            "start": 1520,
+            "text": "sentence"
+          },
+          {
+            "end": 2080,
+            "start": 1920,
+            "text": "for"
+          },
+          {
+            "end": 2480,
+            "start": 2080,
+            "text": "validating"
+          },
+          {
+            "end": 2640,
+            "start": 2480,
+            "text": "the"
+          },
+          {
+            "end": 3440,
+            "start": 2640,
+            "text": "McWhisper"
+          },
+          {
+            "end": 3840,
+            "start": 3520,
+            "text": "command"
+          },
+          {
+            "end": 4160,
+            "start": 3840,
+            "text": "line"
+          },
+          {
+            "end": 4640,
+            "start": 4160,
+            "text": "output"
+          },
+          {
+            "end": 5280,
+            "start": 4640,
+            "text": "format."
+          }
+        ]
+      },
+      {
+        "end": 8640,
+        "id": "7F7AE43C-50C1-4C7C-933F-BEB3E1FBF3C6",
+        "start": 5280,
+        "text": "The weather today is sunny with light winds.",
+        "words": [
+          {
+            "end": 5520,
+            "start": 5280,
+            "text": "The"
+          },
+          {
+            "end": 5840,
+            "start": 5520,
+            "text": "weather"
+          },
+          {
+            "end": 6160,
+            "start": 5840,
+            "text": "today"
+          },
+          {
+            "end": 6400,
+            "start": 6160,
+            "text": "is"
+          },
+          {
+            "end": 6880,
+            "start": 6400,
+            "text": "sunny"
+          },
+          {
+            "end": 7040,
+            "start": 6880,
+            "text": "with"
+          },
+          {
+            "end": 7440,
+            "start": 7040,
+            "text": "light"
+          },
+          {
+            "end": 8640,
+            "start": 7440,
+            "text": "winds."
+          }
+        ]
+      }
+    ],
+    "text": "This is a synthetic test sentence for validating the McWhisper command line output format.\nThe weather today is sunny with light winds."
+  }
+}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import subprocess
 from types import SimpleNamespace
 
@@ -10,6 +12,7 @@ import pytest
 import sqlite3
 
 from brainlib import diagnostics
+from factories import make_config
 from brainlib.diagnostics import (
     FAIL,
     MODELS_EMPTY,
@@ -376,3 +379,50 @@ class TestRedaction:
         assert exit_code == 0
         output = "\n".join(f"{r.name}: {r.detail}" for r in results)
         assert "super-secret-value" not in output
+
+
+class TestStep2Diagnostics:
+    def test_profiles_pass_when_models_installed(self, config):
+        models_output = (
+            "  ID                                     NAME       SIZE\n"
+            "▸ parakeet-pro:nvidia_parakeet-v3        Parakeet   1.24 GB\n"
+            "  parakeet-pro:nvidia_parakeet-v3_494MB  Parakeet   494 MB\n"
+            "  apple:zh-CN                            Chinese    -\n"
+            "  apple:zh-HK                            Chinese    -\n"
+        )
+        runner = lambda *a, **k: completed(0, stdout=models_output)
+        result = diagnostics.check_transcription_profiles(config, runner=runner)
+        assert result.status == PASS
+
+    def test_profiles_warn_when_model_missing(self, config):
+        models_output = "  ID              NAME    SIZE\n  apple:zh-CN     C       -\n"
+        runner = lambda *a, **k: completed(0, stdout=models_output)
+        result = diagnostics.check_transcription_profiles(config, runner=runner)
+        assert result.status == WARN
+        assert "apple:zh-HK" in result.detail
+
+    def test_profiles_warn_when_mw_models_fails(self, config):
+        runner = lambda *a, **k: completed(1, stderr="no")
+        result = diagnostics.check_transcription_profiles(config, runner=runner)
+        assert result.status == WARN
+
+    def test_audio_tooling_pass_on_macos(self):
+        result = diagnostics.check_audio_tooling()
+        assert result.status in (PASS, WARN)  # depends on host; both are legal
+
+    def test_audio_tooling_warn_when_missing(self, monkeypatch):
+        monkeypatch.setattr(diagnostics.shutil, "which", lambda tool: None)
+        result = diagnostics.check_audio_tooling()
+        assert result.status == WARN
+        assert "afinfo" in result.detail and "afconvert" in result.detail
+
+    def test_legacy_notice_is_warn(self, config):
+        from dataclasses import replace
+
+        assert diagnostics.check_legacy_config(config) is None
+        legacy_config = replace(
+            config, macwhisper=replace(config.macwhisper, legacy_model_notice="legacy key detected")
+        )
+        result = diagnostics.check_legacy_config(legacy_config)
+        assert result is not None
+        assert result.status == WARN

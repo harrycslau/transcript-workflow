@@ -4,21 +4,26 @@ A local-first workflow for transcribing recordings (via MacWhisper Pro's
 `mw` CLI), summarizing and tagging transcripts (via a configurable oMLX
 OpenAI-compatible endpoint), and storing/searching the results locally.
 
-## Step 1 feature boundary
+## Step 2 feature boundary
 
-Step 1 is the project foundation only:
+Step 1 built the foundation (Django skeleton, config loader, diagnostics,
+health endpoint, runtime scaffolding). Step 2 adds the ingestion pipeline:
 
-- Django project skeleton with a minimal home/status page and a JSON
-  health endpoint
-- `brain doctor` system diagnostics CLI
-- YAML configuration with `.env` secret support
-- Runtime directory scaffolding (`data/`), ignored by Git
-- Automated test suite
+- `data/inbox` discovery, file-stability tracking, SHA-256 hashing, and
+  content-based deduplication (the same audio at several paths becomes
+  one recording with multiple sources)
+- sample-based language routing (beginning/middle/end windows) with
+  configurable routing profiles and an oMLX classifier
+- automatic high-confidence routing with full transcription
+  (`routing_verified = false` until a human confirms)
+- low-confidence/ambiguous results → Needs Review, with CLI manual
+  override and retry
+- full MacWhisper transcription, versioned transcripts with ordered
+  segments, and one whole-recording Section per transcript
 
-**Not yet implemented:** transcription, summarization/tagging, database
-models (including tags), search (keyword or semantic), the local web UI
-beyond the status page, and automatic audio retention deletion
-(`retention` is configuration-only and inactive).
+**Not yet implemented:** summaries, tags, search, the web review UI
+(Step 4), topic splitting (Step 6), scheduling, and retention deletion.
+**Audio files are never deleted, moved, or modified in Step 2.**
 
 ## Prerequisites
 
@@ -96,6 +101,9 @@ Checks and their outcomes:
 | Blank summary/embedding model configuration    | WARN              | 0         |
 | Configured model absent from reachable /models | WARN              | 0         |
 | Model not verifiable (no valid /models data)   | WARN              | 0         |
+| Routing profile model not installed            | WARN              | 0         |
+| afinfo/afconvert missing (routing needs review)| WARN              | 0         |
+| Legacy `macwhisper.model` key in use           | WARN              | 0         |
 
 Model verification states: a configured model is PASS only when a valid,
 non-empty `/v1/models` list was retrieved and contains it; it is a WARN
@@ -106,6 +114,77 @@ are always warnings, never crashes; invalid entries inside `data` are
 ignored. `brain doctor` never prints API keys and never fails on missing
 optional external tools; a non-zero exit means a genuine required
 failure (config, storage, or database).
+
+### Pipeline commands
+
+All pipeline commands accept `--json` for stable machine-readable
+output. Mutating commands (`ingest`, `route`, `transcribe`, `run`,
+`retry`) hold an exclusive lock under `data/temp/locks/`; a second
+pipeline process exits with code **3** while one is already running.
+Interrupted attempts are recovered at the start of each mutating
+command (while the lock is held). Transcription timeouts are bounded:
+`cli_timeout_seconds` is the hard maximum cap; short audio gets a small
+minimum allowance and longer audio scales with duration
+(`min(cap, max(minimum, duration-scaled))`).
+
+```sh
+uv run brain ingest          # discover and register stable new WAV files
+uv run brain route           # auto-route pending recordings
+uv run brain transcribe      # transcribe recordings with an approved profile
+uv run brain run             # compose ingest -> route -> transcribe
+uv run brain status --json   # counts and failures
+uv run brain review --json   # recordings needing human attention
+uv run brain retry <id>      # explicitly retry a failed recording
+uv run brain transcripts <id>
+```
+
+### Routing profiles and the routing policy
+
+Routing profiles live under `macwhisper.routing.profiles` in
+`config/config.yaml` (see `config/config.example.yaml`). Default
+profiles: `cantonese` (apple:zh-HK), `mandarin` (apple:zh-CN),
+`european` (parakeet-pro:nvidia_parakeet-v3; Finnish, English, and
+Finnish–English mixtures all route here), and `european_small`
+(installed but manual-only by default).
+
+- **High confidence** (classifier confidence ≥
+  `confidence_threshold`, evidence consistent): the profile is chosen
+  automatically and fully transcribed. The routing decision is stored
+  as `automatic` with `routing_verified = false` — an unverified
+  automatic transcription you can later confirm or correct.
+- **Low confidence / ambiguous / classifier unavailable**: the
+  recording enters **Needs Review**; no full transcription runs until a
+  human chooses a profile.
+- **Manual override**:
+  `brain route <id> --confirm` verifies the active automatic decision
+  without retranscribing; `brain route <id> --profile <name>` selects a
+  profile manually (add `--transcribe-now` to transcribe immediately in
+  the same lock). Selecting a different profile on a transcribed
+  recording schedules a retranscription (`ready_to_transcribe`); the
+  old transcript stays active until the new one succeeds. Selecting the
+  already-active profile on a transcribed recording marks the decision
+  verified without retranscribing. Manual decisions are never
+  overwritten by the automatic router, and retranscription preserves
+  previous transcript versions.
+- **Failures and recovery**: a failed initial transcription leaves the
+  recording `failed` (only `brain retry` reactivates it — `brain run`
+  never retries automatically). A failed *re*transcription keeps the
+  active transcript and sets a queryable retranscription-failure marker
+  (visible in `brain review` / `brain status`); `brain retry` retries
+  it explicitly. Interrupted runs (process death) are recovered
+  automatically at the start of the next mutating command: unfinished
+  attempts are marked `interrupted` and in-flight states return to a
+  safe point; recovered counts appear in `--json` output.
+
+Language routing is heuristic. Cantonese-vs-Mandarin distinction relies
+on colloquial vocabulary evidence plus the oMLX classifier; near-ties
+always go to Needs Review. No routing-accuracy claims are made until
+evaluated against human confirmations on real recordings.
+
+The legacy `macwhisper.model` key still loads (mapped to a warned,
+manual-only `legacy` profile when non-blank); migrate to
+`macwhisper.routing.profiles`. The loader never modifies your
+`config/config.yaml`.
 
 ### Web server
 
@@ -140,13 +219,18 @@ Tests are fully self-contained: they use a temporary configuration,
 mocked subprocess/HTTP calls, and never require MacWhisper, oMLX,
 network access, or real audio.
 
-## Current limitations (Step 1)
+## Current limitations (Step 2)
 
-- No transcription, summarization, tagging, or search yet.
-- `initial_tags` is validated configuration only; no tag models exist.
-- Retention deletion is **not active** — audio files are never touched.
-- The home page is a status page only; HTMX-driven UI comes later.
-- Database migrations exist but there are no models yet.
+- No summaries, tags, keyword/semantic search, or web review UI yet.
+- Automatic Cantonese-vs-Mandarin routing is heuristic and unverified —
+  ambiguous evidence always lands in Needs Review.
+- Router confidence is an uncalibrated score, not a probability.
+- `european_small` is manual-only; retention deletion is **not active**
+  — audio is never deleted (whether routing is verified or not). Whether
+  unverified recordings become deletion-eligible is a separate Step 6
+  policy decision.
+- `brain run` is a local CLI loop; scheduling (launchd) arrives in
+  Step 6.
 
 ## Project layout
 
@@ -155,7 +239,7 @@ config/config.example.yaml   # committed example configuration
 data/                        # runtime data (gitignored, created on demand)
 src/brainlib/                # core library: config, paths, diagnostics, CLI
 src/brain/                   # Django project (settings, urls, wsgi/asgi)
-src/workflow/                # Django app (views, templates, migrations)
+src/workflow/                # Django app (models, services, views, migrations)
 src/manage.py                # conventional Django entry point
-tests/                       # pytest suite
+tests/                       # pytest suite (incl. sanitized MacWhisper fixtures)
 ```
