@@ -1,0 +1,36 @@
+# --- Secrets & local config ---
+.env
+config/config.yaml
+
+# --- Runtime data (never commit) ---
+data/
+
+# Database sidecar files, in case a DB is ever placed outside data/
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Audio / transcripts / exports / logs / temp, if placed outside data/
+*.wav
+*.mp3
+*.m4a
+*.vtt
+*.srt
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# --- Virtual environments ---
+.venv/
+venv/
+
+# --- Test & coverage caches ---
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/

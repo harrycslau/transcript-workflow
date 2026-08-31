@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ app_name }} <small>v{{ version }}</small></h1>
+<p class="muted">Local-first transcript workflow. Status below is a lightweight check; run <code>brain doctor</code> for full diagnostics.</p>
+
+<section>
+  <h2>Storage paths</h2>
+  <ul>
+    {% for label, path in paths.items %}
+    <li><strong>{{ label }}</strong>: <code>{{ path }}</code>{% if not path.exists %} <span class="warn">(missing)</span>{% endif %}</li>
+    {% endfor %}
+  </ul>
+</section>
+
+<section>
+  <h2>MacWhisper</h2>
+  <p>
+    Command: <code>{{ macwhisper.command }}</code><br>
+    {% if macwhisper.found %}
+      <span class="pass">found</span> (presence check only; run <code>brain doctor</code> for version info)
+    {% else %}
+      <span class="warn">not found on PATH</span>
+    {% endif %}
+  </p>
+</section>
+
+<section>
+  <h2>oMLX endpoint</h2>
+  <p>
+    Base URL: <code>{{ omlx.base_url }}</code><br>
+    Summary model: <strong>{{ omlx.summary_model }}</strong><br>
+    Embedding model: <strong>{{ omlx.embedding_model }}</strong><br>
+    <span class="muted">Connectivity is not checked on page load. Run <code>brain doctor</code> to test the endpoint and list models.</span>
+  </p>
+</section>
+
+<section>
+  <h2>Planned tags</h2>
+  <p class="muted">{{ initial_tags|join:", "|default:"none configured" }}</p>
+</section>
+{% endblock %}

@@ -1,0 +1,52 @@
+# Brain example configuration.
+# Copy to config/config.yaml and adjust. Relative paths are resolved
+# against the project root (the directory containing pyproject.toml).
+
+storage:
+  inbox: ./data/inbox
+  database: ./data/database/brain.sqlite3
+  transcripts: ./data/transcripts
+  exports: ./data/exports
+  logs: ./data/logs
+  temp: ./data/temp
+
+macwhisper:
+  command: /usr/local/bin/mw
+  model: null
+  language: auto
+  speakers: true
+  output_format: json
+
+llm:
+  provider: openai_compatible
+  base_url: http://localhost:8000/v1
+  model: ""
+  api_key_env: BRAIN_LLM_API_KEY
+  temperature: 0.2
+  timeout_seconds: 600
+
+embedding:
+  base_url: http://localhost:8000/v1
+  model: ""
+  api_key_env: BRAIN_LLM_API_KEY
+
+retention:
+  enabled: false
+  audio_days: 3
+  delete_mode: permanent
+  require_transcript: true
+  require_summary: true
+
+initial_tags:
+  - name: Family
+    description: Family and household-related content
+  - name: Seminar
+    description: Seminars, talks, workshops, and events
+  - name: Academic
+    description: Research, papers, teaching, and academic work
+  - name: Read2Learn
+    description: Reading notes and learning material
+  - name: WisdomEd
+    description: The WisdomEd project
+  - name: Unknown
+    description: Content that cannot yet be classified
