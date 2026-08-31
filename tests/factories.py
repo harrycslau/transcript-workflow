@@ -11,8 +11,34 @@ from brainlib.config import (
     RoutingConfig,
     RoutingProfile,
     StorageConfig,
+    SummarizationConfig,
     TagSpec,
+    TagsConfig,
 )
+
+
+def default_summarization(**overrides) -> SummarizationConfig:
+    return SummarizationConfig(
+        enabled=overrides.pop("enabled", True),
+        prompt_version=overrides.pop("prompt_version", "1"),
+        max_input_characters=overrides.pop("max_input_characters", 120000),
+        chunk_characters=overrides.pop("chunk_characters", 24000),
+        chunk_overlap_characters=overrides.pop("chunk_overlap_characters", 1000),
+        max_chunk_count=overrides.pop("max_chunk_count", 8),
+        max_total_characters=overrides.pop("max_total_characters", 960000),
+        temperature=overrides.pop("temperature", 0.2),
+        max_output_tokens=overrides.pop("max_output_tokens", 3000),
+    )
+
+
+def default_tags() -> TagsConfig:
+    return TagsConfig(
+        allowed=(
+            TagSpec(name="Family", description="Family matters"),
+            TagSpec(name="Academic", description="Academic work"),
+            TagSpec(name="Unknown", description="Unclassifiable"),
+        )
+    )
 
 
 def default_routing(**overrides) -> RoutingConfig:
@@ -86,6 +112,8 @@ def make_config(tmp_path, **overrides) -> AppConfig:
             "retention",
             RetentionConfig(enabled=False, audio_days=3, delete_mode="permanent", require_transcript=True, require_summary=True),
         ),
+        summarization=overrides.pop("summarization", None) or default_summarization(),
+        tags=overrides.pop("tags", None) or default_tags(),
         initial_tags=overrides.pop("initial_tags", [TagSpec(name="Unknown", description="Unclassifiable")]),
     )
 
@@ -139,10 +167,112 @@ def write_cli_config(tmp_path, monkeypatch, **kwargs):
             "require_transcript": config.retention.require_transcript,
             "require_summary": config.retention.require_summary,
         },
-        "initial_tags": [{"name": t.name, "description": t.description} for t in config.initial_tags],
+        "summarization": {
+            "enabled": config.summarization.enabled,
+            "prompt_version": config.summarization.prompt_version,
+            "max_input_characters": config.summarization.max_input_characters,
+            "chunk_characters": config.summarization.chunk_characters,
+            "chunk_overlap_characters": config.summarization.chunk_overlap_characters,
+            "max_chunk_count": config.summarization.max_chunk_count,
+            "max_total_characters": config.summarization.max_total_characters,
+            "temperature": config.summarization.temperature,
+            "max_output_tokens": config.summarization.max_output_tokens,
+        },
+        "tags": {
+            "allowed": [{"name": t.name, "description": t.description} for t in config.tags.allowed]
+        },
         "timezone": config.timezone,
     }
     path = tmp_path / "cli-config.yaml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     monkeypatch.setenv("BRAIN_CONFIG", str(path))
     return config
+
+
+# ---------------------------------------------------------------------------
+# Synthetic recordings / transcripts / oMLX responses (no audio files)
+# ---------------------------------------------------------------------------
+
+
+def make_transcribed_recording(texts, *, sha: str | None = None, summary_status=None):
+    """Create a Recording with an active transcript, segments, a
+    whole-recording Section, and a successful transcription attempt.
+
+    No AudioSource is created: summarization must work without any WAV.
+    Returns (recording, transcript, section).
+    """
+    from django.utils import timezone as tz
+
+    from workflow.models import (
+        AttemptOutcome,
+        AttemptStage,
+        ProcessingAttempt,
+        ProcessingStatus,
+        Recording,
+        Section,
+        SummaryState,
+        Transcript,
+        TranscriptSegment,
+    )
+
+    recording = Recording.objects.create(
+        sha256=sha or f"synthetic-{Recording.objects.count()}-{tz.now().timestamp()}",
+        duration_seconds=60.0,
+        processing_status=ProcessingStatus.TRANSCRIBED,
+        summary_status=SummaryState.MISSING if summary_status is None else summary_status,
+    )
+    attempt = ProcessingAttempt.objects.create(
+        recording=recording,
+        stage=AttemptStage.TRANSCRIPTION,
+        ordinal=1,
+        outcome=AttemptOutcome.SUCCESS,
+        finished_at=tz.now(),
+    )
+    transcript = Transcript.objects.create(
+        recording=recording, attempt=attempt, text_normalized="\n".join(texts)
+    )
+    TranscriptSegment.objects.bulk_create(
+        [
+            TranscriptSegment(
+                transcript=transcript, ordinal=i, start_ms=i * 1000, end_ms=(i + 1) * 1000, text=text
+            )
+            for i, text in enumerate(texts)
+        ]
+    )
+    section = Section.objects.create(transcript=transcript, ordinal=0, title="Full recording")
+    transcript.is_active = True
+    transcript.activated_at = tz.now()
+    transcript.save()
+    return recording, transcript, section
+
+
+def omlx_envelope(content: str) -> dict:
+    """An OpenAI-compatible chat-completion envelope carrying ``content``."""
+    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+
+
+def final_summary_json(**overrides) -> str:
+    """A valid final-schema model response as a JSON string."""
+    payload = {
+        "title": "Meeting about grading",
+        "overview": "Discussed grading plans.",
+        "key_points": ["Grading starts Monday"],
+        "action_items": [{"text": "Prepare rubric", "owner": None, "due_date": None}],
+        "people": ["Alice"],
+        "organizations": [],
+        "topics": ["grading"],
+        "suggested_tags": ["Academic"],
+        "language": "en",
+    }
+    payload.update(overrides)
+    import json
+
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def map_summary_json(**overrides) -> str:
+    payload = {"overview": "Part summary.", "key_points": ["Point one"]}
+    payload.update(overrides)
+    import json
+
+    return json.dumps(payload, ensure_ascii=False)

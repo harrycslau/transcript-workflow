@@ -68,9 +68,13 @@ class TestExampleConfig:
         assert config.macwhisper.speakers is True
         assert config.retention.enabled is False
         assert config.retention.audio_days == 3
-        assert [t.name for t in config.initial_tags] == [
+        assert [t.name for t in config.tags.allowed] == [
             "Family", "Seminar", "Academic", "Read2Learn", "WisdomEd", "Unknown",
         ]
+        assert config.summarization.enabled is True
+        assert config.summarization.max_input_characters == 120000
+        assert config.summarization.chunk_characters == 24000
+        assert config.summarization.max_total_characters == 960000
 
     def test_relative_paths_resolve_against_project_root(self):
         config = load_config(EXAMPLE)

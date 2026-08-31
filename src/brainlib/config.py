@@ -124,6 +124,25 @@ _DEFAULTS: dict[str, Any] = {
         "require_transcript": True,
         "require_summary": True,
     },
+    "summarization": {
+        "enabled": True,
+        "prompt_version": "1",
+        # Per-REQUEST hard cap on the fully serialized request payload
+        # (dynamic transcript/reduce input plus static prompt scaffolding
+        # and JSON escaping). Not a total-transcript limit.
+        "max_input_characters": 120000,
+        "chunk_characters": 24000,
+        "chunk_overlap_characters": 1000,
+        "max_chunk_count": 8,
+        # Absolute total-processable transcript limit; exceeding it fails
+        # cleanly with input_too_large (never truncates).
+        "max_total_characters": 960000,
+        "temperature": 0.2,
+        "max_output_tokens": 3000,
+    },
+    "tags": {
+        "allowed": [],
+    },
     "initial_tags": [],
     "timezone": "Europe/Helsinki",
 }
@@ -202,9 +221,34 @@ class RetentionConfig:
 
 
 @dataclass(frozen=True)
+class SummarizationConfig:
+    enabled: bool
+    prompt_version: str
+    max_input_characters: int
+    chunk_characters: int
+    chunk_overlap_characters: int
+    max_chunk_count: int
+    max_total_characters: int
+    temperature: float
+    max_output_tokens: int
+
+
+@dataclass(frozen=True)
+class TagsConfig:
+    allowed: tuple[TagSpec, ...]
+
+
+@dataclass(frozen=True)
 class TagSpec:
     name: str
     description: str
+
+
+def tag_name_key(name: str) -> str:
+    """Normalized, case-insensitive tag identity (NFC, trimmed, casefolded)."""
+    import unicodedata
+
+    return unicodedata.normalize("NFC", name).strip().casefold()
 
 
 @dataclass(frozen=True)
@@ -215,8 +259,11 @@ class AppConfig:
     llm: LLMConfig
     embedding: EmbeddingConfig
     retention: RetentionConfig
-    initial_tags: list[TagSpec] = field(default_factory=list)
+    summarization: SummarizationConfig
+    tags: TagsConfig
+    initial_tags: list[TagSpec] = field(default_factory=list)  # legacy alias
     timezone: str = "Europe/Helsinki"
+    legacy_tags_notice: str | None = None
 
     def api_key_for(self, api_key_env: str) -> str | None:
         """Return the secret named by ``api_key_env``, or None.
@@ -443,6 +490,7 @@ def _parse_retention(raw: dict[str, Any]) -> RetentionConfig:
 
 
 def _parse_tags(raw: dict[str, Any]) -> list[TagSpec]:
+    """Parse the legacy top-level ``initial_tags`` list."""
     tags = raw.get("initial_tags", _DEFAULTS["initial_tags"])
     if not isinstance(tags, list):
         raise ConfigError(f"[initial_tags] must be a list, got {type(tags).__name__}")
@@ -458,6 +506,106 @@ def _parse_tags(raw: dict[str, Any]) -> list[TagSpec]:
             raise ConfigError(f"[initial_tags] entry {index}: 'description' must be a string")
         parsed.append(TagSpec(name=name, description=description))
     return parsed
+
+
+def _validate_tag_entries(entries: Any, path: str) -> list[TagSpec]:
+    """Validate a list of {name, description} tag mappings."""
+    if not isinstance(entries, list):
+        raise ConfigError(f"[{path}] must be a list, got {type(entries).__name__}")
+    parsed: list[TagSpec] = []
+    seen: dict[str, str] = {}
+    for index, item in enumerate(entries):
+        if not isinstance(item, dict):
+            raise ConfigError(f"[{path}] entry {index} must be a mapping")
+        name = item.get("name")
+        description = item.get("description")
+        if not isinstance(name, str) or not name.strip():
+            raise ConfigError(f"[{path}] entry {index}: 'name' must be a non-empty string")
+        if not isinstance(description, str):
+            raise ConfigError(f"[{path}] entry {index}: 'description' must be a string")
+        key = tag_name_key(name)
+        if not key:
+            raise ConfigError(f"[{path}] entry {index}: 'name' must not be blank")
+        if key in seen:
+            raise ConfigError(
+                f"[{path}] entry {index}: duplicate tag name '{name}' "
+                f"(differs only by case/whitespace from entry '{seen[key]}')"
+            )
+        seen[key] = name
+        parsed.append(TagSpec(name=name, description=description))
+    return parsed
+
+
+def _parse_tags_config(raw: dict[str, Any]) -> tuple[TagsConfig, list[TagSpec], str | None]:
+    """Parse ``tags.allowed`` with the legacy ``initial_tags`` alias.
+
+    Returns (tags_config, legacy_initial_tags, notice). ``tags.allowed``
+    is authoritative when present; ``initial_tags`` seeds it otherwise
+    (with a migration notice, mirroring legacy ``macwhisper.model``).
+    """
+    initial_tags = _parse_tags(raw)
+    tags_section = raw.get("tags")
+    if tags_section is None:
+        if initial_tags:
+            return (
+                TagsConfig(allowed=tuple(initial_tags)),
+                initial_tags,
+                "legacy 'initial_tags' is now 'tags.allowed'; migrate the key",
+            )
+        return TagsConfig(allowed=()), initial_tags, None
+    if not isinstance(tags_section, dict):
+        raise ConfigError(f"[tags] must be a mapping, got {type(tags_section).__name__}")
+    allowed = _validate_tag_entries(tags_section.get("allowed", []), "tags.allowed")
+    notice = None
+    if raw.get("initial_tags"):
+        notice = (
+            "legacy 'initial_tags' is ignored because 'tags.allowed' is configured; "
+            "remove the legacy key"
+        )
+    return TagsConfig(allowed=tuple(allowed)), initial_tags, notice
+
+
+def _parse_summarization(raw: dict[str, Any]) -> SummarizationConfig:
+    s = _section(raw, "summarization")
+    enabled = _get(s, "enabled", "summarization", bool)
+    prompt_version = _get_nonblank(s, "prompt_version", "summarization")
+    max_input = _get_number(s, "max_input_characters", "summarization", int, positive=True)
+    chunk = _get_number(s, "chunk_characters", "summarization", int, positive=True)
+    overlap = _get_number(s, "chunk_overlap_characters", "summarization", int)
+    max_chunks = _get_number(s, "max_chunk_count", "summarization", int, positive=True)
+    max_total = _get_number(s, "max_total_characters", "summarization", int, positive=True)
+    temperature = _get_number(s, "temperature", "summarization", (int, float))
+    max_output_tokens = _get_number(s, "max_output_tokens", "summarization", int, positive=True)
+    if overlap < 0:
+        raise ConfigError(f"[summarization]: 'chunk_overlap_characters' must be >= 0, got {overlap}")
+    if overlap >= chunk:
+        raise ConfigError(
+            f"[summarization]: 'chunk_overlap_characters' ({overlap}) must be smaller than "
+            f"'chunk_characters' ({chunk})"
+        )
+    if chunk > max_input:
+        raise ConfigError(
+            f"[summarization]: 'chunk_characters' ({chunk}) must not exceed the per-request "
+            f"limit 'max_input_characters' ({max_input})"
+        )
+    if max_total < max_input:
+        raise ConfigError(
+            f"[summarization]: 'max_total_characters' ({max_total}) must be at least "
+            f"'max_input_characters' ({max_input})"
+        )
+    if not 0.0 <= float(temperature) <= 2.0:
+        raise ConfigError(f"[summarization]: 'temperature' must be between 0 and 2, got {temperature}")
+    return SummarizationConfig(
+        enabled=enabled,
+        prompt_version=prompt_version,
+        max_input_characters=max_input,
+        chunk_characters=chunk,
+        chunk_overlap_characters=overlap,
+        max_chunk_count=max_chunks,
+        max_total_characters=max_total,
+        temperature=float(temperature),
+        max_output_tokens=max_output_tokens,
+    )
 
 
 def _parse_timezone(raw: dict[str, Any]) -> str:
@@ -516,6 +664,7 @@ def load_config(path: Path | None = None, *, env_file: Path | None = None) -> Ap
     # Relative storage paths resolve against the project root, regardless
     # of where the config file itself lives.
     base = project_root()
+    tags_config, initial_tags, legacy_tags_notice = _parse_tags_config(raw)
     return AppConfig(
         config_path=selected,
         storage=_parse_storage(raw, base),
@@ -523,6 +672,9 @@ def load_config(path: Path | None = None, *, env_file: Path | None = None) -> Ap
         llm=_parse_llm(raw),
         embedding=_parse_embedding(raw),
         retention=_parse_retention(raw),
-        initial_tags=_parse_tags(raw),
+        summarization=_parse_summarization(raw),
+        tags=tags_config,
+        initial_tags=initial_tags,
         timezone=_parse_timezone(raw),
+        legacy_tags_notice=legacy_tags_notice,
     )

@@ -42,10 +42,17 @@
     <li><strong>Transcribed</strong>: {{ pipeline_counts.transcribed }}</li>
     <li><strong>Failed</strong>: {{ pipeline_counts.failed }}</li>
   </ul>
+  <h3>Summaries</h3>
+  <ul>
+    <li><strong>Awaiting summary</strong>: {{ pipeline_counts.awaiting_summary }}</li>
+    <li><strong>Summarized</strong>: {{ pipeline_counts.summarized }}</li>
+    <li><strong>Summary failed</strong>: {{ pipeline_counts.summary_failed }}</li>
+    <li><strong>Failed re-summarization</strong>: {{ pipeline_counts.failed_resummarization }}</li>
+  </ul>
 </section>
 
 <section>
-  <h2>Planned tags</h2>
-  <p class="muted">{{ initial_tags|join:", "|default:"none configured" }}</p>
+  <h2>Configured tags</h2>
+  <p class="muted">{{ configured_tags|join:", "|default:"none configured" }}</p>
 </section>
 {% endblock %}

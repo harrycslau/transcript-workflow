@@ -57,6 +57,7 @@ def _lightweight_status(config: AppConfig) -> dict:
             "checked_on_page": False,
         },
         "initial_tags": [tag.name for tag in config.initial_tags],
+        "configured_tags": [tag.name for tag in config.tags.allowed],
     }
 
 
@@ -64,9 +65,10 @@ def _pipeline_counts() -> dict[str, int]:
     """Lightweight DB aggregate for the status page (read-only, fast)."""
     from django.db.models import Count
 
-    from workflow.models import ProcessingStatus, Recording
+    from workflow.models import ProcessingStatus, Recording, SummaryState
 
     counts = dict(Recording.objects.values_list("processing_status").annotate(total=Count("pk")))
+    transcribed = Recording.objects.filter(processing_status=ProcessingStatus.TRANSCRIBED)
     return {
         "discovered": counts.get(ProcessingStatus.DISCOVERED, 0)
         + counts.get(ProcessingStatus.HASHING, 0)
@@ -74,6 +76,13 @@ def _pipeline_counts() -> dict[str, int]:
         "needs_review": counts.get(ProcessingStatus.NEEDS_REVIEW, 0),
         "transcribed": counts.get(ProcessingStatus.TRANSCRIBED, 0),
         "failed": counts.get(ProcessingStatus.FAILED, 0),
+        # Summarization counts (DB-only; never triggers oMLX work).
+        "awaiting_summary": transcribed.filter(summary_status=SummaryState.MISSING).count(),
+        "summary_failed": Recording.objects.filter(summary_status=SummaryState.FAILED).count(),
+        "summarized": transcribed.filter(
+            summary_status=SummaryState.CURRENT, resummarization_failed=False
+        ).count(),
+        "failed_resummarization": Recording.objects.filter(resummarization_failed=True).count(),
     }
 
 

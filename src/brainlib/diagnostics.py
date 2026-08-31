@@ -395,6 +395,8 @@ def run_doctor() -> tuple[list[CheckResult], int]:
     legacy = check_legacy_config(config)
     if legacy is not None:
         results.append(legacy)
+    if config.legacy_tags_notice:
+        results.append(CheckResult("Legacy tags", WARN, config.legacy_tags_notice))
     results.append(redact_secret_check(config))
 
     omlx_result, models, state = check_omlx(config.llm.base_url, config.llm.api_key_env)

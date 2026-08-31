@@ -58,9 +58,21 @@ retention:
   require_transcript: true
   require_summary: true
 
-initial_tags:
-  - name: Unknown
-    description: Content that cannot yet be classified
+summarization:
+  enabled: true
+  prompt_version: "1"
+  max_input_characters: 120000
+  chunk_characters: 24000
+  chunk_overlap_characters: 1000
+  max_chunk_count: 8
+  max_total_characters: 960000
+  temperature: 0.2
+  max_output_tokens: 3000
+
+tags:
+  allowed:
+    - name: Unknown
+      description: Content that cannot yet be classified
 """,
     encoding="utf-8",
 )

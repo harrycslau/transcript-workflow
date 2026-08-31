@@ -26,6 +26,7 @@ from workflow.models import (
     Recording,
     RoutingDecision,
     RoutingMethod,
+    SummaryState,
 )
 from workflow.services import ingest as ingest_service
 from workflow.services import routing as routing_service
@@ -144,10 +145,21 @@ def recover_interruptions(config: AppConfig) -> dict:
     Must be called while the caller holds the global pipeline lock (so
     no live pipeline process can own the recovered rows). Idempotent:
     repeated calls with nothing to recover return zero counts.
+
+    Stage-aware: only Recordings whose SUMMARIZATION attempt was actually
+    recovered receive summary reconciliation (with that specific
+    interrupted attempt as the authoritative event). An interrupted
+    routing or transcription attempt never changes summary retry
+    eligibility — a ``failed`` Summary stays ``failed`` and is never
+    reopened for automatic retry.
     """
     now = timezone.now()
     recovered_attempts = 0
     recovered_recordings = 0
+    # Recording IDs by the stage of the attempt that was recovered, and
+    # the recovered summarization attempts themselves (authoritative
+    # recovery events for summary reconciliation).
+    recovered_summarization: list[tuple[str, ProcessingAttempt]] = []
 
     with transaction.atomic():
         stale = ProcessingAttempt.objects.filter(finished_at__isnull=True).select_related("recording")
@@ -160,6 +172,8 @@ def recover_interruptions(config: AppConfig) -> dict:
             attempt.save()
             recovered_attempts += 1
             touched_recordings.add(attempt.recording_id)
+            if attempt.stage == AttemptStage.SUMMARIZATION:
+                recovered_summarization.append((attempt.recording_id, attempt))
 
         # Orphan in-flight recording states (process died between the
         # status change and attempt creation, or after attempt recovery).
@@ -198,6 +212,18 @@ def recover_interruptions(config: AppConfig) -> dict:
             elif recording.processing_status == ProcessingStatus.DISCOVERED:
                 transition(recording, ProcessingStatus.ROUTING)
                 recording.save()
+
+        # Summary reconciliation ONLY for recordings whose summarization
+        # attempt was recovered in this pass: an interrupted
+        # summarization attempt counts as the transcript's one automatic
+        # attempt (failed / warned, explicit retry required). Unrelated
+        # routing/transcription interruptions never touch summary state.
+        from workflow.services.summarize import reconcile_recording_summary_state
+
+        for recording_id, attempt in recovered_summarization:
+            recording = Recording.objects.filter(pk=recording_id).first()
+            if recording is not None:
+                reconcile_recording_summary_state(recording, recovered_attempt=attempt)
 
     return {
         "recovered_attempts": recovered_attempts,
@@ -561,11 +587,15 @@ def transcribe_one(config: AppConfig, recording: Recording) -> dict:
     }
 
 
-def retry(config: AppConfig, recording: Recording) -> dict:
-    """Explicit retry of a failed recording or a failed retranscription.
+def retry(config: AppConfig, recording: Recording, transport=None) -> dict:
+    """Explicit retry of a failed recording, a failed retranscription, or
+    a failed/interrupted summarization.
 
     Normal ``brain run`` never retries automatically; only this command
-    reactivates the failed stage.
+    reactivates the failed stage. Transcription-stage failures take
+    precedence; a ``summary_status=failed`` recording (or a failed
+    re-summarization, ``resummarization_failed``) is retried through the
+    summarization path.
     """
     with transaction.atomic():
         recording = Recording.objects.select_for_update().get(pk=recording.pk)
@@ -573,21 +603,53 @@ def retry(config: AppConfig, recording: Recording) -> dict:
             recording.processing_status == ProcessingStatus.TRANSCRIBED
             and recording.retranscription_failed
         )
-        if recording.processing_status != ProcessingStatus.FAILED and not is_failed_retranscription:
+        is_failed_summary = (
+            recording.processing_status == ProcessingStatus.TRANSCRIBED
+            and not is_failed_retranscription
+            and (recording.summary_status == SummaryState.FAILED or recording.resummarization_failed)
+        )
+        if (
+            recording.processing_status != ProcessingStatus.FAILED
+            and not is_failed_retranscription
+            and not is_failed_summary
+        ):
             return {
                 "recording_id": recording.pk,
                 "result": "skipped",
                 "status": recording.processing_status,
             }
-        if is_failed_retranscription:
+        if is_failed_summary:
+            # Durable failure markers are NOT cleared here: the retry's
+            # attempt becomes visible only when created, and success/
+            # failure states are (re)asserted atomically by
+            # summarize_one's persistence or failure path. If the process
+            # dies before attempt creation, the old marker survives.
+            regenerate = recording.resummarization_failed
+        elif is_failed_retranscription:
             recording.failure_stage = ""
             recording.processing_status = ProcessingStatus.READY_TO_TRANSCRIBE
+            recording.save()
         elif (recording.failure_stage or FailureStage.ROUTING) == FailureStage.ROUTING:
             transition(recording, ProcessingStatus.ROUTING)
+            recording.save()
         else:
             recording.failure_stage = ""
             recording.processing_status = ProcessingStatus.READY_TO_TRANSCRIBE
-        recording.save()
+            recording.save()
+    if is_failed_summary:
+        from workflow.services.summarize import summarize_one
+
+        summary_result = summarize_one(
+            config, Recording.objects.get(pk=recording.pk),
+            regenerate=regenerate, transport=transport,
+        )
+        return {
+            "recording_id": recording.pk,
+            "result": "retried",
+            "stage": "summarization",
+            "summarize_result": summary_result,
+            "summary_status": Recording.objects.get(pk=recording.pk).summary_status,
+        }
     if recording.processing_status == ProcessingStatus.ROUTING:
         route_one(config, Recording.objects.get(pk=recording.pk))
     else:
@@ -601,7 +663,14 @@ def retry(config: AppConfig, recording: Recording) -> dict:
 
 
 def run_pipeline(config: AppConfig) -> dict:
-    """Compose recover -> ingest -> route -> transcribe. Caller holds the lock."""
+    """Compose recover -> ingest -> route -> transcribe -> summarize.
+
+    Caller holds the lock. The summarization stage only processes
+    never-attempted recordings (``summary_status=missing``); it never
+    retries failed summaries or regenerates current ones.
+    """
+    from workflow.services.summarize import summarize_pending
+
     recovery = recover_interruptions(config)
     ingest_report = run_ingest(config)
     # Newly hashed recordings enter the routing stage.
@@ -612,11 +681,13 @@ def run_pipeline(config: AppConfig) -> dict:
             recording.save()
     routing_results = route_pending(config)
     transcription_results = transcribe_ready(config)
+    summarization_results = summarize_pending(config)
     return {
         "recovery": recovery,
         "ingest": ingest_report,
         "routing": routing_results,
         "transcription": transcription_results,
+        "summarization": summarization_results,
     }
 
 

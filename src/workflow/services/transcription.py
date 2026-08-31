@@ -35,6 +35,7 @@ from workflow.models import (
     ProcessingStatus,
     Recording,
     Section,
+    SummaryState,
     Transcript,
     TranscriptSegment,
 )
@@ -389,6 +390,11 @@ def _persist_transcript(
         recording.failure_stage = ""
         recording.retranscription_failed = False
         recording.last_failed_attempt = None
+        # The new active transcript has no summary yet: the previous
+        # summary stays active on the old transcript (historically valid)
+        # but is no longer current for this recording.
+        recording.summary_status = SummaryState.MISSING
+        recording.resummarization_failed = False
         recording.save()
         attempt.outcome = AttemptOutcome.SUCCESS
         attempt.finished_at = now

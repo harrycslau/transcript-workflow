@@ -60,6 +60,26 @@ llm:
   temperature: 0.2
   timeout_seconds: 600
 
+# Step 3 summarization. Limits are in characters:
+# - max_input_characters: per-REQUEST hard cap on the fully serialized
+#   request payload (dynamic input plus prompt scaffolding and JSON
+#   escaping). Not a total-transcript limit.
+# - chunk_characters / chunk_overlap_characters: map-stage chunk target
+#   and trailing-segment overlap (overlap < chunk_characters).
+# - max_chunk_count / max_total_characters: hard caps on map calls and
+#   total transcript size. Exceeding either fails cleanly with
+#   input_too_large (never truncates) and creates no Summary.
+summarization:
+  enabled: true
+  prompt_version: "1"
+  max_input_characters: 120000
+  chunk_characters: 24000
+  chunk_overlap_characters: 1000
+  max_chunk_count: 8
+  max_total_characters: 960000
+  temperature: 0.2
+  max_output_tokens: 3000
+
 embedding:
   base_url: http://localhost:8000/v1
   model: ""
@@ -72,16 +92,19 @@ retention:
   require_transcript: true
   require_summary: true
 
-initial_tags:
-  - name: Family
-    description: Family and household-related content
-  - name: Seminar
-    description: Seminars, talks, workshops, and events
-  - name: Academic
-    description: Research, papers, teaching, and academic work
-  - name: Read2Learn
-    description: Reading notes and learning material
-  - name: WisdomEd
-    description: The WisdomEd project
-  - name: Unknown
-    description: Content that cannot yet be classified
+# Configurable multi-select tags (Step 3). Add or remove entries freely:
+# removed tags are retired (kept on historical records), never deleted.
+tags:
+  allowed:
+    - name: Family
+      description: Family, relatives, home and personal family matters
+    - name: Seminar
+      description: Seminars, workshops, talks and conferences
+    - name: Academic
+      description: Research, teaching and academic work
+    - name: Read2Learn
+      description: Notes or reflections from reading
+    - name: WisdomEd
+      description: Wisdom Education work and related planning
+    - name: Unknown
+      description: Use only when no configured tag fits
