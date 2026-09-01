@@ -46,7 +46,11 @@ uv sync
 # 2. Create your local configuration
 cp config/config.example.yaml config/config.yaml
 
-# 3. Optionally create .env for secrets
+# 3. Create the application database schema
+#    (REQUIRED before doctor/run/serve; the app never migrates itself)
+uv run python src/manage.py migrate
+
+# 4. Optionally create .env for secrets
 cp .env.example .env
 ```
 
@@ -70,7 +74,7 @@ cp .env.example .env
 
 ```
 data/
-  inbox/        # WAV recordings to process (scanned in a later step)
+  inbox/        # WAV, MP3, and M4A recordings to process
   database/     # SQLite database (brain.sqlite3)
   transcripts/  # transcript output
   exports/      # exported notes
@@ -136,7 +140,7 @@ minimum allowance and longer audio scales with duration
 (`min(cap, max(minimum, duration-scaled))`).
 
 ```sh
-uv run brain ingest          # discover and register stable new WAV files
+uv run brain ingest          # discover stable WAV, MP3, and M4A files
 uv run brain route           # auto-route pending recordings
 uv run brain transcribe      # transcribe recordings with an approved profile
 uv run brain run             # ingest -> route -> transcribe -> summarize

@@ -122,6 +122,55 @@ def check_sqlite_connection(config: AppConfig) -> CheckResult:
     return CheckResult("SQLite connection", PASS, str(config.storage.database))
 
 
+def _ensure_django_ready() -> None:
+    """Initialize Django when doctor runs without it (fresh CLI process).
+
+    Doctor's other checks deliberately use raw sqlite3/httpx and never
+    configure Django; the migration check needs Django's connection and
+    migration graph. No-op when Django is already up (tests, health).
+    """
+    import os
+
+    import django
+    from django.apps import apps
+
+    if not apps.ready:
+        os.environ.setdefault("DJANGO_SETTINGS_MODULE", "brain.settings")
+        django.setup()
+
+
+def check_migrations() -> CheckResult:
+    """Every migration required by the current code must be applied.
+
+    Read-only inspection via Django's migration APIs (see
+    :mod:`brainlib.migrations`); never applies migrations. A reachable
+    database that is behind the application schema is a FAIL — ORM work
+    against it would crash (e.g. missing columns).
+    """
+    from brainlib.migrations import (
+        MigrationInspectionError,
+        RECOVERY_COMMAND,
+        summarize_pending,
+        unapplied_migrations,
+    )
+
+    try:
+        _ensure_django_ready()
+    except Exception:
+        return CheckResult("Database migrations", FAIL, "cannot verify: application initialization failed")
+    try:
+        pending = unapplied_migrations()
+    except MigrationInspectionError as exc:
+        return CheckResult("Database migrations", FAIL, f"cannot verify: {exc.category}")
+    if not pending:
+        return CheckResult("Database migrations", PASS, "all migrations applied")
+    return CheckResult(
+        "Database migrations",
+        FAIL,
+        f"{summarize_pending(pending)}; apply with: {RECOVERY_COMMAND}",
+    )
+
+
 def check_fts5() -> CheckResult:
     try:
         conn = sqlite3.connect(":memory:")
@@ -388,6 +437,7 @@ def run_doctor() -> tuple[list[CheckResult], int]:
     results.append(check_runtime_dirs(config))
     results.append(check_database_location(config))
     results.append(check_sqlite_connection(config))
+    results.append(check_migrations())
     results.append(check_fts5())
     results.append(check_macwhisper(config))
     results.append(check_transcription_profiles(config))

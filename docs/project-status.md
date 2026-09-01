@@ -131,6 +131,31 @@ standing rules.
   suppression survival, escaping, Unicode exports, GET purity with
   subprocess/httpx raise-guards.
 
+## Migration readiness (post-Step-4 hardening)
+
+- `brainlib/migrations.py`: read-only inspection via Django's
+  `MigrationExecutor`/`MigrationRecorder` (graph leaf plan +
+  explicit `check_consistent_history`); stable sanitized categories
+  for unavailable table / inconsistent history; never applies
+  migrations, never shells out to manage.py.
+- `brain doctor` gained a `Database migrations` check (after the
+  SQLite connection check): PASS `all migrations applied`, or FAIL
+  with pending labels (`workflow.0003_...` style) and the recovery
+  command. Inspection failure is FAIL with a stable category; raw
+  exception text never appears.
+- Shared CLI schema preflight (`_require_applied_migrations`) runs in
+  every ORM command (run/ingest/route/transcribe/summarize/retry/
+  status/review/transcripts/summaries/summary/tags, read-only and
+  `--sync` alike) BEFORE lock acquisition/recovery/ORM/file/network
+  work: pending migrations -> exit 1, concise actionable stderr with
+  `uv run python src/manage.py migrate`, no traceback, no rows, no
+  locks, no subprocess/network/inbox access, never auto-migrates.
+- `brain serve` checks migration readiness after `django.setup()` and
+  before binding: pending migrations -> exit 1, same message, the
+  runserver machinery is never started.
+- Exit codes unchanged: 0 ok, 1 config/setup (incl. pending
+  migrations), 2 usage, 3 lock busy.
+
 ## Step 1 — delivered
 
 - `uv`-managed project (Python 3.12, Django 5.2 LTS, SQLite).
@@ -279,7 +304,7 @@ keeps the active transcript and sets `retranscription_failed`.
 - `pipeline_lock.py` — `flock` at `data/temp/locks/pipeline.lock`;
   mutating commands hold it, contention exits 3; recovery runs under
   the lock.
-- `ingest.py` — case-insensitive WAV discovery restricted to the
+- `ingest.py` — case-insensitive WAV/MP3/M4A discovery restricted to the
   configured inbox (symlinks out are ignored), persisted stability
   observations, verified SHA-256 (size/mtime re-checked around
   hashing), content-identity dedup (one Recording, many AudioSources),

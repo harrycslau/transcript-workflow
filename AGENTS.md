@@ -7,7 +7,7 @@ development phases of this project, not per-task status (see
 ## Project purpose and principles
 
 Brain is a **local-first, privacy-preserving transcript workflow** for
-personal WAV recordings: discover → route language → transcribe via
+personal audio recordings (WAV/MP3/M4A): discover → route language → transcribe via
 MacWhisper (`mw` CLI) → summarize/tag via a local oMLX
 OpenAI-compatible endpoint → (later) search and split.
 
@@ -86,7 +86,7 @@ Non-negotiable principles:
   profile changes append a new decision.
 - `processing_status` (pipeline) and `audio_status`
   (present/missing) are orthogonal; deleting a transcribed
-  recording's WAV keeps it `transcribed` + `audio_status=missing`
+  recording's source audio keeps it `transcribed` + `audio_status=missing`
   with all history intact.
 - Summaries are versioned structured data belonging to a Transcript and
   Section. The current Recording summary is derived from the active
@@ -122,7 +122,7 @@ Non-negotiable principles:
 - Recovery is stage-aware: routing/transcription interruption must not
   alter summary eligibility or failure markers. Only a recovered
   summarization attempt receives summary interruption reconciliation.
-- Summarization uses the complete stored Transcript, never the WAV. Long
+- Summarization uses the complete stored Transcript, never the source audio. Long
   input is deterministically chunked and hierarchically reduced; it is
   never silently truncated. Every request and response is bounded.
 
@@ -158,11 +158,19 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- Migrations `0001`–`0004` define the current Steps 1–3 schema; add NEW
-  migrations, never edit existing/applied ones. Enforce invariants with
-  DB constraints (partial uniques),
-  not just application logic. Run `makemigrations --check` in
-  verification.
+- Migrations `0001`–`0005` define the current schema (0005 is the
+  Step 4 tag-suppression migration); add NEW migrations, never edit
+  existing/applied ones. Enforce invariants with DB constraints
+  (partial uniques, check constraints), not just application logic.
+  Run `makemigrations --check` in verification.
+- Migration readiness is enforced, never assumed: `brain doctor`
+  carries a `Database migrations` check (read-only via Django's
+  `MigrationExecutor`; see `brainlib/migrations.py`), and every ORM
+  CLI command plus `brain serve` runs a shared schema preflight
+  BEFORE any lock/recovery/ORM/file/network work. Pending migrations
+  mean exit 1 with a concise actionable message naming
+  `uv run python src/manage.py migrate` — never a traceback, never
+  automatic migration.
 
 ## Testing and verification
 

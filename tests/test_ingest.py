@@ -16,6 +16,7 @@ from workflow.models import AudioStatus, AudioSource, DiscoveryState, Processing
 pytestmark = pytest.mark.django_db
 
 from workflow.services.ingest import (
+    discover_audio_files,
     discover_wavs,
     ingest,
     normalize_identity,
@@ -55,6 +56,47 @@ class TestDiscovery:
         found = discover_wavs(config.storage.inbox)
         assert len(found) == 2
         assert all(p.suffix.casefold() == ".wav" for p in found)
+
+    def test_supported_mp3_and_m4a_extensions_are_case_insensitive(self, tmp_path):
+        config = make_config(tmp_path)
+        inbox = config.storage.inbox
+        inbox.mkdir(parents=True, exist_ok=True)
+        (inbox / "talk.mp3").write_bytes(b"fake-mp3")
+        (inbox / "memo.MP3").write_bytes(b"fake-mp3-upper")
+        (inbox / "voice.m4a").write_bytes(b"fake-m4a")
+        (inbox / "meeting.M4A").write_bytes(b"fake-m4a-upper")
+        (inbox / "notes.txt").write_text("not audio")
+
+        found = discover_audio_files(inbox)
+
+        assert {path.name for path in found} == {
+            "talk.mp3", "memo.MP3", "voice.m4a", "meeting.M4A",
+        }
+        # The historical public helper remains compatible but now
+        # discovers the complete supported audio set.
+        assert found == discover_wavs(inbox)
+
+    @pytest.mark.parametrize("filename", ["recording.mp3", "recording.M4A"])
+    def test_non_wav_audio_observes_stability_then_hashes(self, tmp_path, filename):
+        config = make_config(tmp_path, file_stable_seconds=30)
+        path = config.storage.inbox / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"representative encoded audio bytes")
+
+        first = ingest(config)
+        assert first.new_sources == [str(path.resolve())]
+        assert first.skipped_unstable == [str(path.resolve())]
+        assert first.hashed == []
+
+        AudioSource.objects.update(
+            stable_since=dj_timezone.now() - __import__("datetime").timedelta(seconds=120)
+        )
+        second = ingest(config)
+        source = AudioSource.objects.get()
+        assert second.hashed == [str(path.resolve())]
+        assert source.discovery_state == DiscoveryState.HASHED
+        assert source.original_filename == filename
+        assert source.recording_id is not None
 
     def test_identity_paths_are_absolute(self, tmp_path):
         config = make_config(tmp_path)

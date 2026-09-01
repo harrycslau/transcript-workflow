@@ -26,6 +26,7 @@ def unreachable_omlx(monkeypatch):
 
 
 class TestDoctor:
+    @pytest.mark.django_db
     def test_all_warnings_exit_zero(self, monkeypatch, unreachable_omlx, capsys):
         # Session test config: mw missing, oMLX unreachable, blank models.
         assert cli.main(["doctor"]) == 0
@@ -50,6 +51,7 @@ class TestDoctor:
         assert cli.main(["doctor"]) == 1
         assert "Malformed YAML" in capsys.readouterr().out
 
+    @pytest.mark.django_db
     def test_no_secrets_in_doctor_output(self, monkeypatch, unreachable_omlx, capsys):
         monkeypatch.setenv("BRAIN_TEST_LLM_API_KEY", "super-secret-value")
         cli.main(["doctor"])
@@ -73,6 +75,7 @@ class TestServe:
         assert "error:" in error
         assert "Configuration file not found" in error
 
+    @pytest.mark.django_db
     def test_valid_config_starts_runserver_on_localhost(self, monkeypatch):
         recorded = {}
 
@@ -108,6 +111,7 @@ class TestServe:
         assert "runtime directories" in error
         assert "read-only filesystem" in error
 
+    @pytest.mark.django_db
     def test_serve_defaults(self, monkeypatch):
         recorded = {}
 

@@ -1,6 +1,6 @@
 # 第一次用真實錄音測試
 
-呢份指南係俾第一次使用 Brain 嘅人。先用 **5–10 個複製出嚟嘅 WAV**
+呢份指南係俾第一次使用 Brain 嘅人。先用 **5–10 個複製出嚟嘅音頻檔**
 試完整流程，確認效果後先放大量錄音。
 
 ## 開始之前
@@ -13,7 +13,17 @@
 
 2. 確保 oMLX 已啟動，而且 `config/config.yaml` 已填好 summary model。
 
-3. 檢查環境：
+3. 建立／更新資料庫 schema（**必須先做**；程式唔會自動 migrate）：
+
+   ```sh
+   uv run python src/manage.py migrate
+   ```
+
+   如果有 migration 未 apply，`brain doctor` 會 FAIL，所有 ORM 指令
+   (`brain run`、`brain status`、`brain serve` 等) 會 exit 1 並提示
+   以上指令。
+
+4. 檢查環境：
 
    ```sh
    uv run brain doctor
@@ -21,9 +31,9 @@
 
    `FAIL` 要先處理；MacWhisper、oMLX 或 model 相關 `WARN` 亦應先檢查。
 
-> 安全提示：現階段程式只會讀取 WAV，唔會自動移動或刪除佢。
+> 安全提示：現階段程式只會讀取音頻檔，唔會自動移動或刪除佢。
 > 測試時請將錄音 **copy** 入 inbox，唔好將唯一一份原檔 move 入去。
-> Step 6 嘅「處理成功 N 日後刪除 WAV」功能尚未實作。
+> Step 6 嘅「處理成功 N 日後刪除音頻」功能尚未實作。
 
 ## 1. 揀一小批測試錄音
 
@@ -41,7 +51,8 @@
 data/inbox/
 ```
 
-只會掃描 `.wav` 檔。檔名可以繼續用錄音日期／時間，毋須改名。
+支援 `.wav`、`.mp3` 同 `.m4a`，副檔名大小寫皆可。檔名可以繼續用
+錄音日期／時間，毋須改名。其他格式會安全略過。
 
 ## 2. 執行一次完整流程
 
@@ -165,12 +176,12 @@ uv run brain summarize RECORDING_ID --regenerate
 
 失敗嘅 retranscription 或 re-summarization 唔會刪除之前成功嘅版本。
 
-## 7. WAV 可以幾時刪？
+## 7. 原音頻可以幾時刪？
 
-現階段 Brain **不會自動刪除 WAV**。你可以人手刪除已處理錄音；database、
+現階段 Brain **不會自動刪除原音頻**。你可以人手刪除已處理錄音；database、
 transcript、summary 同 tags 會保留，而 recording 會顯示 audio missing。
 
-不過第一次 evaluation 建議暫時保留測試 WAV，直至你確認 transcript 及 summary
+不過第一次 evaluation 建議暫時保留測試音頻，直至你確認 transcript 及 summary
 滿意，方便用另一個 model 重做或比較。正式嘅 N 日保留及安全自動清理會喺 Step 6
 處理。
 

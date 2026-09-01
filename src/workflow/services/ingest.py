@@ -34,7 +34,7 @@ from workflow.models import (
 
 logger = logging.getLogger(__name__)
 
-WAV_EXTENSIONS = {".wav"}
+SUPPORTED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a"}
 _HASH_CHUNK = 1024 * 1024
 
 
@@ -46,7 +46,7 @@ class IngestReport:
     skipped_unstable: list[str] = field(default_factory=list)
     reconciled_missing: list[str] = field(default_factory=list)
     reconciled_present: list[str] = field(default_factory=list)
-    ignored_paths: list[str] = field(default_factory=list)  # outside inbox / non-WAV
+    ignored_paths: list[str] = field(default_factory=list)  # outside inbox
 
     def as_dict(self) -> dict:
         return {
@@ -105,8 +105,13 @@ def identity_key(identity_path: Path) -> str:
     return str(identity_path).casefold()
 
 
-def discover_wavs(inbox: Path) -> list[Path]:
-    """Case-insensitively find WAV files under ``inbox`` (symlink-safe)."""
+def discover_audio_files(inbox: Path) -> list[Path]:
+    """Find supported audio files under ``inbox`` (symlink-safe).
+
+    Extensions are matched case-insensitively. Unsupported files are
+    left untouched and ignored; the supported set is deliberately
+    explicit so arbitrary inbox contents are never sent to audio tools.
+    """
     found: list[Path] = []
     if not inbox.exists():
         return found
@@ -127,7 +132,7 @@ def discover_wavs(inbox: Path) -> list[Path]:
             kept_dirs.append(d)
         dirs[:] = kept_dirs
         for name in files:
-            if Path(name).suffix.casefold() not in WAV_EXTENSIONS:
+            if Path(name).suffix.casefold() not in SUPPORTED_AUDIO_EXTENSIONS:
                 continue
             full = root_path / name
             identity = normalize_identity(full, inbox)
@@ -136,6 +141,15 @@ def discover_wavs(inbox: Path) -> list[Path]:
                 continue
             found.append(identity)
     return sorted(set(found), key=identity_key)
+
+
+def discover_wavs(inbox: Path) -> list[Path]:
+    """Backward-compatible name for :func:`discover_audio_files`.
+
+    Kept for callers from Steps 1–4; despite the historical name, it now
+    returns every supported audio format.
+    """
+    return discover_audio_files(inbox)
 
 
 def _stat_or_none(path: Path):
@@ -341,7 +355,7 @@ def ingest(config: AppConfig, now=None) -> IngestReport:
                     recording.save()
             report.reconciled_present.append(source.path)
 
-    for identity in discover_wavs(inbox):
+    for identity in discover_audio_files(inbox):
         key = identity_key(identity)
         if key in seen_identities:
             continue

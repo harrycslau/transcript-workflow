@@ -289,6 +289,7 @@ class TestOmlxMalformedResponses:
         assert result.status == WARN
         assert state == MODELS_UNVERIFIED
 
+    @pytest.mark.django_db
     def test_doctor_exits_zero_for_omlx_payload_warnings(self, monkeypatch):
         # Doctor runs against the session config (mw missing, models blank);
         # force an invalid oMLX payload and require exit code 0.
@@ -369,6 +370,7 @@ class TestRedaction:
         assert "super-secret-value" not in result.detail
         assert config.llm.api_key_env in result.detail or result.status == WARN
 
+    @pytest.mark.django_db
     def test_doctor_output_never_contains_secret(self, config, monkeypatch, capsys):
         monkeypatch.setenv("BRAIN_TEST_LLM_API_KEY", "super-secret-value")
         monkeypatch.setattr(

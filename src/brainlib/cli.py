@@ -79,6 +79,21 @@ def cmd_serve(host: str, port: int) -> int:
     from django.core.management.base import CommandError
 
     django.setup()
+    # Schema preflight before starting the server: never bind and serve
+    # pages that would crash against a database behind the code's
+    # migrations. Read-only check; never applies migrations.
+    try:
+        _require_applied_migrations()
+    except Exception as exc:
+        # _require_applied_migrations raises ConfigError carrying a
+        # concise, sanitized, actionable message (with the recovery
+        # command); anything else must not leak raw details either.
+        from brainlib.config import ConfigError
+
+        if isinstance(exc, ConfigError):
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        raise
     print(f"Starting Brain at http://{host}:{port}/ (Ctrl+C to stop)")
     try:
         call_command("runserver", f"{host}:{port}", use_reloader=True)
@@ -100,6 +115,38 @@ def _setup_django() -> None:
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "brain.settings")
     django.setup()
+
+
+def _require_applied_migrations() -> None:
+    """Fail cleanly (ConfigError -> exit 1, no traceback) when the
+    configured database is missing required migrations.
+
+    Runs BEFORE any lock acquisition, recovery, ORM work, file access,
+    or external contact. Strictly read-only (Django migration APIs);
+    never applies migrations. Raises ConfigError so the existing
+    command handlers print one concise actionable error including the
+    exact recovery command.
+    """
+    from brainlib.config import ConfigError
+    from brainlib.migrations import (
+        MigrationInspectionError,
+        RECOVERY_COMMAND,
+        summarize_pending,
+        unapplied_migrations,
+    )
+
+    try:
+        pending = unapplied_migrations()
+    except MigrationInspectionError as exc:
+        raise ConfigError(
+            f"database migration state could not be verified ({exc.category}). "
+            f"Apply pending migrations first, then retry:\n  {RECOVERY_COMMAND}"
+        ) from None
+    if pending:
+        raise ConfigError(
+            f"database schema is out of date ({summarize_pending(pending)}). "
+            f"Apply pending migrations first, then retry:\n  {RECOVERY_COMMAND}"
+        )
 
 
 def _emit(payload, as_json: bool) -> None:
@@ -144,6 +191,10 @@ def _pipeline_command(args, work):
         # during import, which must not escape as a traceback.
         config = load_config()
         _setup_django()
+        # Schema preflight BEFORE the lock, recovery, or any ORM/file/
+        # external work: a database behind the code's migrations must
+        # fail cleanly instead of crashing mid-pipeline.
+        _require_applied_migrations()
         from workflow.services.pipeline import PipelineBusy, pipeline_lock
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -183,6 +234,9 @@ def _read_only_command(args, work) -> int:
     try:
         config = load_config()
         _setup_django()
+        # Schema preflight: read-only commands also touch ORM models,
+        # which crash on a database behind the code's migrations.
+        _require_applied_migrations()
         payload = work(config)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -416,6 +470,10 @@ def cmd_summary(args) -> int:
     try:
         config = load_config()
         _setup_django()
+        # Schema preflight (cmd_summary predates the shared command
+        # runners): no ORM work on a database behind the code's
+        # migrations.
+        _require_applied_migrations()
         payload = work(config)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -482,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
         sub.add_argument("--json", action="store_true", help="Machine-readable JSON output")
         return sub
 
-    add_pipeline_command("ingest", "Discover and register stable new WAV files")
+    add_pipeline_command("ingest", "Discover and register stable WAV, MP3, and M4A files")
 
     route = add_pipeline_command("route", "Route recordings automatically, or manually route one")
     route.add_argument("recording_id", nargs="?", help="Recording to route manually")
