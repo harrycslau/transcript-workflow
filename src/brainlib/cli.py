@@ -312,78 +312,9 @@ def cmd_status(args) -> int:
 
 def cmd_review(args) -> int:
     def work(config):
-        from workflow.models import ProcessingStatus, Recording
+        from workflow.services.review import build_review_report
 
-        needs_review = []
-        for recording in Recording.objects.filter(processing_status=ProcessingStatus.NEEDS_REVIEW):
-            decision = recording.routing_decisions.filter(is_active=True).first()
-            needs_review.append(
-                {
-                    "recording_id": recording.pk,
-                    "kind": "needs_review_before_transcription",
-                    "suggested_route": decision.route_suggestion if decision else None,
-                    "confidence": decision.confidence if decision else None,
-                    "reason_code": decision.reason_code if decision else None,
-                }
-            )
-        unverified = []
-        retranscription_failed = []
-        for recording in Recording.objects.filter(processing_status=ProcessingStatus.TRANSCRIBED):
-            decision = recording.routing_decisions.filter(is_active=True).first()
-            if recording.retranscription_failed:
-                retranscription_failed.append(
-                    {
-                        "recording_id": recording.pk,
-                        "kind": "failed_retranscription",
-                        "attempt_id": recording.last_failed_attempt_id,
-                        "route": decision.route_suggestion if decision else None,
-                    }
-                )
-            if decision is not None and not decision.routing_verified:
-                unverified.append(
-                    {
-                        "recording_id": recording.pk,
-                        "kind": "transcribed_routing_unverified",
-                        "route": decision.route_suggestion,
-                        "confidence": decision.confidence,
-                        "profile": decision.profile_name,
-                    }
-                )
-        failed = [
-            {"recording_id": pk, "kind": f"failed_{stage}"}
-            for pk, stage in Recording.objects.filter(processing_status=ProcessingStatus.FAILED).values_list(
-                "pk", "failure_stage"
-            )
-        ]
-        from workflow.models import SummaryState
-
-        awaiting_summary = [
-            {"recording_id": pk, "kind": "awaiting_summary"}
-            for pk in Recording.objects.filter(
-                processing_status=ProcessingStatus.TRANSCRIBED, summary_status=SummaryState.MISSING
-            ).values_list("pk", flat=True)
-        ]
-        failed_summary = [
-            {"recording_id": pk, "kind": "failed_summary", "error_code": code or "unknown"}
-            for pk, code in Recording.objects.filter(summary_status=SummaryState.FAILED).values_list(
-                "pk", "last_failed_attempt__error_code"
-            )
-        ]
-        failed_resummarization = [
-            {"recording_id": pk, "kind": "failed_resummarization", "attempt_id": attempt_id}
-            for pk, attempt_id in Recording.objects.filter(resummarization_failed=True).values_list(
-                "pk", "last_failed_attempt_id"
-            )
-        ]
-        return {
-            "needs_review": needs_review,
-            "unverified": unverified,
-            "failed_retranscription": retranscription_failed,
-            "failed": failed,
-            "awaiting_summary": awaiting_summary,
-            "failed_summary": failed_summary,
-            "failed_resummarization": failed_resummarization,
-        }
+        return build_review_report()
 
     return _read_only_command(args, work)
 

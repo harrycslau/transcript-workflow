@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% load workflow_extras %}
+{% block title %}Recordings — Brain{% endblock %}
+{% block content %}
+<h1>Recordings</h1>
+
+<section class="filters" aria-label="Filters">
+  <form method="get" action="{% url 'recordings' %}">
+    <fieldset>
+      <legend>Date</legend>
+      <label for="id_date">Day</label>
+      <input type="date" id="id_date" name="date" value="{{ filters.date|date:'Y-m-d'|default:'' }}">
+      <label for="id_from">From</label>
+      <input type="date" id="id_from" name="from" value="{{ filters.date_from|date:'Y-m-d'|default:'' }}">
+      <label for="id_to">To</label>
+      <input type="date" id="id_to" name="to" value="{{ filters.date_to|date:'Y-m-d'|default:'' }}">
+      <p class="hint">Use either a single day or a from/to range.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Tags</legend>
+      {% for tag in configured_tags %}
+        <label class="checkbox">
+          <input type="checkbox" name="tag" value="{{ tag.name }}"
+            {% if tag.name_key in filters.tags %}checked{% endif %}>
+          {{ tag.name }}
+        </label>
+      {% empty %}
+        <p class="muted">No configured tags.</p>
+      {% endfor %}
+      <label for="id_tag_match">Match</label>
+      <select id="id_tag_match" name="tag_match">
+        <option value="all" {% if filters.tag_match == 'all' %}selected{% endif %}>all selected (AND)</option>
+        <option value="any" {% if filters.tag_match == 'any' %}selected{% endif %}>any selected (OR)</option>
+      </select>
+    </fieldset>
+    <fieldset>
+      <legend>Status</legend>
+      <label for="id_status">Processing</label>
+      <select id="id_status" name="status">
+        <option value="">Any</option>
+        {% for value, label in processing_statuses %}
+          <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <label for="id_summary">Summary</label>
+      <select id="id_summary" name="summary">
+        <option value="">Any</option>
+        {% for value, label in summary_statuses %}
+          <option value="{{ value }}" {% if filters.summary == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+      <label for="id_audio">Audio</label>
+      <select id="id_audio" name="audio">
+        <option value="">Any</option>
+        <option value="present" {% if filters.audio == 'present' %}selected{% endif %}>Present</option>
+        <option value="missing" {% if filters.audio == 'missing' %}selected{% endif %}>Missing</option>
+      </select>
+      <label class="checkbox">
+        <input type="checkbox" name="has_summary" value="1" {% if filters.has_summary %}checked{% endif %}>
+        Has current summary
+      </label>
+      <label class="checkbox">
+        <input type="checkbox" name="review" value="1" {% if filters.review %}checked{% endif %}>
+        Needs attention
+      </label>
+    </fieldset>
+    <p class="filter-actions">
+      <button type="submit">Apply filters</button>
+      <a href="{% url 'recordings' %}">Clear</a>
+    </p>
+  </form>
+</section>
+
+{% if filter_errors %}
+  <div class="messages" aria-live="polite">
+    {% for error in filter_errors %}
+      <div class="message message-error" role="status">{{ error }}</div>
+    {% endfor %}
+  </div>
+{% endif %}
+
+<p class="muted">{{ page.paginator.count }} recording{{ page.paginator.count|pluralize }}{% if filters.valid %} · filters applied{% endif %}</p>
+
+{% if cards %}
+  <ul class="recording-list">
+    {% for card in cards %}
+      <li class="recording-card {% if card.needs_attention %}attention{% endif %}">
+        <div class="recording-main">
+          <a class="recording-title-link" href="{% url 'recording-detail' card.recording.pk %}">
+            <strong>{{ card.current_summary.title|default:"(no summary)" }}</strong>
+          </a>
+          <span class="muted filename">{{ card.display_source.original_filename|default:"(no source)" }}</span>
+          <p class="excerpt">{{ card.overview_excerpt|default:"No overview available." }}</p>
+        </div>
+        <div class="recording-meta">
+          <span class="when">{{ card.effective_at_label }} {{ card.effective_at|local_time }}</span>
+          <span class="status status-{{ card.recording.processing_status }}">{{ card.recording.processing_status }}</span>
+          <span class="summary-status">summary: {{ card.recording.summary_status }}</span>
+          {% if card.active_route %}
+            <span class="route">{{ card.active_route.profile_name }}{% if not card.active_route.routing_verified %} (unverified){% endif %}</span>
+          {% else %}
+            <span class="route muted">no routing</span>
+          {% endif %}
+          <span class="audio {% if card.recording.audio_status == 'missing' %}warn-text{% endif %}">audio: {{ card.recording.audio_status }}</span>
+          {% if card.recording.retranscription_failed %}<span class="warn-text">retranscription failed</span>{% endif %}
+          {% if card.recording.resummarization_failed %}<span class="warn-text">re-summarization failed</span>{% endif %}
+          {% if card.active_tags %}
+            <span class="tags">
+              {% for assignment in card.active_tags %}<span class="tag-chip">{{ assignment.tag.name }}</span>{% endfor %}
+            </span>
+          {% endif %}
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+  {% include "workflow/_pagination.html" with page=page %}
+{% else %}
+  <p class="empty-state">No recordings match these filters. Adjust the filters or run <code>brain run</code>.</p>
+{% endif %}
+{% endblock %}

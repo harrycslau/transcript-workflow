@@ -143,6 +143,10 @@ _DEFAULTS: dict[str, Any] = {
     "tags": {
         "allowed": [],
     },
+    "web": {
+        "recordings_per_page": 25,
+        "transcript_segments_per_page": 200,
+    },
     "initial_tags": [],
     "timezone": "Europe/Helsinki",
 }
@@ -239,6 +243,17 @@ class TagsConfig:
 
 
 @dataclass(frozen=True)
+class WebConfig:
+    """Web interface presentation settings (Step 4).
+
+    Strictly validated: integers only (booleans rejected), positive.
+    """
+
+    recordings_per_page: int
+    transcript_segments_per_page: int
+
+
+@dataclass(frozen=True)
 class TagSpec:
     name: str
     description: str
@@ -264,6 +279,12 @@ class AppConfig:
     initial_tags: list[TagSpec] = field(default_factory=list)  # legacy alias
     timezone: str = "Europe/Helsinki"
     legacy_tags_notice: str | None = None
+    web: WebConfig = field(
+        default_factory=lambda: WebConfig(
+            recordings_per_page=_DEFAULTS["web"]["recordings_per_page"],
+            transcript_segments_per_page=_DEFAULTS["web"]["transcript_segments_per_page"],
+        )
+    )
 
     def api_key_for(self, api_key_env: str) -> str | None:
         """Return the secret named by ``api_key_env``, or None.
@@ -608,6 +629,16 @@ def _parse_summarization(raw: dict[str, Any]) -> SummarizationConfig:
     )
 
 
+def _parse_web(raw: dict[str, Any]) -> WebConfig:
+    s = _section(raw, "web")
+    return WebConfig(
+        recordings_per_page=_get_number(s, "recordings_per_page", "web", int, positive=True),
+        transcript_segments_per_page=_get_number(
+            s, "transcript_segments_per_page", "web", int, positive=True
+        ),
+    )
+
+
 def _parse_timezone(raw: dict[str, Any]) -> str:
     """Timezone used to interpret filename-derived recording timestamps.
 
@@ -677,4 +708,5 @@ def load_config(path: Path | None = None, *, env_file: Path | None = None) -> Ap
         initial_tags=initial_tags,
         timezone=_parse_timezone(raw),
         legacy_tags_notice=legacy_tags_notice,
+        web=_parse_web(raw),
     )

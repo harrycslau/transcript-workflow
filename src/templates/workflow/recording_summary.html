@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% load workflow_extras %}
+{% block title %}Summary — Brain{% endblock %}
+{% block content %}
+<h1>{% if summary %}{{ summary.title }}{% else %}Summary{% endif %}</h1>
+<p class="breadcrumb muted">
+  <a href="{% url 'recording-detail' recording.pk %}">Back to recording</a> ·
+  <a href="{% url 'recording-history' recording.pk %}">History</a>
+</p>
+
+{% if summary %}
+  <p class="copy-controls">
+    <button type="button" class="copy-button" data-copy-url="{% url 'summary-export' recording.pk %}?format=markdown">Copy Markdown</button>
+    <a href="{% url 'summary-export' recording.pk %}?format=markdown">Markdown</a> ·
+    <a href="{% url 'summary-export' recording.pk %}?format=text">Plain text</a> ·
+    <a href="{% url 'summary-export' recording.pk %}?format=json">JSON</a>
+  </p>
+  <p class="current-banner">This is the current summary of the recording (version #{{ summary.ordinal }}).</p>
+  {% include "workflow/_summary_body.html" %}
+  <details class="provenance">
+    <summary>Provenance</summary>
+    <dl>
+      <dt>Summary ID</dt><dd><code>{{ summary.pk }}</code></dd>
+      <dt>Transcript version</dt><dd><code>{{ summary.transcript_id }}</code></dd>
+      <dt>Model</dt><dd>{{ summary.model_id|default:"unknown" }}</dd>
+      <dt>Prompt / parser</dt><dd>v{{ summary.prompt_version }} / v{{ summary.parser_version }}</dd>
+      <dt>Generation</dt><dd>{{ summary.generation_mode }}</dd>
+      <dt>Chunks</dt><dd>{{ summary.chunk_count }} ({{ summary.input_characters }} characters input{% if summary.input_truncated %}, truncated{% else %}, not truncated{% endif %})</dd>
+      <dt>Created</dt><dd>{{ summary.created_at|local_time }}</dd>
+    </dl>
+  </details>
+{% else %}
+  <p class="empty-state">
+    {% if recording.summary_status == 'failed' %}The last summarization attempt failed. Retry it explicitly from the recording page.{% elif recording.summary_status == 'missing' %}No summary yet — use the Summarize action on the recording page.{% else %}No active transcript to summarize.{% endif %}
+  </p>
+{% endif %}
+{% endblock %}

@@ -40,7 +40,10 @@ class TestHomePage:
         from brainlib import __version__
 
         assert __version__ in content
-        assert "data/inbox" in content or "inbox" in content
+        # Step 4 privacy policy: storage is reported as label + status,
+        # never as filesystem paths.
+        assert "Inbox" in content
+        assert "available" in content or "missing" in content
         assert "(not configured)" in content  # blank models warn visually
 
     @pytest.mark.django_db

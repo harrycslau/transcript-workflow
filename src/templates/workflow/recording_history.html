@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% load workflow_extras %}
+{% block title %}History — Brain{% endblock %}
+{% block content %}
+<h1>History</h1>
+<p class="breadcrumb muted"><a href="{% url 'recording-detail' recording.pk %}">Back to recording</a></p>
+
+<section>
+  <h2>Transcript versions</h2>
+  {% if transcripts %}
+    <table>
+      <thead><tr><th>Created</th><th>State</th><th>Segments</th><th>Parser</th><th>Attempt</th></tr></thead>
+      <tbody>
+        {% for transcript in transcripts %}
+          <tr>
+            <td>{{ transcript.created_at|local_time }}</td>
+            <td>
+              {% if transcript.is_active %}<span class="current-banner-inline">active</span>
+              {% else %}superseded{% if transcript.superseded_at %} {{ transcript.superseded_at|local_time }}{% endif %}{% endif %}
+            </td>
+            <td>{{ transcript.segment_count }}</td>
+            <td>v{{ transcript.parser_version }}</td>
+            <td><code>{{ transcript.attempt_id|default:"—" }}</code></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No transcripts.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Summary versions</h2>
+  {% if summaries %}
+    <table>
+      <thead><tr><th>Version</th><th>Title</th><th>State</th><th>Created</th><th>Model</th><th>Chunks</th><th>Input chars</th><th>Mode</th><th>Attempt</th></tr></thead>
+      <tbody>
+        {% for summary in summaries %}
+          <tr>
+            <td>#{{ summary.ordinal }}</td>
+            <td><a href="{% url 'summary-detail' recording.pk summary.pk %}">{{ summary.title }}</a></td>
+            <td>
+              {% if summary.is_active %}active in scope{% else %}superseded in scope{% endif %}
+              {% if summary.transcript.is_active and summary.is_active and summary.section.ordinal == 0 %}
+                · <span class="current-banner-inline">current</span>
+              {% else %}
+                · historical for this recording
+              {% endif %}
+            </td>
+            <td>{{ summary.created_at|local_time }}</td>
+            <td>{{ summary.model_id|default:"—" }}</td>
+            <td>{{ summary.chunk_count }}</td>
+            <td>{{ summary.input_characters }}{% if summary.input_truncated %} (truncated){% else %} (not truncated){% endif %}</td>
+            <td>{{ summary.generation_mode }}</td>
+            <td><code>{{ summary.attempt_id|default:"—" }}</code></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No summaries.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Attempts</h2>
+  {% if attempts %}
+    <table>
+      <thead><tr><th>Stage</th><th>#</th><th>Outcome</th><th>Error code</th><th>Model</th><th>Started</th><th>Finished</th></tr></thead>
+      <tbody>
+        {% for attempt in attempts %}
+          <tr>
+            <td>{{ attempt.stage }}</td>
+            <td>{{ attempt.ordinal }}</td>
+            <td>{{ attempt.outcome }}</td>
+            <td>{{ attempt.error_code|default:"—" }}</td>
+            <td>{{ attempt.model_id|default:"—" }}</td>
+            <td>{{ attempt.started_at|local_time }}</td>
+            <td>{{ attempt.finished_at|local_time|default:"—" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No attempts.</p>
+  {% endif %}
+</section>
+{% endblock %}

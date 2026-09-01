@@ -1,8 +1,135 @@
-# Project status — implementation handoff (end of Step 3)
+# Project status — implementation handoff (end of Step 4)
 
-This file reflects the repository as of the end of Step 3. It is a
+This file reflects the repository as of the end of Step 4. It is a
 snapshot, not a durable instruction file; `AGENTS.md` holds the
 standing rules.
+
+## Step 4 — delivered
+
+### Web interface (server-rendered, local-first)
+
+- Pages: dashboard `/` (existing status page), `/recordings/`
+  (paginated, filterable), `/recordings/<id>/` (detail/working view),
+  `/recordings/<id>/summary/` (current summary),
+  `/recordings/<id>/summaries/<sid>/` (historical summary),
+  `/recordings/<id>/transcript/` (segment-paginated; `?v=` historical),
+  `/recordings/<id>/history/`, `/tags/`, `/review/`.
+- List contract (`workflow/query.py`): `effective_at` annotation
+  (`Coalesce(recorded_at, discovered_at)`) used consistently for
+  ordering, local-day/range filtering and display; explicit
+  `Prefetch(..., to_attr=...)` contract (current summary row, active
+  tags, active routing decision, sources) consumed via
+  `RecordingCard`; query count proven constant as row count grows;
+  transcript text never loaded on the list. Filters: local calendar
+  day (DST-correct via ZoneInfo), from/to range, multi-tag with
+  explicit `tag_match=all|any` (AND default), processing/summary
+  status, audio present/missing, has-summary, review union; invalid
+  values render friendly messages.
+- Detail page: structured summary rendered from validated fields only
+  (never Markdown/HTML-trusted), provenance collapsed, transcript
+  segment pages bounded by `web.transcript_segments_per_page`
+  (default 200), copy controls (no-JS export links + JS clipboard
+  button, non-destructive failure), sanitized attempt table.
+- Summary versioning on the web: pages/exports distinguish
+  `is_active_in_scope` (row field) from `is_current_for_recording`
+  (derived: active summary of the active transcript's ordinal-0
+  section). Historical summaries are labelled and exported with a
+  banner; a scope-active old-transcript summary is NEVER presented as
+  current.
+- Exports (`views/exports.py`): summary Markdown/text/JSON and
+  transcript text/timestamped, UTF-8, sanitized `brain-<sha>-` style
+  filenames (header-injection safe), `?version=` selects historical
+  versions resolved through the parent Recording (cross-recording
+  access = 404), read-only.
+
+### Tags (Step 4 semantics)
+
+- Migration `0005`: `TagAssignment.deactivated_by` ("" | "user" |
+  "model") + `RunPython` backfill (legacy inactive rows → "model") +
+  `chk_tagassignment_deactivation_state` CheckConstraint: active rows
+  must carry "", inactive rows must carry "user"/"model" (both invalid
+  combinations are test-proven to be rejected by SQLite).
+- Semantics: manual add is idempotent and user-owned; confirm upgrades
+  a suggested assignment to `confirmed` (user-owned, survives
+  re-summarization, provenance kept); remove/reject sets
+  `deactivated_by="user"` — a SUPPRESSION. Re-summarization
+  (`_materialize_tags`) deactivates dropped suggestions with
+  `deactivated_by="model"`, reactivates only non-suppressed rows, and
+  always appends `SummaryTagSuggestion` provenance — user-suppressed
+  tags stay suppressed while suggestions remain visible.
+  Retired tags are excluded from the add selector unless the explicit
+  "include retired tags" opt-in is set.
+- The partial active-unique constraint is acknowledged redundant beside
+  unique(recording, tag); races are handled via transactions +
+  row-locking + idempotent re-select, never via the redundant
+  constraint.
+
+### Web actions (POST only, two-step confirmation)
+
+- `workflow/services/web_actions.py`: every action acquires the SAME
+  global pipeline `flock` (busy → friendly 409 page), runs
+  `recover_interruptions()` (stage-aware), re-derives eligibility from
+  current DB state, and compares a state fingerprint
+  (`processing_status`, summary markers, current-summary ordinal,
+  newest attempt id) captured at form render; mismatch = safe no-op
+  "state changed". Synchronous execution; no queues.
+- Eligibility matrix: route (routing/needs_review/ready_to_transcribe/
+  transcribed/routing-failed; transcribing and other states ineligible;
+  same-profile = idempotent verify, NO new decision row; different
+  profile on ready_to_transcribe appends and stays ready; on
+  transcribed keeps the active transcript until retranscription
+  succeeds), confirm-routing (idempotent, targets the active decision),
+  transcribe (only ready_to_transcribe; duplicate POSTs can never
+  retranscribe — fingerprint/eligibility reject), summarize
+  (server-derived first/retry/regenerate wording), retry (failed /
+  retranscription_failed / summary_failed / resummarization_failed).
+- `manual_route` (CLI + web shared): eligibility restricted to the
+  matrix above with clean ConfigError otherwise; same-profile on ANY
+  eligible status verifies in place without appending.
+- First POST renders a confirmation interstitial (duration, what is
+  preserved on failure, retry-vs-summarize-vs-regenerate wording);
+  second POST (`confirmed=1`, CSRF) executes; POST→redirect→GET with
+  flash messages.
+
+### Review dashboard
+
+- Shared builder `workflow/services/review.py` used by BOTH
+  `brain review` (CLI JSON unchanged plus additive `missing_audio`
+  group and `error_code` on failed-retranscription rows) and
+  `/review/`; groups: needs-review, unverified automatic routing,
+  failed retranscription, pipeline failures, awaiting summary, failed
+  summary, failed re-summarization, missing audio. Stable sanitized
+  codes only; GET purity and bounded queries test-proven.
+
+### Web configuration
+
+- `web:` config section (`recordings_per_page` 25,
+  `transcript_segments_per_page` 200): strictly validated positive
+  ints, booleans rejected; documented in `config/config.example.yaml`.
+
+### Security / accessibility
+
+- Middleware: SecurityMiddleware (nosniff), CommonMiddleware, CSRF,
+  MessageMiddleware (CookieStorage — signed message cookie,
+  HttpOnly, SameSite=Lax, flags inherited from `SESSION_COOKIE_*`;
+  no session table), XFrameOptions DENY, and a strict
+  Content-Security-Policy (`default-src 'self'`, no inline scripts,
+  static `app.js` only). CSRF test-proven with
+  `Client(enforce_csrf_checks=True)`; child objects always resolved
+  through the parent Recording; no secrets/paths/tracebacks on any
+  page (home page's local storage-path display is pre-existing Step 1
+  behaviour for the owner's own machine).
+- `docs` warning: `brain serve --host 0.0.0.0` exposes private
+  transcripts to the network; keep 127.0.0.1.
+
+### Tests
+
+- 638 passing (495 pre-existing + 143 new across list, detail,
+  tags, actions, exports, review, security, walkthrough, config).
+  Includes query-count invariance (5 vs 40 rows), DST day filters,
+  CSRF 403s, lock 409, duplicate-transcribe non-retranscription,
+  suppression survival, escaping, Unicode exports, GET purity with
+  subprocess/httpx raise-guards.
 
 ## Step 1 — delivered
 

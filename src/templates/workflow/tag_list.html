@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Tags — Brain{% endblock %}
+{% block content %}
+<h1>Tags</h1>
+<p class="muted">Tag definitions come from <code>tags.allowed</code> in the YAML configuration. Removed tags are retired — never deleted — and keep their history.</p>
+
+<section>
+  <h2>Configured</h2>
+  {% if configured_rows %}
+    <table>
+      <thead><tr><th>Tag</th><th>Description</th><th>Active assignments</th><th></th></tr></thead>
+      <tbody>
+        {% for row in configured_rows %}
+          <tr>
+            <td><strong>{{ row.tag.name }}</strong></td>
+            <td>{{ row.tag.description|default:"—" }}</td>
+            <td>{{ row.active_count }}</td>
+            <td><a href="/recordings/?tag={{ row.tag.name|urlencode }}">Browse recordings</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-state">No tags are configured. Add entries under <code>tags.allowed</code> in config.</p>
+  {% endif %}
+</section>
+
+<section>
+  <h2>Retired</h2>
+  {% if retired_rows %}
+    <table>
+      <thead><tr><th>Tag</th><th>Description</th><th>Active assignments</th><th>Historical assignments</th><th></th></tr></thead>
+      <tbody>
+        {% for row in retired_rows %}
+          <tr class="retired-row">
+            <td>{{ row.tag.name }} <span class="muted">(retired)</span></td>
+            <td>{{ row.tag.description|default:"—" }}</td>
+            <td>{{ row.active_count }}</td>
+            <td>{{ row.total_count }}</td>
+            <td><a href="/recordings/?tag={{ row.tag.name|urlencode }}">Browse recordings</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-state">No retired tags.</p>
+  {% endif %}
+</section>
+{% endblock %}

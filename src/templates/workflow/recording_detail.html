@@ -1,0 +1,229 @@
+{% extends "base.html" %}
+{% load workflow_extras %}
+{% block title %}Recording {{ card.recording.sha256|sha_short }} — Brain{% endblock %}
+{% block content %}
+<h1>{% if card.current_summary %}{{ card.current_summary.title }}{% else %}Recording {{ card.recording.sha256|sha_short }}{% endif %}</h1>
+
+<p class="breadcrumb muted">
+  {{ card.effective_at_label }} {{ card.effective_at|local_time }} ·
+  <a href="{% url 'recording-transcript' recording.pk %}">Transcript</a> ·
+  <a href="{% url 'recording-summary' recording.pk %}">Summary</a> ·
+  <a href="{% url 'recording-history' recording.pk %}">History</a>
+</p>
+
+<section class="identity" aria-label="Identity and status">
+  <h2>Status</h2>
+  <dl class="status-grid">
+    <dt>Recording ID</dt><dd><code>{{ recording.pk }}</code></dd>
+    <dt>SHA-256</dt><dd><code title="{{ recording.sha256 }}">{{ recording.sha256|sha_short }}</code></dd>
+    <dt>Source file</dt><dd>{{ card.display_source.original_filename|default:"(no source)" }}</dd>
+    <dt>Recorded</dt><dd>{{ card.effective_at|local_time }}{% if not recording.recorded_at %} <span class="muted">(discovered)</span>{% endif %}</dd>
+    <dt>Discovered</dt><dd>{{ recording.discovered_at|local_time }}</dd>
+    <dt>Duration</dt><dd>{{ recording.duration_seconds|duration }}</dd>
+    <dt>Processing</dt><dd><span class="status status-{{ recording.processing_status }}">{{ recording.processing_status }}</span></dd>
+    <dt>Audio</dt><dd class="{% if recording.audio_status == 'missing' %}warn-text{% endif %}">{{ recording.audio_status }}</dd>
+    <dt>Summary</dt><dd>{{ recording.summary_status }}{% if recording.resummarization_failed %} <span class="warn-text">(re-summarization failed — current summary kept)</span>{% endif %}</dd>
+    {% if recording.retranscription_failed %}<dt>Warning</dt><dd class="warn-text">Retranscription failed — the existing transcript stays active. Retry available.</dd>{% endif %}
+    {% if recording.processing_status == 'failed' %}<dt>Failed stage</dt><dd class="warn-text">{{ recording.failure_stage }}</dd>{% endif %}
+    {% if routing_decision %}
+      <dt>Routing</dt>
+      <dd>
+        {{ routing_decision.profile_name }} ({{ routing_decision.method }}) — model {{ routing_decision.model_id }}{% if routing_decision.routing_verified %} · verified{% else %} · <span class="warn-text">unverified</span>{% endif %}
+        {% if routing_decision.reason_code %} · reason: {{ routing_decision.reason_code }}{% endif %}
+      </dd>
+    {% else %}
+      <dt>Routing</dt><dd class="muted">no decision yet</dd>
+    {% endif %}
+  </dl>
+</section>
+
+{% if actions.transcribe_available or actions.confirm_routing_available or actions.route_eligible or actions.summarize_mode or actions.retry_available %}
+<section class="actions" aria-label="Actions">
+  <h2>Actions</h2>
+  <p class="muted">Actions run under the pipeline lock and re-check the current state before doing anything.</p>
+  <div class="action-buttons">
+    {% if actions.route_eligible %}
+      <form method="post" action="{% url 'action-route' recording.pk %}">
+        {% csrf_token %}
+        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+        <label for="id_route_profile">Route manually</label>
+        <select id="id_route_profile" name="profile">
+          <option value="">Choose a profile…</option>
+          {% for profile in actions.route_profiles %}
+            <option value="{{ profile.name }}">{{ profile.name }} — {{ profile.model }}{% if profile.manual_only %} (manual-only){% endif %}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Route</button>
+      </form>
+    {% endif %}
+    {% if actions.confirm_routing_available %}
+      <form method="post" action="{% url 'action-confirm-routing' recording.pk %}">
+        {% csrf_token %}
+        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+        <button type="submit">Confirm routing</button>
+      </form>
+    {% endif %}
+    {% if actions.transcribe_available %}
+      <form method="post" action="{% url 'action-transcribe' recording.pk %}">
+        {% csrf_token %}
+        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+        <button type="submit">Transcribe now</button>
+      </form>
+    {% endif %}
+    {% if actions.summarize_mode %}
+      <form method="post" action="{% url 'action-summarize' recording.pk %}">
+        {% csrf_token %}
+        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+        <input type="hidden" name="mode" value="{{ actions.summarize_mode }}">
+        <button type="submit">
+          {% if actions.summarize_mode == 'first' %}Summarize{% elif actions.summarize_mode == 'retry_summary' %}Retry summary{% else %}Regenerate summary{% endif %}
+        </button>
+      </form>
+    {% endif %}
+    {% if actions.retry_available %}
+      <form method="post" action="{% url 'action-retry' recording.pk %}">
+        {% csrf_token %}
+        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+        <button type="submit">Retry failed stage</button>
+      </form>
+    {% endif %}
+  </div>
+</section>
+{% endif %}
+
+<section class="tags-section" aria-label="Tags">
+  <h2>Tags</h2>
+  {% if card.active_tags %}
+    <ul class="tag-chips" aria-label="Active tags">
+      {% for assignment in card.active_tags %}
+        <li class="tag-chip tag-{{ assignment.origin }}">
+          {{ assignment.tag.name }}
+          <span class="muted">({{ assignment.origin }})</span>
+          {% if assignment.origin == 'suggested' %}
+            <form method="post" action="{% url 'tag-confirm' recording.pk assignment.tag.pk %}" class="inline-form">
+              {% csrf_token %}
+              <button type="submit" class="link-button">Confirm</button>
+            </form>
+          {% endif %}
+          <form method="post" action="{% url 'tag-remove' recording.pk assignment.tag.pk %}" class="inline-form">
+            {% csrf_token %}
+            <button type="submit" class="link-button danger">Remove</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">No active tags.</p>
+  {% endif %}
+
+  <form method="post" action="{% url 'tag-add' recording.pk %}" class="tag-add-form">
+    {% csrf_token %}
+    <label for="id_tag_add">Add tag</label>
+    <select id="id_tag_add" name="tag">
+      <option value="">Choose a tag…</option>
+      {% for tag in tag_choices %}
+        <option value="{{ tag.pk }}">{{ tag.name }}</option>
+      {% endfor %}
+      {% for tag in retired_tag_choices %}
+        <option value="{{ tag.pk }}">{{ tag.name }} (retired)</option>
+      {% endfor %}
+    </select>
+    <label class="checkbox">
+      <input type="checkbox" name="include_retired" value="1"> include retired tags
+    </label>
+    <button type="submit">Add</button>
+  </form>
+
+  {% if current_summary %}
+    <h3>Suggestions on the current summary</h3>
+    {% with suggestions=current_summary.tag_suggestions.all %}
+      {% if suggestions %}
+        <ul>
+          {% for suggestion in suggestions %}
+            <li>{{ suggestion.tag.name }} <span class="muted">(suggested by model)</span></li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="muted">The current summary suggested no tags.</p>
+      {% endif %}
+    {% endwith %}
+  {% endif %}
+</section>
+
+<section class="summary-section" aria-label="Current summary">
+  <h2>Current summary</h2>
+  {% if current_summary %}
+    <p class="copy-controls">
+      <button type="button" class="copy-button" data-copy-url="{% url 'summary-export' recording.pk %}?format=markdown">Copy Markdown</button>
+      <a href="{% url 'summary-export' recording.pk %}?format=markdown">Markdown</a> ·
+      <a href="{% url 'summary-export' recording.pk %}?format=text">Plain text</a> ·
+      <a href="{% url 'summary-export' recording.pk %}?format=json">JSON</a>
+    </p>
+    {% include "workflow/_summary_body.html" with summary=current_summary %}
+    <details class="provenance">
+      <summary>Provenance</summary>
+      <dl>
+        <dt>Summary version</dt><dd>#{{ current_summary.ordinal }}</dd>
+        <dt>Model</dt><dd>{{ current_summary.model_id|default:"unknown" }}</dd>
+        <dt>Prompt / parser</dt><dd>v{{ current_summary.prompt_version }} / v{{ current_summary.parser_version }}</dd>
+        <dt>Generation</dt><dd>{{ current_summary.generation_mode }}</dd>
+        <dt>Chunks</dt><dd>{{ current_summary.chunk_count }} ({{ current_summary.input_characters }} characters input{% if current_summary.input_truncated %}, truncated{% else %}, not truncated{% endif %})</dd>
+        <dt>Created</dt><dd>{{ current_summary.created_at|local_time }}</dd>
+      </dl>
+    </details>
+  {% else %}
+    <p class="empty-state">
+      {% if recording.summary_status == 'failed' %}The last summarization attempt failed. Retry it explicitly from the Actions panel.{% elif recording.summary_status == 'missing' %}No summary yet — use the Summarize action.{% else %}No active transcript to summarize.{% endif %}
+    </p>
+  {% endif %}
+</section>
+
+<section class="transcript-section" aria-label="Transcript">
+  <h2>Transcript</h2>
+  {% if transcript %}
+    <p class="muted">
+      Version from {{ transcript.created_at|local_time }} ·
+      {{ transcript_segment_count }} segments
+      {% if segment_pages > 1 %}· showing the first page (<a href="{% url 'recording-transcript' recording.pk %}">read all</a>){% endif %}
+      · <a href="{% url 'transcript-export' recording.pk %}?format=text">plain text</a> ·
+      <a href="{% url 'transcript-export' recording.pk %}?format=timestamped">timestamped</a>
+    </p>
+    <div class="transcript" lang="{{ card.current_summary.language|default:'' }}">
+      {% for segment in segments %}
+        <p class="transcript-segment">
+          {% if segment.start_ms %}<span class="timestamp muted">{{ segment.start_ms|mmss }}</span>{% endif %}
+          {% if segment.speaker %}<span class="speaker">{{ segment.speaker }}:</span>{% endif %}
+          <span class="segment-text">{{ segment.text }}</span>
+        </p>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="empty-state">No transcript yet.</p>
+  {% endif %}
+</section>
+
+<section class="attempts-section" aria-label="Recent attempts">
+  <h2>Recent attempts</h2>
+  {% if attempts %}
+    <table>
+      <thead>
+        <tr><th>Stage</th><th>#</th><th>Outcome</th><th>Error code</th><th>Model</th><th>Started</th></tr>
+      </thead>
+      <tbody>
+        {% for attempt in attempts %}
+          <tr>
+            <td>{{ attempt.stage }}</td>
+            <td>{{ attempt.ordinal }}</td>
+            <td>{{ attempt.outcome }}</td>
+            <td>{{ attempt.error_code|default:"—" }}</td>
+            <td>{{ attempt.model_id|default:"—" }}</td>
+            <td>{{ attempt.started_at|local_time }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No processing attempts yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

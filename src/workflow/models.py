@@ -97,6 +97,21 @@ class TagOrigin(models.TextChoices):
     CONFIRMED = "confirmed", "User Confirmed"  # reserved for Step 4
 
 
+class TagDeactivatedBy(models.TextChoices):
+    """Who deactivated a TagAssignment row (empty while the row is active).
+
+    ``user`` is an explicit suppression: future re-summarization keeps
+    recording the model's suggestions (SummaryTagSuggestion provenance)
+    but never reactivates the effective assignment. ``model`` means the
+    current summary version simply stopped suggesting the tag; a future
+    suggestion may reactivate it.
+    """
+
+    NONE = "", "Not deactivated"
+    MODEL = "model", "Model"
+    USER = "user", "User"
+
+
 class DiscoveryState(models.TextChoices):
     """Persisted pre-hash discovery state for AudioSource rows.
 
@@ -462,6 +477,12 @@ class TagAssignment(models.Model):
         Summary, on_delete=models.SET_NULL, null=True, blank=True, related_name="assignments"
     )
     is_active = models.BooleanField(default=True)
+    # Deactivation actor (see TagDeactivatedBy). Enforced by the
+    # chk_tagassignment_deactivation_state constraint: active rows must
+    # carry "" and inactive rows must carry "user" or "model".
+    deactivated_by = models.CharField(
+        max_length=16, blank=True, default="", choices=TagDeactivatedBy.choices
+    )
     created_at = models.DateTimeField(default=timezone.now)
     deactivated_at = models.DateTimeField(null=True, blank=True)
 
@@ -469,10 +490,18 @@ class TagAssignment(models.Model):
         ordering = ["recording", "tag__name"]
         constraints = [
             models.UniqueConstraint(fields=["recording", "tag"], name="uniq_tag_assignment"),
+            # Redundant beside uniq_tag_assignment (one row per pair);
+            # kept for schema stability, never relied upon for race
+            # handling (which uses transactions + the row uniqueness).
             models.UniqueConstraint(
                 fields=["recording", "tag"],
                 condition=Q(is_active=True),
                 name="uniq_active_tag_assignment",
+            ),
+            models.CheckConstraint(
+                check=Q(is_active=True, deactivated_by="")
+                | Q(is_active=False, deactivated_by__in=["user", "model"]),
+                name="chk_tagassignment_deactivation_state",
             ),
         ]
 

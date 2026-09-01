@@ -73,6 +73,10 @@ tags:
   allowed:
     - name: Unknown
       description: Content that cannot yet be classified
+
+web:
+  recordings_per_page: 25
+  transcript_segments_per_page: 200
 """,
     encoding="utf-8",
 )
@@ -97,3 +101,25 @@ def config(tmp_path):
     from factories import make_config
 
     return make_config(tmp_path)
+
+
+@pytest.fixture
+def forbid_external_effects(monkeypatch):
+    """Any subprocess or HTTP call from a web test fails the test.
+
+    GET-purity guard: page/export rendering must never launch MacWhisper
+    or query the network. Tests that exercise actions mock at the
+    service level instead.
+    """
+
+    def _no_subprocess(*args, **kwargs):
+        raise AssertionError("subprocess must not be called during web requests")
+
+    def _no_http(*args, **kwargs):
+        raise AssertionError("HTTP requests must not be made during web requests")
+
+    monkeypatch.setattr("subprocess.run", _no_subprocess)
+    monkeypatch.setattr("subprocess.Popen", _no_subprocess)
+    monkeypatch.setattr("httpx.get", _no_http)
+    monkeypatch.setattr("httpx.post", _no_http)
+    monkeypatch.setattr("httpx.Client", _no_http)

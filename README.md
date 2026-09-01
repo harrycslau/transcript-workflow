@@ -4,10 +4,9 @@ A local-first workflow for transcribing recordings (via MacWhisper Pro's
 `mw` CLI), summarizing and tagging transcripts (via a configurable oMLX
 OpenAI-compatible endpoint), and storing/searching the results locally.
 
-## Step 2 feature boundary
+## What is available now
 
-Step 1 built the foundation (Django skeleton, config loader, diagnostics,
-health endpoint, runtime scaffolding). Step 2 adds the ingestion pipeline:
+Steps 1–4 are implemented. The app can:
 
 - `data/inbox` discovery, file-stability tracking, SHA-256 hashing, and
   content-based deduplication (the same audio at several paths becomes
@@ -18,12 +17,16 @@ health endpoint, runtime scaffolding). Step 2 adds the ingestion pipeline:
   (`routing_verified = false` until a human confirms)
 - low-confidence/ambiguous results → Needs Review, with CLI manual
   override and retry
-- full MacWhisper transcription, versioned transcripts with ordered
-  segments, and one whole-recording Section per transcript
+- transcribe with MacWhisper and preserve transcript history
+- summarize with the configured local oMLX model, including bounded
+  long-transcript chunking
+- suggest configurable tags while preserving manual tag decisions
+- browse recordings, transcripts, summaries, history, tags, and the
+  review queue in a local web interface
 
-**Not yet implemented:** summaries, tags, search, the web review UI
-(Step 4), topic splitting (Step 6), scheduling, and retention deletion.
-**Audio files are never deleted, moved, or modified in Step 2.**
+Keyword/semantic search is planned for Step 5. Manual topic splitting,
+scheduling, and retention deletion are planned for Step 6. **The app does
+not currently delete, move, or modify audio files.**
 
 ## Prerequisites
 
@@ -81,6 +84,11 @@ files, audio files, transcripts, logs, Python caches, and virtualenvs.
 
 ## Usage
 
+If this is your first time using the app with real recordings, follow the
+Chinese [first real-audio walkthrough](docs/first-real-audio-test.md). It
+uses a small copied test batch and explains what to click when routing or
+processing needs attention.
+
 ### Diagnostics
 
 ```sh
@@ -131,7 +139,7 @@ minimum allowance and longer audio scales with duration
 uv run brain ingest          # discover and register stable new WAV files
 uv run brain route           # auto-route pending recordings
 uv run brain transcribe      # transcribe recordings with an approved profile
-uv run brain run             # compose ingest -> route -> transcribe
+uv run brain run             # ingest -> route -> transcribe -> summarize
 uv run brain status --json   # counts and failures
 uv run brain review --json   # recordings needing human attention
 uv run brain retry <id>      # explicitly retry a failed recording
@@ -196,7 +204,7 @@ uv run brain serve --host 127.0.0.1 --port 9000
 - Binds to localhost only by default; no browser is opened.
 - Missing configuration or runtime-directory setup failures print a
   concise error and exit with code 1 (no traceback, no Django startup).
-- `GET /` — minimal status page (app version, storage paths,
+- `GET /` — minimal status page (app version, storage availability,
   MacWhisper/oMLX configuration, selected models). Page loads run only
   lightweight local checks; they never launch MacWhisper or query the
   oMLX endpoint — use `brain doctor` for full diagnostics.
@@ -219,16 +227,16 @@ Tests are fully self-contained: they use a temporary configuration,
 mocked subprocess/HTTP calls, and never require MacWhisper, oMLX,
 network access, or real audio.
 
-## Current limitations (Step 2)
+## Current limitations
 
-- No summaries, tags, keyword/semantic search, or web review UI yet.
+- No keyword or semantic search yet (Step 5).
+- No manual topic splitting, scheduling, or retention deletion yet
+  (Step 6).
 - Automatic Cantonese-vs-Mandarin routing is heuristic and unverified —
   ambiguous evidence always lands in Needs Review.
 - Router confidence is an uncalibrated score, not a probability.
 - `european_small` is manual-only; retention deletion is **not active**
-  — audio is never deleted (whether routing is verified or not). Whether
-  unverified recordings become deletion-eligible is a separate Step 6
-  policy decision.
+  — audio is never deleted by the app.
 - `brain run` is a local CLI loop; scheduling (launchd) arrives in
   Step 6.
 

@@ -55,6 +55,7 @@ from workflow.models import (
     SummaryTagSuggestion,
     Tag,
     TagAssignment,
+    TagDeactivatedBy,
     TagOrigin,
     Transcript,
     Section,
@@ -741,10 +742,16 @@ def _materialize_tags(recording: Recording, summary: Summary, tags: list[Tag]) -
     """Record per-version suggestions; materialize effective assignments.
 
     Only ``suggested``-origin assignments are refreshed: ones the new
-    version no longer suggests are deactivated, and new suggestions are
-    activated with ``source_summary`` provenance. Manual (and confirmed)
-    assignments are never modified — a tag the user assigned manually is
-    only recorded as a suggestion for this summary version.
+    version no longer suggests are deactivated (``deactivated_by=
+    "model"``), and new suggestions are activated with
+    ``source_summary`` provenance. Manual (and confirmed) assignments
+    are never modified — a tag the user assigned manually is only
+    recorded as a suggestion for this summary version.
+
+    User suppressions are honoured: an assignment the user explicitly
+    removed/rejected (``deactivated_by="user"``) is never reactivated by
+    a new suggestion; the suggestion itself is still recorded on the
+    summary version for provenance and review.
     """
     now = timezone.now()
     new_keys = {tag.name_key for tag in tags}
@@ -754,6 +761,7 @@ def _materialize_tags(recording: Recording, summary: Summary, tags: list[Tag]) -
         if assignment.tag.name_key not in new_keys:
             assignment.is_active = False
             assignment.deactivated_at = now
+            assignment.deactivated_by = TagDeactivatedBy.MODEL
             assignment.save()
     for tag in tags:
         SummaryTagSuggestion.objects.get_or_create(summary=summary, tag=tag)
@@ -767,10 +775,14 @@ def _materialize_tags(recording: Recording, summary: Summary, tags: list[Tag]) -
                 is_active=True,
             )
         elif not assignment.is_active:
+            if assignment.deactivated_by == TagDeactivatedBy.USER:
+                # Explicit user suppression survives re-summarization.
+                continue
             assignment.is_active = True
             assignment.origin = TagOrigin.SUGGESTED
             assignment.source_summary = summary
             assignment.deactivated_at = None
+            assignment.deactivated_by = TagDeactivatedBy.NONE
             assignment.save()
         elif assignment.origin == TagOrigin.SUGGESTED:
             assignment.source_summary = summary

@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Confirm action — Brain{% endblock %}
+{% block content %}
+<h1>{{ title }}</h1>
+<p class="confirm-note">{{ note }}</p>
+
+<form method="post" action="" class="confirm-form">
+  {% csrf_token %}
+  {% for name, value in hidden.items %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+  {% endfor %}
+  {% if form %}{{ form.as_p }}{% endif %}
+  <input type="hidden" name="confirmed" value="1">
+  <p class="confirm-buttons">
+    <button type="submit" class="confirm-button">Yes, run it</button>
+    <a href="{% url 'recording-detail' recording.pk %}">Cancel</a>
+  </p>
+</form>
+{% endblock %}

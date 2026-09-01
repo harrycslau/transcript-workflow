@@ -85,6 +85,13 @@ embedding:
   model: ""
   api_key_env: BRAIN_LLM_API_KEY
 
+# Web interface presentation (Step 4). Integers only, positive.
+web:
+  # Recordings shown per page on the recordings list.
+  recordings_per_page: 25
+  # Transcript segments rendered per page on transcript views.
+  transcript_segments_per_page: 200
+
 retention:
   enabled: false
   audio_days: 3

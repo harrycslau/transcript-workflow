@@ -438,15 +438,23 @@ def route_one(config: AppConfig, recording: Recording) -> dict:
 def manual_route(recording: Recording, profile_name: str, confirmed_by: str = "cli") -> dict:
     """Append a manual routing decision.
 
+    Eligible states: ``routing``, ``needs_review``, ``ready_to_transcribe``,
+    ``transcribed``, and ``failed`` with ``failure_stage=routing``. A
+    transcribing/hashing/discovered recording, or a failed transcription,
+    cannot be routed (clean ConfigError).
+
     - Needs-review / routing / routing-failed recordings become
       ``ready_to_transcribe``.
+    - ``ready_to_transcribe`` recordings selecting a different profile
+      append the decision and remain ``ready_to_transcribe``.
     - Transcribed recordings selecting a DIFFERENT profile also become
       ``ready_to_transcribe`` (pending retranscription): the currently
       active transcript stays active until a new one succeeds.
-    - Selecting the profile of the already-active decision on a
-      transcribed recording marks that decision verified instead of
-      retranscribing (safe, unsurprising default; use a new profile to
-      trigger retranscription).
+    - Selecting the profile of the already-active decision is IDEMPOTENT:
+      the active decision is verified in place and NO new decision row is
+      appended. On a transcribed recording this confirms without
+      retranscribing (safe, unsurprising default; use a different profile
+      to trigger retranscription).
     """
     from brainlib.config import load_config
 
@@ -459,19 +467,40 @@ def manual_route(recording: Recording, profile_name: str, confirmed_by: str = "c
         )
     with transaction.atomic():
         recording = Recording.objects.select_for_update().get(pk=recording.pk)
+        routing_failed = (
+            recording.processing_status == ProcessingStatus.FAILED
+            and recording.failure_stage == FailureStage.ROUTING
+        )
+        eligible = recording.processing_status in (
+            ProcessingStatus.ROUTING,
+            ProcessingStatus.NEEDS_REVIEW,
+            ProcessingStatus.READY_TO_TRANSCRIBE,
+            ProcessingStatus.TRANSCRIBED,
+        ) or routing_failed
+        if not eligible:
+            raise ConfigError(
+                f"cannot route a recording in status '{recording.processing_status}'"
+            )
         active_decision = RoutingDecision.objects.filter(recording=recording, is_active=True).first()
 
-        if (
-            recording.processing_status == ProcessingStatus.TRANSCRIBED
-            and active_decision is not None
-            and active_decision.profile_name == profile_name
-        ):
-            # Same profile on a transcribed recording: confirm, do not
-            # retranscribe.
-            active_decision.routing_verified = True
-            active_decision.verified_at = timezone.now()
-            active_decision.verified_by = confirmed_by
-            active_decision.save()
+        if active_decision is not None and active_decision.profile_name == profile_name:
+            # Same profile: idempotent — verify the active decision in
+            # place, never append a duplicate decision row.
+            if not active_decision.routing_verified:
+                active_decision.routing_verified = True
+                active_decision.verified_at = timezone.now()
+                active_decision.verified_by = confirmed_by
+                active_decision.save()
+            if recording.processing_status in (
+                ProcessingStatus.NEEDS_REVIEW,
+                ProcessingStatus.ROUTING,
+            ) or routing_failed:
+                # Selecting the active profile from a review/failed-routing
+                # limbo is an explicit go-ahead.
+                recording.failure_stage = ""
+                recording.retranscription_failed = False
+                recording.processing_status = ProcessingStatus.READY_TO_TRANSCRIBE
+                recording.save()
             return {
                 "recording_id": recording.pk,
                 "decision_id": active_decision.pk,
@@ -496,13 +525,9 @@ def manual_route(recording: Recording, profile_name: str, confirmed_by: str = "c
             verified_by=confirmed_by,
             is_active=True,
         )
-        if (
-            recording.processing_status
-            in (ProcessingStatus.NEEDS_REVIEW, ProcessingStatus.ROUTING, ProcessingStatus.TRANSCRIBED)
-        ) or (
-            recording.processing_status == ProcessingStatus.FAILED
-            and recording.failure_stage == FailureStage.ROUTING
-        ):
+        if recording.processing_status != ProcessingStatus.READY_TO_TRANSCRIBE or routing_failed:
+            # ready_to_transcribe recordings selecting a different profile
+            # remain ready with the new decision appended.
             recording.failure_stage = ""
             recording.retranscription_failed = False
             recording.processing_status = ProcessingStatus.READY_TO_TRANSCRIBE

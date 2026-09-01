@@ -4,10 +4,24 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ app_name }}</title>
+  <title>{% block title %}{{ BRAIN_APP_NAME|default:"Brain" }}{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'workflow/base.css' %}">
+  <script src="{% static 'workflow/app.js' %}" defer></script>
 </head>
 <body>
+  <header class="site-header">
+    <nav aria-label="Main navigation">
+      <a href="/" class="brand">Brain</a>
+      <a href="{% url 'recordings' %}">Recordings</a>
+      <a href="{% url 'tags' %}">Tags</a>
+      <a href="{% url 'review' %}">Review</a>
+    </nav>
+  </header>
+  <div class="messages" aria-live="polite">
+    {% for message in messages %}
+      <div class="message message-{{ message.level_tag }}" role="status">{{ message }}</div>
+    {% endfor %}
+  </div>
   <main class="container">
     {% block content %}{% endblock %}
   </main>

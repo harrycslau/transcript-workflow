@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% load workflow_extras %}
+{% block title %}Transcript — Brain{% endblock %}
+{% block content %}
+<h1>Transcript</h1>
+<p class="breadcrumb muted">
+  <a href="{% url 'recording-detail' recording.pk %}">Back to recording</a> ·
+  <a href="{% url 'recording-history' recording.pk %}">History</a>
+</p>
+
+{% if is_active_version %}
+  <p class="current-banner">This is the active transcript.</p>
+{% else %}
+  <p class="historical-banner">
+    This is a HISTORICAL transcript version (<code>{{ transcript.pk }}</code>), not the active one.
+  </p>
+{% endif %}
+
+<p class="muted">
+  {{ segment_count }} segments · created {{ transcript.created_at|local_time }} ·
+  <a href="{% url 'transcript-export' recording.pk %}?format=text{% if not is_active_version %}&amp;version={{ transcript.pk }}{% endif %}">plain text</a> ·
+  <a href="{% url 'transcript-export' recording.pk %}?format=timestamped{% if not is_active_version %}&amp;version={{ transcript.pk }}{% endif %}">timestamped</a>
+</p>
+
+<div class="transcript">
+  {% for segment in page_obj.object_list %}
+    <p class="transcript-segment">
+      {% if segment.start_ms %}<span class="timestamp muted">{{ segment.start_ms|mmss }}</span>{% endif %}
+      {% if segment.speaker %}<span class="speaker">{{ segment.speaker }}:</span>{% endif %}
+      <span class="segment-text">{{ segment.text }}</span>
+    </p>
+  {% empty %}
+    <p class="empty-state">This transcript has no segments.</p>
+  {% endfor %}
+</div>
+
+{% include "workflow/_pagination.html" with page=page_obj %}
+{% endblock %}

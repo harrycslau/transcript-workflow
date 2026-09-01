@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Review — Brain{% endblock %}
+{% block content %}
+<h1>Review</h1>
+<p class="muted">{{ total }} item{{ total|pluralize }} need attention across {{ groups|length }} categories.</p>
+
+{% for group in groups %}
+  <section class="review-group" id="review-{{ group.slug }}">
+    <h2>{{ group.label }} <span class="count-badge">{{ group.count }}</span></h2>
+    {% if group.items %}
+      <ul class="review-list">
+        {% for item in group.items %}
+          <li>
+            <a href="{% url 'recording-detail' item.recording_id %}">
+              {% if item.recording %}{{ item.recording.recorded_at|date:'Y-m-d H:i'|default:item.recording.discovered_at|date:'Y-m-d H:i' }} · <code>{{ item.recording.sha256|slice:':12' }}</code>{% else %}<code>{{ item.recording_id }}</code>{% endif %}
+            </a>
+            <span class="code-chip">{{ item.display_code }}</span>
+            {% if item.suggested_route %}<span class="muted">route: {{ item.suggested_route }}{% if item.confidence %} ({{ item.confidence }}){% endif %}</span>{% endif %}
+            {% if item.profile %}<span class="muted">profile: {{ item.profile }}</span>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="empty-state">Nothing here. Good.</p>
+    {% endif %}
+  </section>
+{% endfor %}
+{% endblock %}

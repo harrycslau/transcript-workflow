@@ -4,10 +4,18 @@
 <p class="muted">Local-first transcript workflow. Status below is a lightweight check; run <code>brain doctor</code> for full diagnostics.</p>
 
 <section>
-  <h2>Storage paths</h2>
+  <h2>Storage</h2>
+  <p class="muted">Runtime storage availability (locations are intentionally not shown on web pages; run <code>brain doctor</code> for full local diagnostics).</p>
   <ul>
-    {% for label, path in paths.items %}
-    <li><strong>{{ label }}</strong>: <code>{{ path }}</code>{% if not path.exists %} <span class="warn">(missing)</span>{% endif %}</li>
+    {% for entry in storage_status %}
+      <li>
+        <strong>{{ entry.label }}</strong>:
+        {% if entry.status == "available" %}
+          <span class="pass">available</span>
+        {% else %}
+          <span class="warn">missing</span>
+        {% endif %}
+      </li>
     {% endfor %}
   </ul>
 </section>
@@ -15,7 +23,6 @@
 <section>
   <h2>MacWhisper</h2>
   <p>
-    Command: <code>{{ macwhisper.command }}</code><br>
     {% if macwhisper.found %}
       <span class="pass">found</span> (presence check only; run <code>brain doctor</code> for version info)
     {% else %}

@@ -217,3 +217,46 @@ class TestSemanticValidation:
 
     def test_blank_llm_provider_rejected(self, tmp_path):
         self._invalid(tmp_path, lambda d: d["llm"].update(provider=""), "must not be blank")
+
+
+class TestWebSection:
+    def test_web_defaults_when_section_omitted(self, tmp_path):
+        config = load_config(write_config(tmp_path, minimal_valid()))
+        assert config.web.recordings_per_page == 25
+        assert config.web.transcript_segments_per_page == 200
+
+    def test_web_values_parsed(self, tmp_path):
+        data = minimal_valid()
+        data["web"] = {"recordings_per_page": 10, "transcript_segments_per_page": 50}
+        config = load_config(write_config(tmp_path, data))
+        assert config.web.recordings_per_page == 10
+        assert config.web.transcript_segments_per_page == 50
+
+    def test_web_rejects_boolean(self, tmp_path):
+        data = minimal_valid()
+        data["web"] = {"recordings_per_page": True}
+        with pytest.raises(ConfigError, match="recordings_per_page"):
+            load_config(write_config(tmp_path, data))
+
+    def test_web_rejects_non_positive(self, tmp_path):
+        data = minimal_valid()
+        data["web"] = {"recordings_per_page": 0}
+        with pytest.raises(ConfigError, match="positive"):
+            load_config(write_config(tmp_path, data))
+
+    def test_web_rejects_string(self, tmp_path):
+        data = minimal_valid()
+        data["web"] = {"transcript_segments_per_page": "many"}
+        with pytest.raises(ConfigError, match="transcript_segments_per_page"):
+            load_config(write_config(tmp_path, data))
+
+    def test_web_rejects_non_mapping_section(self, tmp_path):
+        data = minimal_valid()
+        data["web"] = 25
+        with pytest.raises(ConfigError, match="\\[web\\] must be a mapping"):
+            load_config(write_config(tmp_path, data))
+
+    def test_example_config_documents_web_section(self):
+        config = load_config(EXAMPLE)
+        assert config.web.recordings_per_page == 25
+        assert config.web.transcript_segments_per_page == 200

@@ -1,0 +1,11 @@
+{% if page.paginator.num_pages > 1 %}
+<nav class="pagination" aria-label="Pages">
+  {% if page.has_previous %}
+    <a href="?{% if base_qs %}{{ base_qs }}&amp;{% endif %}page={{ page.previous_page_number }}">&laquo; Previous</a>
+  {% endif %}
+  <span class="muted">Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+  {% if page.has_next %}
+    <a href="?{% if base_qs %}{{ base_qs }}&amp;{% endif %}page={{ page.next_page_number }}">Next &raquo;</a>
+  {% endif %}
+</nav>
+{% endif %}

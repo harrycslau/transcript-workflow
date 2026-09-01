@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Pipeline busy — Brain{% endblock %}
+{% block content %}
+<h1>Pipeline busy (409)</h1>
+<p>Another pipeline process is active{{ detail|default:"" }}. Wait for it to finish and try again.</p>
+<p><a href="{% url 'review' %}">Go to review</a> · <a href="/">Back to home</a></p>
+{% endblock %}

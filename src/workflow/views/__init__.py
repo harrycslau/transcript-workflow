@@ -30,24 +30,28 @@ logger = logging.getLogger(__name__)
 def _lightweight_status(config: AppConfig) -> dict:
     """Cheap, bounded status for the home page.
 
-    Only local filesystem checks (path existence) are performed.
-    External connectivity is intentionally NOT checked here.
+    Only local filesystem existence checks are performed (no directory
+    creation, no stat beyond ``is_dir``). Step 4 privacy policy: ABSOLUTE
+    FILESYSTEM PATHS ARE NEVER PLACED IN TEMPLATE CONTEXT — storage is
+    reported as label + availability only. Detailed local diagnostics
+    (including paths) remain the domain of ``brain doctor`` in a
+    terminal. External connectivity is intentionally NOT checked here.
     """
     storage = config.storage
-    paths = {
-        "inbox": storage.inbox,
-        "database": storage.database,
-        "transcripts": storage.transcripts,
-        "exports": storage.exports,
-        "logs": storage.logs,
-        "temp": storage.temp,
-    }
+    storage_status = [
+        {"label": "Inbox", "status": "available" if storage.inbox.is_dir() else "missing"},
+        {"label": "Database", "status": "available" if storage.database.parent.is_dir() else "missing"},
+        {"label": "Transcripts", "status": "available" if storage.transcripts.is_dir() else "missing"},
+        {"label": "Exports", "status": "available" if storage.exports.is_dir() else "missing"},
+        {"label": "Logs", "status": "available" if storage.logs.is_dir() else "missing"},
+        {"label": "Temporary storage", "status": "available" if storage.temp.is_dir() else "missing"},
+    ]
     return {
         "app_name": APP_NAME,
         "version": django_settings.BRAIN_VERSION,
-        "paths": paths,
+        "storage_status": storage_status,
         "macwhisper": {
-            "command": config.macwhisper.command,
+            # Presence only — the configured command path is never rendered.
             "found": bool(shutil.which(config.macwhisper.command)),
         },
         "omlx": {

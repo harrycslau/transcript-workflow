@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% load workflow_extras %}
+{% block title %}Historical summary — Brain{% endblock %}
+{% block content %}
+<h1>Historical summary — {{ summary.title }}</h1>
+<p class="breadcrumb muted">
+  <a href="{% url 'recording-detail' recording.pk %}">Back to recording</a> ·
+  <a href="{% url 'recording-history' recording.pk %}">History</a>
+</p>
+
+{% if is_current %}
+  <p class="current-banner">This summary IS the current summary of the recording.</p>
+{% else %}
+  <p class="historical-banner">
+    This is a HISTORICAL summary (version #{{ summary.ordinal }}). It belongs to transcript
+    version <code>{{ summary.transcript_id }}</code> and is {{ summary.is_active|yesno:"still active in its own scope,retired from its scope" }} —
+    it is not the current summary of this recording.
+  </p>
+{% endif %}
+
+<p class="copy-controls">
+  <a href="{% url 'summary-export' recording.pk %}?format=markdown&amp;version={{ summary.pk }}">Markdown</a> ·
+  <a href="{% url 'summary-export' recording.pk %}?format=text&amp;version={{ summary.pk }}">Plain text</a> ·
+  <a href="{% url 'summary-export' recording.pk %}?format=json&amp;version={{ summary.pk }}">JSON</a>
+</p>
+
+{% include "workflow/_summary_body.html" %}
+
+<details class="provenance">
+  <summary>Provenance</summary>
+  <dl>
+    <dt>Summary ID</dt><dd><code>{{ summary.pk }}</code></dd>
+    <dt>Version</dt><dd>#{{ summary.ordinal }}</dd>
+    <dt>Transcript version</dt><dd><code>{{ summary.transcript_id }}</code></dd>
+    <dt>Active in scope</dt><dd>{{ summary.is_active|yesno:"yes,no" }}</dd>
+    <dt>Current for recording</dt><dd>{{ is_current|yesno:"yes,no" }}</dd>
+    <dt>Model</dt><dd>{{ summary.model_id|default:"unknown" }}</dd>
+    <dt>Generation</dt><dd>{{ summary.generation_mode }}</dd>
+    <dt>Created</dt><dd>{{ summary.created_at|local_time }}</dd>
+    {% if summary.superseded_at %}<dt>Superseded</dt><dd>{{ summary.superseded_at|local_time }}</dd>{% endif %}
+  </dl>
+</details>
+{% endblock %}

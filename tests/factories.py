@@ -14,7 +14,15 @@ from brainlib.config import (
     SummarizationConfig,
     TagSpec,
     TagsConfig,
+    WebConfig,
 )
+
+
+def default_web(**overrides) -> WebConfig:
+    return WebConfig(
+        recordings_per_page=overrides.pop("recordings_per_page", 25),
+        transcript_segments_per_page=overrides.pop("transcript_segments_per_page", 200),
+    )
 
 
 def default_summarization(**overrides) -> SummarizationConfig:
@@ -115,6 +123,7 @@ def make_config(tmp_path, **overrides) -> AppConfig:
         summarization=overrides.pop("summarization", None) or default_summarization(),
         tags=overrides.pop("tags", None) or default_tags(),
         initial_tags=overrides.pop("initial_tags", [TagSpec(name="Unknown", description="Unclassifiable")]),
+        web=overrides.pop("web", None) or default_web(),
     )
 
 
@@ -180,6 +189,10 @@ def write_cli_config(tmp_path, monkeypatch, **kwargs):
         },
         "tags": {
             "allowed": [{"name": t.name, "description": t.description} for t in config.tags.allowed]
+        },
+        "web": {
+            "recordings_per_page": config.web.recordings_per_page,
+            "transcript_segments_per_page": config.web.transcript_segments_per_page,
         },
         "timezone": config.timezone,
     }
@@ -276,3 +289,103 @@ def map_summary_json(**overrides) -> str:
     import json
 
     return json.dumps(payload, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# Step 4 web-test helpers (synthetic only; no audio, no network)
+# ---------------------------------------------------------------------------
+
+
+def make_tag(name, description="", *, configured=True):
+    """Create a Tag row directly (bypasses YAML sync — UI tests only)."""
+    from brainlib.config import tag_name_key
+    from workflow.models import Tag
+
+    return Tag.objects.create(
+        name=name, name_key=tag_name_key(name), description=description, is_configured=configured
+    )
+
+
+def make_tag_assignment(recording, tag, *, origin="suggested", active=True, source_summary=None):
+    from django.utils import timezone as tz
+
+    from workflow.models import TagAssignment
+
+    assignment = TagAssignment.objects.create(
+        recording=recording,
+        tag=tag,
+        origin=origin,
+        source_summary=source_summary,
+        is_active=active,
+        # Inactive rows must carry an actor at INSERT time to satisfy
+        # the deactivation-state check constraint.
+        deactivated_by="" if active else "model",
+    )
+    if not active:
+        assignment.deactivated_at = tz.now()
+        assignment.save()
+    return assignment
+
+
+def make_summary_version(recording, transcript, section, *, title="Meeting about grading",
+                         overview="Discussed grading plans.", is_active=True, **field_overrides):
+    """Create a Summary row + its summarization attempt directly.
+
+    Mirrors what persist_summary writes (structured payload, provenance)
+    without running any oMLX work. Updates the recording's summary
+    status to CURRENT when the summary is active.
+    """
+    from django.utils import timezone as tz
+
+    from workflow.models import (
+        AttemptOutcome,
+        AttemptStage,
+        ProcessingAttempt,
+        Summary,
+        SummaryState,
+    )
+
+    last_attempt = ProcessingAttempt.objects.filter(
+        recording=recording, stage=AttemptStage.SUMMARIZATION
+    ).order_by("-ordinal").first()
+    attempt = ProcessingAttempt.objects.create(
+        recording=recording,
+        stage=AttemptStage.SUMMARIZATION,
+        ordinal=(last_attempt.ordinal + 1) if last_attempt else 1,
+        outcome=AttemptOutcome.SUCCESS,
+        finished_at=tz.now(),
+        model_id="test-model",
+    )
+    last = Summary.objects.filter(recording=recording).order_by("-ordinal").first()
+    fields = dict(
+        title=title,
+        overview=overview,
+        key_points=["Point one"],
+        action_items=[{"text": "Do a thing", "owner": None, "due_date": None}],
+        people=["Alice"],
+        organizations=[],
+        topics=["grading"],
+        language="en",
+        suggested_tags_raw={"suggested": [], "rejected": []},
+        model_id="test-model",
+        prompt_version="1",
+        parser_version="1",
+        chunk_count=1,
+        input_characters=100,
+        generation_mode="manual",
+    )
+    fields.update(field_overrides)
+    summary = Summary.objects.create(
+        recording=recording,
+        transcript=transcript,
+        section=section,
+        attempt=attempt,
+        ordinal=(last.ordinal + 1) if last else 1,
+        is_active=is_active,
+        activated_at=tz.now() if is_active else None,
+        **fields,
+    )
+    if is_active:
+        recording.summary_status = SummaryState.CURRENT
+        recording.save(update_fields=["summary_status"])
+    return summary

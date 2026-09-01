@@ -1,0 +1,46 @@
+{% load workflow_extras %}
+<div class="summary-body">
+  <h2>{{ summary.title }}</h2>
+  <section class="summary-overview">
+    <h3>Overview</h3>
+    <p>{{ summary.overview }}</p>
+  </section>
+  {% if summary.key_points %}
+    <section class="summary-points">
+      <h3>Key points</h3>
+      <ul>
+        {% for point in summary.key_points %}<li>{{ point }}</li>{% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+  <section class="summary-actions">
+    <h3>Action items</h3>
+    {% if summary.action_items %}
+      <ul>
+        {% for item in summary.action_items %}
+          <li>
+            {{ item.text }}
+            {% if item.owner or item.due_date %}
+              <span class="muted">
+                ({% if item.owner %}owner: {{ item.owner }}{% endif %}
+                {% if item.owner and item.due_date %}; {% endif %}
+                {% if item.due_date %}due: {{ item.due_date }}{% endif %})
+              </span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>No action items identified.</p>
+    {% endif %}
+  </section>
+  {% if summary.people %}
+    <section><h3>People</h3><ul>{% for name in summary.people %}<li>{{ name }}</li>{% endfor %}</ul></section>
+  {% endif %}
+  {% if summary.organizations %}
+    <section><h3>Organizations</h3><ul>{% for name in summary.organizations %}<li>{{ name }}</li>{% endfor %}</ul></section>
+  {% endif %}
+  {% if summary.topics %}
+    <section><h3>Topics</h3><ul>{% for name in summary.topics %}<li>{{ name }}</li>{% endfor %}</ul></section>
+  {% endif %}
+</div>

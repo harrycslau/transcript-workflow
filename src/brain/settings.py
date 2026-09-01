@@ -33,12 +33,32 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 
 INSTALLED_APPS = [
     "django.contrib.staticfiles",
+    "django.contrib.messages",
     "workflow",
 ]
 
 MIDDLEWARE = [
+    "django.middleware.security.SecurityMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "workflow.middleware.ContentSecurityPolicyMiddleware",
 ]
+
+# Messages use signed cookies: no session table, no session cookies.
+# CookieStorage derives its cookie security flags from the
+# SESSION_COOKIE_* settings below (HttpOnly, SameSite=Lax; Secure is
+# off because the app serves plain local HTTP on 127.0.0.1).
+MESSAGE_STORAGE = "django.contrib.messages.storage.cookie.CookieStorage"
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = False
+SESSION_COOKIE_NAME = "brain_session"
+
+X_FRAME_OPTIONS = "DENY"
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
 
 ROOT_URLCONF = "brain.urls"
 
@@ -51,6 +71,7 @@ TEMPLATES = [
             "context_processors": [
                 "django.template.context_processors.debug",
                 "django.template.context_processors.request",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
