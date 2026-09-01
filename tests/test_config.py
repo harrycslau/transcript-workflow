@@ -260,3 +260,137 @@ class TestWebSection:
         config = load_config(EXAMPLE)
         assert config.web.recordings_per_page == 25
         assert config.web.transcript_segments_per_page == 200
+
+
+class TestHeuristicAutoRoute:
+    def test_defaults_when_omitted(self, tmp_path):
+        config = load_config(write_config(tmp_path, minimal_valid()))
+        gate = config.macwhisper.routing.heuristic_auto_route
+        assert gate.enabled is True
+        assert gate.min_non_silent_windows == 2
+        assert gate.min_cjk_ratio == 0.60
+        assert gate.cantonese_enabled is True
+        assert gate.cantonese_min_score == 4.0
+        assert gate.mandarin_enabled is True
+        assert gate.mandarin_min_score == 4.0
+        assert gate.dominance_ratio == 3.0
+        assert gate.max_opposing_score == 0.5
+
+    def test_yaml_override(self, tmp_path):
+        data = minimal_valid()
+        data["macwhisper"]["routing"] = {
+            "heuristic_auto_route": {
+                "enabled": False,
+                "min_non_silent_windows": 3,
+                "min_cjk_ratio": 0.8,
+                "cantonese_enabled": False,
+                "cantonese_min_score": 6.0,
+                "mandarin_enabled": False,
+                "mandarin_min_score": 5.5,
+                "dominance_ratio": 4.0,
+                "max_opposing_score": 0.2,
+            }
+        }
+        config = load_config(write_config(tmp_path, data))
+        gate = config.macwhisper.routing.heuristic_auto_route
+        assert gate.enabled is False
+        assert gate.min_non_silent_windows == 3
+        assert gate.min_cjk_ratio == 0.8
+        assert gate.cantonese_enabled is False
+        assert gate.cantonese_min_score == 6.0
+        assert gate.mandarin_enabled is False
+        assert gate.mandarin_min_score == 5.5
+        assert gate.dominance_ratio == 4.0
+        assert gate.max_opposing_score == 0.2
+
+    def _invalid(self, tmp_path, mutate, match):
+        data = minimal_valid()
+        data["macwhisper"]["routing"] = {"heuristic_auto_route": {}}
+        section = data["macwhisper"]["routing"]["heuristic_auto_route"]
+        mutate(section)
+        with pytest.raises(ConfigError, match=match):
+            load_config(write_config(tmp_path, data))
+
+    def test_non_mapping_section_rejected(self, tmp_path):
+        data = minimal_valid()
+        data["macwhisper"]["routing"] = {"heuristic_auto_route": True}
+        with pytest.raises(ConfigError, match="heuristic_auto_route"):
+            load_config(write_config(tmp_path, data))
+
+    def test_boolean_rejected_as_number(self, tmp_path):
+        self._invalid(tmp_path, lambda s: s.update(min_cjk_ratio=True), "got bool")
+
+    def test_min_cjk_ratio_out_of_range(self, tmp_path):
+        self._invalid(tmp_path, lambda s: s.update(min_cjk_ratio=1.5), "between 0 and 1")
+        self._invalid(tmp_path, lambda s: s.update(min_cjk_ratio=-0.1), "between 0 and 1")
+
+    def test_negative_min_score_rejected(self, tmp_path):
+        self._invalid(tmp_path, lambda s: s.update(cantonese_min_score=-1), ">= 0")
+
+    def test_dominance_ratio_must_exceed_one(self, tmp_path):
+        self._invalid(tmp_path, lambda s: s.update(dominance_ratio=0.5), ">= 1.0")
+
+    def test_negative_max_opposing_rejected(self, tmp_path):
+        self._invalid(tmp_path, lambda s: s.update(max_opposing_score=-0.5), ">= 0")
+
+    def test_max_opposing_must_be_below_enabled_min_scores(self, tmp_path):
+        self._invalid(
+            tmp_path,
+            lambda s: s.update(max_opposing_score=4.0, cantonese_min_score=4.0),
+            "below every enabled min score",
+        )
+
+    def test_disabled_family_relaxes_max_opposing_check(self, tmp_path):
+        data = minimal_valid()
+        data["macwhisper"]["routing"] = {
+            "heuristic_auto_route": {
+                "cantonese_enabled": False,
+                "mandarin_enabled": False,
+                "max_opposing_score": 99.0,
+            }
+        }
+        config = load_config(write_config(tmp_path, data))
+        assert config.macwhisper.routing.heuristic_auto_route.max_opposing_score == 99.0
+
+    def test_non_positive_windows_rejected(self, tmp_path):
+        self._invalid(tmp_path, lambda s: s.update(min_non_silent_windows=0), "positive integer")
+
+
+class TestNormalizeAndSpeakersFallbackKeys:
+    def test_normalize_input_defaults_true(self, tmp_path):
+        config = load_config(write_config(tmp_path, minimal_valid()))
+        assert config.macwhisper.normalize_input is True
+
+    def test_normalize_input_override(self, tmp_path):
+        data = minimal_valid()
+        data["macwhisper"]["normalize_input"] = False
+        config = load_config(write_config(tmp_path, data))
+        assert config.macwhisper.normalize_input is False
+
+    def test_normalize_input_rejects_non_bool(self, tmp_path):
+        data = minimal_valid()
+        data["macwhisper"]["normalize_input"] = "yes"
+        with pytest.raises(ConfigError, match="normalize_input"):
+            load_config(write_config(tmp_path, data))
+
+    def test_normalize_input_rejects_boolean_for_number_confusion(self, tmp_path):
+        data = minimal_valid()
+        data["macwhisper"]["speakers_fallback"] = "yes"
+        with pytest.raises(ConfigError, match="speakers_fallback"):
+            load_config(write_config(tmp_path, data))
+
+    def test_speakers_fallback_defaults_false(self, tmp_path):
+        config = load_config(write_config(tmp_path, minimal_valid()))
+        assert config.macwhisper.speakers_fallback is False
+
+    def test_speakers_fallback_override(self, tmp_path):
+        data = minimal_valid()
+        data["macwhisper"]["speakers_fallback"] = True
+        config = load_config(write_config(tmp_path, data))
+        assert config.macwhisper.speakers_fallback is True
+
+    def test_example_config_documents_new_keys(self):
+        text = EXAMPLE.read_text()
+        assert "normalize_input" in text
+        assert "speakers_fallback" in text
+        assert "heuristic_auto_route" in text

@@ -116,6 +116,7 @@ class TestMigrationInspection:
         assert any(p.startswith("workflow.0003_") for p in pending)
         assert any(p.startswith("workflow.0004_") for p in pending)
         assert any(p.startswith("workflow.0005_") for p in pending)
+        assert any(p.startswith("workflow.0006_") for p in pending)
         # Labels are safe identifiers: no paths, spaces, SQL, or content.
         for label in pending:
             assert "/" not in label
@@ -133,6 +134,7 @@ class TestMigrationInspection:
             "workflow.0003_tag_recording_resummarization_failed_and_more",
             "workflow.0004_backfill_summary_status",
             "workflow.0005_tagassignment_deactivated_by_and_more",
+            "workflow.0006_attempt_context_json",
         ]
 
     def test_unavailable_migration_table_category(self, monkeypatch):

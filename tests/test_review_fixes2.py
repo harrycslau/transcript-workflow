@@ -217,7 +217,7 @@ class TestDeletedSource:
 
         used_paths = []
 
-        def fake(config, rec, source_path, model_id, language_arg, runner=None):
+        def fake(config, rec, source_path, model_id, language_arg, runner=None, source_info=None):
             used_paths.append(str(source_path))
 
             def ok_runner(argv, **kwargs):

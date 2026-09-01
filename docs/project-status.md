@@ -1,8 +1,79 @@
 # Project status — implementation handoff (end of Step 4)
 
-This file reflects the repository as of the end of Step 4. It is a
-snapshot, not a durable instruction file; `AGENTS.md` holds the
-standing rules.
+This file reflects the repository as of the end of Step 4 plus the
+post-incident routing/transcription fixes. It is a snapshot, not a
+durable instruction file; `AGENTS.md` holds the standing rules.
+
+## Post-incident fixes (routing + MP3/M4A transcription)
+
+Real incident: an MP3 with overwhelming Cantonese evidence
+(zh-HK marker score 9.61 vs 0.0, CJK ratio 0.826, three non-silent
+windows) landed in `uncertain` solely because the oMLX classifier
+output was invalid; afterwards, full transcription with
+`apple:zh-HK --speakers` failed and only the stderr progress line was
+stored, hiding the real error. Synthetic validation on MacWhisper
+14.8 (1480) proved the stable signature: `apple:zh-HK` rejects
+`--speakers` ("does not support speaker detection (diarization)") on
+WAV/M4A/AAC-in-renamed-.mp3 — the incident's transcription could never
+have succeeded with diarization requested. (Note: the synthetic "MP3"
+fixture contained AAC data under an `.mp3` name because macOS afconvert
+has no MP3 encoder, so NATIVE MP3 direct input was NOT proven by that
+test. With normalization on the default path, native MP3 is converted
+to PCM WAV before full transcription, so direct MP3 support is not
+required.)
+
+- **Heuristic auto-route gate** (`macwhisper.routing.heuristic_auto_route`):
+  used ONLY when the classifier is invalid or unavailable. All
+  independent conditions must hold for exactly one enabled Chinese
+  family (chinese family verdict, unambiguous zh verdict, min CJK
+  ratio 0.60, min marker score 4.0, dominance ratio 3.0 over opposing
+  scores, opposing ceiling 0.5, ≥2 non-silent windows). Reason codes
+  `auto_confident_heuristic_classifier_invalid` /
+  `auto_confident_heuristic_classifier_unavailable`; `ready_to_
+  transcribe=True` from the gate, but `_apply_outcome` still applies
+  `routing.auto_transcribe` (false ⇒ Needs Review). Scores are
+  uncalibrated evidence, never probabilities; no European gate. The
+  incident evidence passes the default gate.
+- **Classifier request state machine** (finite, no loops): one
+  structured request (`response_format` json_schema); one plain
+  request ONLY after an explicit HTTP 400/422 response_format/json_schema
+  capability rejection; one repair request ONLY after an HTTP-successful
+  schema-invalid response. Restricted parser tolerates pure JSON, one
+  fence, or one closed bounded `<think>...</think>` block followed by
+  the object; rejects commentary/multiple objects. Bounded diagnostics
+  (call count, capability, stable validation categories) stored in
+  evidence; response bodies/prompts never persisted.
+- **Transcription stderr**: `Error:` line + up to two diagnostic lines
+  selected (progress line ignored), path-sanitized, 300-char cap at
+  persistence AND rendering; stable categories
+  (`mw_connection_failure`, `mw_speakers_failure`, `mw_input_unreadable`,
+  `mw_nonzero_exit`).
+- **Input normalization** (`macwhisper.normalize_input`, default true):
+  non-PCM-WAV sources (MP3/M4A) are converted to a temporary 16 kHz
+  mono PCM WAV under `data/temp/transcription/<recording>/attempt_<n>/`;
+  original read-only; temp removed in `finally` AND by the
+  interruption-aware orphan sweeper.
+- **Orphan temp cleanup** (`workflow/services/tempcleanup.py`): runs in
+  `recover_interruptions` under the pipeline lock; deletes ONLY
+  validated `<uuid>/attempt_<int>` dirs under the bounded
+  `data/temp/{routing,transcription}` namespaces with no matching
+  unfinished attempt; symlinks/invalid names never followed; counts in
+  recovery `--json`.
+- **Provenance**: migration `0006` adds nullable
+  `ProcessingAttempt.context_json` (normalization facts, per-run
+  outcomes, speakers fallback); `cli_args_json` shape unchanged.
+- **Speakers fallback** (`macwhisper.speakers_fallback`, default
+  **false**): one automatic `--no-speakers` retry within the same
+  attempt ONLY on the validated stable diarization signature; both runs
+  recorded; degradation visibly reported in CLI result, web flash, and
+  attempt history.
+- Router version bumped to "2"; heuristic gate settings fingerprinted
+  into evidence for later evaluation against human corrections.
+- Suite after this round: 785 passing (baseline 689 + 96 new across the
+  heuristic gate, classifier state machine/parser, normalization,
+  speakers fallback, orphan sweep, config validation, and surfacing);
+  Django check clean; `makemigrations --check` clean; `git diff --check`
+  clean.
 
 ## Step 4 — delivered
 

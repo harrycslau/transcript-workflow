@@ -16,6 +16,16 @@ macwhisper:
   model: null
   language: auto
   speakers: true
+  # Convert non-PCM-WAV input (MP3/M4A/...) to a temporary 16 kHz mono
+  # PCM WAV under data/temp before full transcription. The original file
+  # is read-only and never modified; the temp file is removed after the
+  # attempt (and orphaned copies are swept during recovery).
+  normalize_input: true
+  # One automatic --no-speakers retry after a stable diarization-specific
+  # failure (e.g. apple zh models reject --speakers). Default OFF: when
+  # the fallback succeeds the transcript has no speaker labels, and the
+  # degradation is recorded in the attempt history and reported.
+  speakers_fallback: false
   output_format: json
   # A file must be unchanged for this long before it is hashed.
   file_stable_seconds: 30
@@ -32,6 +42,29 @@ macwhisper:
     # router score, not a calibrated probability.
     confidence_threshold: 0.80
     default_profile: european
+
+    # Conservative deterministic auto-route gate used ONLY when the oMLX
+    # classifier is invalid or unavailable. ALL conditions must hold for
+    # exactly one enabled Chinese family: chinese family verdict,
+    # unambiguous zh verdict, minimum CJK ratio, minimum target marker
+    # score, dominance ratio over opposing marker scores, a separate
+    # absolute ceiling on opposing scores, and non-silent window
+    # coverage. These are heuristic evidence thresholds, NOT calibrated
+    # probabilities; anything weaker/ambiguous/contradictory stays in
+    # Needs Review. Cantonese and Mandarin have independent thresholds
+    # and kill switches; European has no heuristic gate. When
+    # auto_transcribe is false, gated recordings wait in Needs Review
+    # like every other automatic route.
+    heuristic_auto_route:
+      enabled: true
+      min_non_silent_windows: 2
+      min_cjk_ratio: 0.60
+      cantonese_enabled: true
+      cantonese_min_score: 4.0
+      mandarin_enabled: true
+      mandarin_min_score: 4.0
+      dominance_ratio: 3.0
+      max_opposing_score: 0.5
 
     # language: null means "do not pass --language". Validated against
     # MacWhisper 14.7.1: parakeet rejects `--language multilingual` and

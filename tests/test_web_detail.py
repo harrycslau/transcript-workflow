@@ -244,12 +244,28 @@ class TestSummaryVersions:
         ProcessingAttempt.objects.create(
             recording=recording, stage=AttemptStage.TRANSCRIPTION, ordinal=2,
             outcome=AttemptOutcome.NONZERO_EXIT, error_code="mw_exit_1",
-            error_message="sanitize me", finished_at=None,
+            error_message="Transcribing x.mp3... | Error: boom", finished_at=None,
         )
         response = client.get(f"/recordings/{recording.pk}/history/")
         content = response.content.decode()
         assert "mw_exit_1" in content
-        assert "sanitize me" not in content  # raw error message never rendered
+        # Bounded sanitized detail is rendered (re-sanitized at the
+        # rendering boundary), never raw stderr.
+        assert "Transcribing x.mp3... | Error: boom" in content
+
+    def test_history_error_detail_rendered_sanitized(self, client):
+        """Rendering-boundary sanitization: unsafe content in a historical
+        row (e.g. written by older versions) is sanitized for display."""
+        recording, _t, _s = make_transcribed_recording(["a"], sha="hist-3")
+        ProcessingAttempt.objects.create(
+            recording=recording, stage=AttemptStage.TRANSCRIPTION, ordinal=2,
+            outcome=AttemptOutcome.NONZERO_EXIT, error_code="mw_exit_1",
+            error_message="failed on /Users/harry/secret/inbox/file.wav", finished_at=None,
+        )
+        response = client.get(f"/recordings/{recording.pk}/history/")
+        content = response.content.decode()
+        assert "/Users/harry/secret/inbox/file.wav" not in content
+        assert "&lt;path&gt;" in content  # escaped <path> replacement
 
 
 class TestGetPurity:

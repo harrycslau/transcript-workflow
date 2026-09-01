@@ -17,13 +17,20 @@ script choice can describe the model rather than the source. The
 deciding zh evidence is colloquial vocabulary markers plus the
 classifier; near-ties always go to needs_review (zh_ambiguous).
 
-When the classifier is unavailable or invalid, the result is
-needs_review (no non-LLM auto-transcription fallback has been
-evaluated).
+When the classifier is unavailable or invalid, a conservative
+deterministic heuristic gate (``heuristic_auto_route`` config) may
+auto-route when ALL independent conditions hold: family verdict
+chinese, zh verdict matches the target without ambiguity, minimum CJK
+ratio, minimum marker score for the target, dominance of the target
+score over opposing marker scores, a low absolute ceiling on opposing
+scores, and sufficient non-silent sample coverage. Scores are
+uncalibrated evidence, never probabilities. Everything weaker,
+ambiguous, contradictory, or incomplete stays needs_review.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -32,13 +39,14 @@ from pathlib import Path
 
 import httpx
 
-from brainlib.config import AppConfig
+from brainlib.config import AppConfig, HeuristicAutoRouteConfig
 from workflow.services import audiosamples
 from workflow.services.audiosamples import SampleExtractionError
 
 logger = logging.getLogger(__name__)
 
-ROUTER_VERSION = "1"
+ROUTER_VERSION = "2"
+HEURISTIC_GATE_VERSION = "1"
 
 ROUTE_CANTONESE = "cantonese"
 ROUTE_MANDARIN = "mandarin"
@@ -47,6 +55,8 @@ ROUTE_UNCERTAIN = "uncertain"
 
 # Stable reason codes surfaced in RoutingDecision.reason_code.
 REASON_AUTO_CONFIDENT = "auto_confident"
+REASON_AUTO_CONFIDENT_HEURISTIC_INVALID = "auto_confident_heuristic_classifier_invalid"
+REASON_AUTO_CONFIDENT_HEURISTIC_UNAVAILABLE = "auto_confident_heuristic_classifier_unavailable"
 REASON_LOW_CONFIDENCE = "low_confidence"
 REASON_ZH_AMBIGUOUS = "zh_ambiguous"
 REASON_CANDIDATES_DISAGREE = "candidates_disagree"
@@ -57,6 +67,39 @@ REASON_ROUTING_DISABLED = "routing_disabled"
 REASON_CONTRADICTORY = "contradictory_evidence"
 REASON_TOO_SHORT = "too_short"
 REASON_SILENT = "silent_audio"
+
+# Classifier request state machine (finite; no loops):
+#   1. structured request (response_format json_schema)
+#      -> capability rejection (HTTP 400/422 explicitly naming
+#         response_format/json_schema as unsupported/unknown/unexpected)
+#         allows exactly one plain initial request
+#      -> HTTP-successful but schema-invalid content allows exactly one
+#         repair request
+#   2. plain initial request (only via capability rejection)
+#   3. repair request (only after schema-invalid structured response)
+MAX_CLASSIFIER_CALLS = 3
+CLASSIFIER_CALL_STRUCTURED = "structured"
+CLASSIFIER_CALL_PLAIN = "plain"
+CLASSIFIER_CALL_REPAIR = "repair"
+
+# Capability-rejection classification: ALL three must hold (HTTP
+# 400/422; explicit response_format/json_schema mention; explicit
+# unsupported/unknown/unexpected-parameter semantics). Generic
+# "unexpected"/"unknown parameter" text alone is insufficient.
+_CAPABILITY_STATUS_CODES = (400, 422)
+_CAPABILITY_PARAM_PATTERNS = ("response_format", "responseformat", "json_schema")
+_CAPABILITY_SEMANTIC_PATTERNS = (
+    "unsupported",
+    "unknown parameter",
+    "unexpected parameter",
+    "unrecognized parameter",
+    "not supported",
+    "invalid parameter",
+)
+
+# Bounded tolerance for model-output wrappers: the leading think block
+# may not exceed this many characters.
+MAX_THINK_BLOCK_CHARS = 10000
 
 # Cantonese colloquial vocabulary/grammar markers (both scripts where relevant).
 CANTONESE_MARKERS = ["係", "唔", "咗", "喺", "嘅", "冇", "佢", "嗰", "嚟", "乜", "點", "畀", "攞", "啲", "噉"]
@@ -176,6 +219,172 @@ def _excerpt(text: str, limit: int = 200) -> str:
     return text[:limit]
 
 
+def heuristic_gate_fingerprint(cfg: HeuristicAutoRouteConfig) -> str:
+    """Stable bounded fingerprint of the resolved gate settings."""
+    canonical = json.dumps(
+        {
+            "enabled": cfg.enabled,
+            "min_non_silent_windows": cfg.min_non_silent_windows,
+            "min_cjk_ratio": cfg.min_cjk_ratio,
+            "cantonese_enabled": cfg.cantonese_enabled,
+            "cantonese_min_score": cfg.cantonese_min_score,
+            "mandarin_enabled": cfg.mandarin_enabled,
+            "mandarin_min_score": cfg.mandarin_min_score,
+            "dominance_ratio": cfg.dominance_ratio,
+            "max_opposing_score": cfg.max_opposing_score,
+            "gate_version": HEURISTIC_GATE_VERSION,
+        },
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def evaluate_heuristic_gate(evidence: dict, cfg: HeuristicAutoRouteConfig) -> tuple[dict, str | None]:
+    """Conservative deterministic auto-route gate (classifier failure only).
+
+    Returns ``(bounded gate evidence, route | None)``. The route is
+    non-None only when ALL independent checks hold for EXACTLY ONE
+    enabled Chinese family: chinese family verdict, unambiguous zh
+    verdict for the target, minimum CJK ratio, minimum target marker
+    score, dominance of the target score over opposing marker scores
+    (ratio check), a separate low absolute ceiling on opposing scores,
+    and sufficient non-silent window coverage. Scores are uncalibrated
+    evidence, never probabilities. Cantonese and Mandarin use
+    independent thresholds and kill switches; European has no gate.
+    """
+    windows = evidence.get("windows", []) or []
+    non_silent = sum(1 for window in windows if not window.get("silent"))
+    window_count = int(evidence.get("window_count") or 0)
+    zh_route = evidence.get("zh_verdict")
+    cjk = float(evidence.get("zh_cjk_ratio") or 0.0)
+    opposing_eps = 0.01  # keeps the dominance ratio meaningful vs a 0.0 opponent
+
+    detail: dict = {
+        "gate_version": HEURISTIC_GATE_VERSION,
+        "config_fingerprint": heuristic_gate_fingerprint(cfg),
+        "enabled": cfg.enabled,
+        "family_ok": evidence.get("family_verdict") == "chinese",
+        "zh_not_ambiguous": evidence.get("zh_ambiguous") is False,
+        "coverage_ok": window_count >= 2 and non_silent >= cfg.min_non_silent_windows,
+        "min_cjk_ok": cjk >= cfg.min_cjk_ratio,
+        "window_count": window_count,
+        "non_silent_windows": non_silent,
+        "zh_cjk_ratio": round(cjk, 3),
+    }
+
+    if not cfg.enabled:
+        return detail, None
+
+    def family_candidate(route: str, verdict_ok: bool, min_score: float, target_key: str, opposing_keys: list[str]) -> dict:
+        target = float(evidence.get(target_key) or 0.0)
+        opposing = max(float(evidence.get(key) or 0.0) for key in opposing_keys)
+        return {
+            "route": route,
+            "verdict_ok": verdict_ok,
+            "min_score_ok": target >= min_score,
+            "dominance_ok": target >= cfg.dominance_ratio * max(opposing, opposing_eps),
+            "opposing_ok": opposing <= cfg.max_opposing_score,
+            "target_score": round(target, 2),
+            "opposing_score": round(opposing, 2),
+        }
+
+    candidates = []
+    if cfg.cantonese_enabled:
+        candidates.append(
+            family_candidate(
+                ROUTE_CANTONESE,
+                zh_route == ROUTE_CANTONESE,
+                cfg.cantonese_min_score,
+                "zh_hk_cantonese_score",
+                ["zh_hk_mandarin_score", "zh_cn_mandarin_score"],
+            )
+        )
+    if cfg.mandarin_enabled:
+        candidates.append(
+            family_candidate(
+                ROUTE_MANDARIN,
+                zh_route == ROUTE_MANDARIN,
+                cfg.mandarin_min_score,
+                "zh_cn_mandarin_score",
+                ["zh_hk_cantonese_score", "zh_cn_cantonese_score"],
+            )
+        )
+    detail["candidates"] = candidates
+
+    if not (detail["family_ok"] and detail["zh_not_ambiguous"] and detail["coverage_ok"] and detail["min_cjk_ok"]):
+        return detail, None
+    passing = [
+        candidate
+        for candidate in candidates
+        if candidate["verdict_ok"] and candidate["min_score_ok"] and candidate["dominance_ok"] and candidate["opposing_ok"]
+    ]
+    detail["candidates_passing"] = len(passing)
+    if len(passing) != 1:
+        return detail, None
+    detail["route"] = passing[0]["route"]
+    return detail, passing[0]["route"]
+
+
+_CLASSIFIER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "route": {
+            "type": "string",
+            "enum": [ROUTE_CANTONESE, ROUTE_MANDARIN, ROUTE_EUROPEAN, ROUTE_UNCERTAIN],
+        },
+        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+        "reason_code": {"type": "string"},
+        "evidence": {"type": "string"},
+    },
+    "required": ["route", "confidence"],
+    "additionalProperties": False,
+}
+
+
+def _capability_rejection(status: int, body_text: str) -> bool:
+    """True only for an explicit response_format/json_schema capability rejection.
+
+    Requires ALL three: HTTP 400/422; explicit mention of
+    response_format/json_schema; explicit unsupported/unknown/unexpected
+    -parameter semantics. Generic "unexpected"/"unknown parameter" text
+    alone is insufficient. The body text is never stored or logged.
+    """
+    if status not in _CAPABILITY_STATUS_CODES:
+        return False
+    text = (body_text or "")[:4000].lower()
+    has_param = any(pattern in text for pattern in _CAPABILITY_PARAM_PATTERNS)
+    has_semantic = any(pattern in text for pattern in _CAPABILITY_SEMANTIC_PATTERNS)
+    return has_param and has_semantic
+
+
+class ClassifierResult(dict):
+    """Successful classifier outcome: the validated classification mapping
+    plus bounded locally generated ``diagnostics``.
+
+    Being a dict subclass keeps mapping access (``result["route"]``),
+    JSON serialization, and injected-classifier-callable compatibility.
+    Diagnostics are generated by Brain only — never accepted from model
+    output — and stay bounded to stable codes, counts, and booleans.
+    """
+
+    def __init__(self, classification: dict, diagnostics: dict) -> None:
+        super().__init__(classification)
+        self.diagnostics = diagnostics
+
+
+class RoutingUnavailable(Exception):
+    def __init__(self, message: str, diagnostics: dict | None = None) -> None:
+        super().__init__(message)
+        # Bounded, stable diagnostic metadata only (never a response body).
+        self.diagnostics = diagnostics or {}
+
+
+class RoutingInvalid(Exception):
+    def __init__(self, message: str, diagnostics: dict | None = None) -> None:
+        super().__init__(message)
+        self.diagnostics = diagnostics or {}
+
+
 def classify_with_omlx(
     config: AppConfig,
     candidates: dict[str, str],
@@ -188,11 +397,22 @@ def classify_with_omlx(
     excerpts; the prompt contains three distinct labelled blocks.
     Returns the validated dict {route, confidence, reason_code, evidence}.
 
-    Mapping: HTTP/connectivity/timeout problems raise
-    :class:`RoutingUnavailable`; malformed HTTP JSON, an invalid
-    OpenAI-compatible envelope, or invalid classifier JSON/schema raise
-    :class:`RoutingInvalid`. Response bodies, headers, API keys, and
-    prompt contents never appear in raised messages.
+    Finite request state machine (max three calls, no loops):
+    1. structured request (``response_format`` json_schema). An HTTP
+       400/422 that explicitly and safely classifies as an unsupported
+       response_format/json_schema capability permits exactly ONE plain
+       initial request. Any HTTP-successful but schema-invalid content
+       permits exactly ONE repair request (stable validation category
+       only — the raw previous output is never echoed back).
+    2. plain initial request (only via capability rejection).
+    3. repair request (only after schema-invalid structured response).
+
+    HTTP/connectivity/timeout problems raise :class:`RoutingUnavailable`;
+    malformed or invalid output raises :class:`RoutingInvalid`. Both carry
+    bounded ``diagnostics`` (call count, capability, validation category)
+    so routing evidence can retain them; response bodies, headers, API
+    keys, prompts, and model output never appear in raised messages or
+    diagnostics.
     """
     if not config.llm.model.strip():
         raise RoutingUnavailable("no classifier model configured (llm.model is blank)")
@@ -219,77 +439,189 @@ def classify_with_omlx(
         '"confidence": 0.0-1.0, "reason_code": "short_snake_case", '
         '"evidence": "at most 300 characters"}'
     )
-    payload = {
+    url = f"{config.llm.base_url.rstrip('/')}/chat/completions"
+    timeout = timeout or CLASSIFIER_TIMEOUT
+
+    structured_payload = {
         "model": config.llm.model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
         "max_tokens": 400,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "language_route", "strict": True, "schema": _CLASSIFIER_SCHEMA},
+        },
     }
-    url = f"{config.llm.base_url.rstrip('/')}/chat/completions"
-    timeout = timeout or CLASSIFIER_TIMEOUT
+    plain_payload = {key: value for key, value in structured_payload.items() if key != "response_format"}
 
-    def parse_envelope(body) -> str:
-        """Strict OpenAI-compatible envelope validation; returns content."""
-        if not isinstance(body, dict):
-            raise RoutingInvalid("response is not a JSON object")
-        choices = body.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise RoutingInvalid("response has no choices")
-        first = choices[0]
-        if not isinstance(first, dict):
-            raise RoutingInvalid("invalid choice")
-        message = first.get("message")
-        if not isinstance(message, dict):
-            raise RoutingInvalid("choice has no message object")
-        content = message.get("content")
-        if not isinstance(content, str):
-            raise RoutingInvalid("message content is not a string")
-        return content
+    diag: dict = {
+        "classifier_calls": 0,
+        "structured_output": "used",
+        "classifier_validation": "",
+        "calls": [],
+        "repair_used": False,
+    }
 
-    def call() -> dict:
+    def http_post(payload: dict) -> httpx.Response:
         client_kwargs = {"timeout": timeout}
         if transport is not None:
             client_kwargs["transport"] = transport
         with httpx.Client(**client_kwargs) as client:
-            response = client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            try:
-                body = response.json()
-            except ValueError:
-                raise RoutingInvalid("response is not valid JSON") from None
-        return _parse_classifier_json(parse_envelope(body))
+            return client.post(url, json=payload, headers=headers)
 
-    last_error: Exception | None = None
-    for _ in range(2):  # one retry on invalid output
+    def http_error(exc: httpx.HTTPError) -> RoutingUnavailable:
+        return RoutingUnavailable(f"endpoint error: {type(exc).__name__}", dict(diag))
+
+    def envelope_content(response: httpx.Response) -> str:
+        """Strict OpenAI-compatible envelope validation; returns content."""
         try:
-            return call()
+            body = response.json()
+        except ValueError:
+            raise RoutingInvalid("invalid_envelope") from None
+        if not isinstance(body, dict):
+            raise RoutingInvalid("invalid_envelope")
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RoutingInvalid("invalid_envelope")
+        first = choices[0]
+        if not isinstance(first, dict):
+            raise RoutingInvalid("invalid_envelope")
+        message = first.get("message")
+        if not isinstance(message, dict):
+            raise RoutingInvalid("invalid_envelope")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise RoutingInvalid("invalid_envelope")
+        return content
+
+    def validate_content(content: str) -> dict:
+        try:
+            return _parse_classifier_json(content)
+        except RoutingInvalid as exc:
+            diag["classifier_validation"] = str(exc)[:64]
+            raise
+
+    def request_and_validate(payload: dict, kind: str) -> dict:
+        """One plain/repair call; failures are terminal (no further requests)."""
+        diag["classifier_calls"] += 1
+        diag["calls"].append(kind)
+        try:
+            response = http_post(payload)
         except httpx.HTTPError as exc:
-            raise RoutingUnavailable(f"endpoint error: {type(exc).__name__}") from exc
-        except (KeyError, TypeError, IndexError, RoutingInvalid) as exc:
-            last_error = exc
-            continue
-    raise RoutingInvalid(str(last_error) or "invalid classifier output")
+            raise http_error(exc) from exc
+        if not 200 <= response.status_code < 300:
+            raise RoutingUnavailable(f"endpoint http status {response.status_code}", dict(diag))
+        try:
+            content = envelope_content(response)
+        except RoutingInvalid as exc:
+            diag["classifier_validation"] = str(exc)[:64]
+            raise RoutingInvalid(str(exc)[:64], dict(diag)) from None
+        try:
+            return validate_content(content)
+        except RoutingInvalid as exc:
+            raise RoutingInvalid(str(exc)[:64], dict(diag)) from None
+
+    def repair_request(validation: str) -> dict:
+        diag["repair_used"] = True
+        repair_payload = {
+            **plain_payload,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        f"{prompt}\nYour previous reply failed validation "
+                        f"({validation}). Respond with ONLY the JSON object."
+                    ),
+                }
+            ],
+        }
+        return request_and_validate(repair_payload, CLASSIFIER_CALL_REPAIR)
+
+    # State 1: structured request.
+    diag["classifier_calls"] += 1
+    diag["calls"].append(CLASSIFIER_CALL_STRUCTURED)
+    try:
+        response = http_post(structured_payload)
+    except httpx.HTTPError as exc:
+        raise http_error(exc) from exc
+    if 200 <= response.status_code < 300:
+        try:
+            content = envelope_content(response)
+        except RoutingInvalid as exc:
+            diag["classifier_validation"] = str(exc)[:64]
+            repaired = repair_request(str(exc)[:64])
+            return ClassifierResult(repaired, dict(diag))
+        try:
+            result = validate_content(content)
+        except RoutingInvalid as exc:
+            repaired = repair_request(str(exc)[:64])
+            return ClassifierResult(repaired, dict(diag))
+        return ClassifierResult(result, dict(diag))
+    if _capability_rejection(response.status_code, response.text):
+        # State 2: exactly one plain initial request; no further repair.
+        diag["structured_output"] = "rejected_unsupported"
+        result = request_and_validate(plain_payload, CLASSIFIER_CALL_PLAIN)
+        return ClassifierResult(result, dict(diag))
+    diag["structured_output"] = "rejected_error"
+    raise RoutingUnavailable(f"endpoint http status {response.status_code}", dict(diag))
+
+
+def _decode_single_object(text: str) -> dict:
+    """Decode exactly one JSON object; stable rejection categories."""
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        raise RoutingInvalid("no_json_object")
+    decoder = json.JSONDecoder()
+    try:
+        data, end = decoder.raw_decode(stripped)
+    except ValueError:
+        raise RoutingInvalid("invalid_json") from None
+    remainder = stripped[end:].strip()
+    if remainder:
+        if remainder.startswith("{"):
+            raise RoutingInvalid("multiple_objects")
+        raise RoutingInvalid("trailing_commentary")
+    if not isinstance(data, dict):
+        raise RoutingInvalid("not_object")
+    return data
 
 
 def _parse_classifier_json(content: str) -> dict:
-    text = content.strip()
-    fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
-    if fence:
-        text = fence.group(1)
-    try:
-        data = json.loads(text)
-    except ValueError:
-        raise RoutingInvalid("not valid JSON") from None
-    if not isinstance(data, dict):
-        raise RoutingInvalid("not a JSON object")
+    """Restricted tolerant extraction + strict schema validation.
+
+    Accepts exactly:
+    - a pure JSON object;
+    - content wholly enclosed in one JSON fence;
+    - one bounded, closed leading ``<think>...</think>`` block followed
+      immediately by one JSON object (no fence).
+
+    Rejects arbitrary leading/trailing commentary, unclosed or oversized
+    think blocks, and multiple JSON objects. Error messages are stable
+    category codes; no model output is ever included in them.
+    """
+    text = (content or "").strip()
+    think = re.match(r"^<think>(.*?)</think>\s*(.*)$", text, re.DOTALL)
+    if think is not None:
+        inner, rest = think.group(1), think.group(2)
+        if len(inner) > MAX_THINK_BLOCK_CHARS:
+            raise RoutingInvalid("think_block_too_large")
+        if rest.strip().startswith("```"):
+            raise RoutingInvalid("no_json_object")
+        data = _decode_single_object(rest)
+    else:
+        fence = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, re.DOTALL)
+        if fence:
+            text = fence.group(1).strip()
+        data = _decode_single_object(text)
+
     route = data.get("route")
     confidence = data.get("confidence")
     if route not in (ROUTE_CANTONESE, ROUTE_MANDARIN, ROUTE_EUROPEAN, ROUTE_UNCERTAIN):
-        raise RoutingInvalid(f"invalid route value: {route!r}")
+        raise RoutingInvalid("invalid_route")
     if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
-        raise RoutingInvalid("invalid confidence")
+        raise RoutingInvalid("invalid_confidence")
     if not 0.0 <= float(confidence) <= 1.0:
-        raise RoutingInvalid("confidence out of range")
+        raise RoutingInvalid("confidence_out_of_range")
     return {
         "route": route,
         "confidence": float(confidence),
@@ -298,12 +630,58 @@ def _parse_classifier_json(content: str) -> dict:
     }
 
 
-class RoutingUnavailable(Exception):
-    pass
+def _classifier_failed_outcome(
+    config: AppConfig,
+    evidence: dict,
+    category: str,
+    exc: Exception,
+) -> RoutingOutcome:
+    """Classifier unavailable/invalid: conservative heuristic gate, else review.
 
+    The gate is the ONLY deterministic auto-route path, and only for the
+    Chinese family with overwhelming, internally consistent evidence.
+    Bounded classifier diagnostics and the complete gate detail are
+    preserved in evidence for later evaluation; the failure category is
+    always kept visible in the reason code or evidence.
+    """
+    diagnostics = dict(getattr(exc, "diagnostics", None) or {})
+    gate_detail, gated_route = evaluate_heuristic_gate(
+        evidence, config.macwhisper.routing.heuristic_auto_route
+    )
+    merged = dict(evidence)
+    merged["classifier_failure"] = category
+    if diagnostics:
+        merged["classifier_diagnostics"] = diagnostics
+    merged["heuristic_gate"] = gate_detail
 
-class RoutingInvalid(Exception):
-    pass
+    if gated_route is not None:
+        profile = config.macwhisper.routing.profiles.get(gated_route)
+        if profile is not None and not profile.manual_only:
+            reason = (
+                REASON_AUTO_CONFIDENT_HEURISTIC_UNAVAILABLE
+                if category == "unavailable"
+                else REASON_AUTO_CONFIDENT_HEURISTIC_INVALID
+            )
+            return RoutingOutcome(
+                route=gated_route,
+                profile_name=profile.name,
+                model_id=profile.model,
+                language_arg=profile.language,
+                method="automatic",
+                confidence=None,
+                reason_code=reason,
+                evidence=merged,
+                # Represents gate confidence; _apply_outcome applies the
+                # routing.auto_transcribe policy (ready vs needs_review).
+                ready_to_transcribe=True,
+            )
+
+    reason = REASON_CLASSIFIER_UNAVAILABLE if category == "unavailable" else REASON_CLASSIFIER_INVALID
+    return RoutingOutcome(
+        route=ROUTE_UNCERTAIN, profile_name=None, model_id=None, language_arg=None,
+        method="automatic", confidence=None, reason_code=reason,
+        evidence=merged,
+    )
 
 
 def route_recording(
@@ -431,22 +809,32 @@ def route_recording(
             classifier_result = classify_with_omlx(config, candidates_for_classifier)
         else:
             classifier_result = classifier(config, candidates_for_classifier)
-    except RoutingUnavailable:
-        return RoutingOutcome(
-            route=ROUTE_UNCERTAIN, profile_name=None, model_id=None, language_arg=None,
-            method="automatic", confidence=None, reason_code=REASON_CLASSIFIER_UNAVAILABLE,
-            evidence=evidence,
-        )
-    except RoutingInvalid:
-        return RoutingOutcome(
-            route=ROUTE_UNCERTAIN, profile_name=None, model_id=None, language_arg=None,
-            method="automatic", confidence=None, reason_code=REASON_CLASSIFIER_INVALID,
-            evidence=evidence,
-        )
+    except RoutingUnavailable as exc:
+        return _classifier_failed_outcome(config, evidence, "unavailable", exc)
+    except RoutingInvalid as exc:
+        return _classifier_failed_outcome(config, evidence, "invalid", exc)
 
-    evidence["classifier"] = classifier_result
-    classifier_route = classifier_result["route"]
-    confidence = classifier_result["confidence"]
+    if isinstance(classifier_result, ClassifierResult):
+        classification = dict(classifier_result)
+        classifier_diagnostics = classifier_result.diagnostics
+    else:
+        # Compatibility adapter: injected classifier callables (used by
+        # tests and future callers) return the validated classification
+        # mapping directly. Bounded local diagnostics are synthesized so
+        # evidence shape stays uniform; they never come from model output.
+        classification = classifier_result
+        classifier_diagnostics = {
+            "classifier_calls": 1,
+            "structured_output": "injected",
+            "classifier_validation": "",
+            "calls": ["injected"],
+            "repair_used": False,
+        }
+
+    evidence["classifier"] = classification
+    evidence["classifier_diagnostics"] = classifier_diagnostics
+    classifier_route = classification["route"]
+    confidence = classification["confidence"]
 
     # Family contradiction check.
     if family != "uncertain" and classifier_route != ROUTE_UNCERTAIN:

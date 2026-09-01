@@ -5,6 +5,7 @@ from __future__ import annotations
 from brainlib.config import (
     AppConfig,
     EmbeddingConfig,
+    HeuristicAutoRouteConfig,
     LLMConfig,
     MacWhisperConfig,
     RetentionConfig,
@@ -49,6 +50,20 @@ def default_tags() -> TagsConfig:
     )
 
 
+def default_heuristic(**overrides) -> HeuristicAutoRouteConfig:
+    return HeuristicAutoRouteConfig(
+        enabled=overrides.pop("enabled", True),
+        min_non_silent_windows=overrides.pop("min_non_silent_windows", 2),
+        min_cjk_ratio=overrides.pop("min_cjk_ratio", 0.60),
+        cantonese_enabled=overrides.pop("cantonese_enabled", True),
+        cantonese_min_score=overrides.pop("cantonese_min_score", 4.0),
+        mandarin_enabled=overrides.pop("mandarin_enabled", True),
+        mandarin_min_score=overrides.pop("mandarin_min_score", 4.0),
+        dominance_ratio=overrides.pop("dominance_ratio", 3.0),
+        max_opposing_score=overrides.pop("max_opposing_score", 0.5),
+    )
+
+
 def default_routing(**overrides) -> RoutingConfig:
     profiles = overrides.pop(
         "profiles",
@@ -67,6 +82,7 @@ def default_routing(**overrides) -> RoutingConfig:
         confidence_threshold=overrides.pop("confidence_threshold", 0.80),
         default_profile=overrides.pop("default_profile", "european"),
         profiles=profiles,
+        heuristic_auto_route=overrides.pop("heuristic_auto_route", None) or default_heuristic(),
     )
 
 
@@ -91,6 +107,10 @@ def make_config(tmp_path, **overrides) -> AppConfig:
         model=None,
         language="auto",
         speakers=True,
+        # Most transcription tests feed fake RIFF bytes and mock the
+        # runner; normalization tests opt in explicitly.
+        normalize_input=overrides.pop("normalize_input", False),
+        speakers_fallback=overrides.pop("speakers_fallback", False),
         output_format="json",
         file_stable_seconds=overrides.pop("file_stable_seconds", 30),
         cli_timeout_seconds=overrides.pop("cli_timeout_seconds", 7200),
@@ -142,6 +162,8 @@ def write_cli_config(tmp_path, monkeypatch, **kwargs):
             "model": None,
             "language": "auto",
             "speakers": True,
+            "normalize_input": config.macwhisper.normalize_input,
+            "speakers_fallback": config.macwhisper.speakers_fallback,
             "output_format": "json",
             "file_stable_seconds": config.macwhisper.file_stable_seconds,
             "cli_timeout_seconds": config.macwhisper.cli_timeout_seconds,
@@ -150,6 +172,17 @@ def write_cli_config(tmp_path, monkeypatch, **kwargs):
                 "auto_transcribe": config.macwhisper.routing.auto_transcribe,
                 "confidence_threshold": config.macwhisper.routing.confidence_threshold,
                 "default_profile": config.macwhisper.routing.default_profile,
+                "heuristic_auto_route": {
+                    "enabled": config.macwhisper.routing.heuristic_auto_route.enabled,
+                    "min_non_silent_windows": config.macwhisper.routing.heuristic_auto_route.min_non_silent_windows,
+                    "min_cjk_ratio": config.macwhisper.routing.heuristic_auto_route.min_cjk_ratio,
+                    "cantonese_enabled": config.macwhisper.routing.heuristic_auto_route.cantonese_enabled,
+                    "cantonese_min_score": config.macwhisper.routing.heuristic_auto_route.cantonese_min_score,
+                    "mandarin_enabled": config.macwhisper.routing.heuristic_auto_route.mandarin_enabled,
+                    "mandarin_min_score": config.macwhisper.routing.heuristic_auto_route.mandarin_min_score,
+                    "dominance_ratio": config.macwhisper.routing.heuristic_auto_route.dominance_ratio,
+                    "max_opposing_score": config.macwhisper.routing.heuristic_auto_route.max_opposing_score,
+                },
                 "profiles": {
                     p.name: {"model": p.model, "language": p.language, "manual_only": p.manual_only}
                     for p in config.macwhisper.routing.profiles.values()

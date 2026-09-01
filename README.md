@@ -164,9 +164,24 @@ Finnish–English mixtures all route here), and `european_small`
   automatically and fully transcribed. The routing decision is stored
   as `automatic` with `routing_verified = false` — an unverified
   automatic transcription you can later confirm or correct.
-- **Low confidence / ambiguous / classifier unavailable**: the
-  recording enters **Needs Review**; no full transcription runs until a
-  human chooses a profile.
+- **Heuristic fallback** (classifier invalid or unavailable only): when
+  the deterministic evidence is overwhelming and internally consistent —
+  configured under `macwhisper.routing.heuristic_auto_route` — the
+  Chinese-family profile (Cantonese or Mandarin, each with independent
+  thresholds and a kill switch) is chosen automatically. The gate
+  requires ALL of: Chinese family verdict, unambiguous zh verdict,
+  minimum CJK ratio, minimum marker score, dominance over opposing
+  marker scores, a low absolute ceiling on opposing scores, and enough
+  non-silent sample coverage. These thresholds are heuristic evidence,
+  **not calibrated probabilities**. With `auto_transcribe: true` (the
+  default) such recordings transcribe without confirmation
+  (`routing_verified = false` for audit); with `auto_transcribe: false`
+  they wait in Needs Review like every other automatic route. European
+  speech has no heuristic gate — it always needs the classifier or a
+  human.
+- **Low confidence / ambiguous / classifier unavailable with weak
+  evidence**: the recording enters **Needs Review**; no full
+  transcription runs until a human chooses a profile.
 - **Manual override**:
   `brain route <id> --confirm` verifies the active automatic decision
   without retranscribing; `brain route <id> --profile <name>` selects a
@@ -185,8 +200,27 @@ Finnish–English mixtures all route here), and `european_small`
   (visible in `brain review` / `brain status`); `brain retry` retries
   it explicitly. Interrupted runs (process death) are recovered
   automatically at the start of the next mutating command: unfinished
-  attempts are marked `interrupted` and in-flight states return to a
-  safe point; recovered counts appear in `--json` output.
+  attempts are marked `interrupted`, in-flight states return to a
+  safe point, and orphaned temp files (e.g. normalized audio after a
+  SIGKILL) are swept from the bounded `data/temp` namespaces; recovered
+  counts appear in `--json` output.
+
+### Non-WAV input (MP3/M4A) and speaker labels
+
+- With `macwhisper.normalize_input: true` (default), MP3/M4A sources
+  are converted to a temporary 16 kHz mono PCM WAV under `data/temp`
+  before full transcription. The original file is read-only — never
+  moved, renamed, or deleted — and the temp copy is removed after the
+  attempt. Provenance (source format, normalization, speaker-fallback
+  runs) is stored in the attempt history.
+- `macwhisper.speakers: true` requests speaker detection. Some models
+  do not support diarization (validated on MacWhisper 14.8: the apple
+  zh models reject `--speakers` with a stable error). The error is now
+  extracted and stored verbatim-sanitized instead of the progress line.
+  With `macwhisper.speakers_fallback: true` (default **false**), one
+  automatic `--no-speakers` retry runs after that specific failure and
+  the degraded (no speaker labels) result is visibly reported; both
+  runs stay in the attempt context.
 
 Language routing is heuristic. Cantonese-vs-Mandarin distinction relies
 on colloquial vocabulary evidence plus the oMLX classifier; near-ties
@@ -237,7 +271,8 @@ network access, or real audio.
 - No manual topic splitting, scheduling, or retention deletion yet
   (Step 6).
 - Automatic Cantonese-vs-Mandarin routing is heuristic and unverified —
-  ambiguous evidence always lands in Needs Review.
+  ambiguous evidence always lands in Needs Review. The heuristic
+  fallback thresholds are uncalibrated evidence, not probabilities.
 - Router confidence is an uncalibrated score, not a probability.
 - `european_small` is manual-only; retention deletion is **not active**
   — audio is never deleted by the app.

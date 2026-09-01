@@ -270,10 +270,17 @@ def _action_transcribe(config: AppConfig, recording: Recording) -> ActionOutcome
         raise ActionRejected("no_routing_decision", "No usable routing decision exists for this recording.")
     result = transcribe_one(config, recording)
     if result.get("result") == "transcribed":
+        message = "Transcription completed."
+        if result.get("speakers_fallback"):
+            message = (
+                "Transcription completed WITHOUT speaker labels: diarization "
+                "failed once and the fallback retry (no speaker detection) "
+                "succeeded. Both runs are recorded in the attempt history."
+            )
         return ActionOutcome(
             ok=True,
             result="transcribed",
-            message="Transcription completed.",
+            message=message,
             detail=result,
         )
     if result.get("result") == "parked":
@@ -287,8 +294,13 @@ def _action_transcribe(config: AppConfig, recording: Recording) -> ActionOutcome
     return ActionOutcome(
         ok=False,
         result="failed",
-        message=f"Transcription failed ({result.get('error_code') or 'unknown_error'}). "
-        "You can retry it explicitly.",
+        message=f"Transcription failed ({result.get('error_code') or 'unknown_error'})"
+        + (
+            f": {result['error_message']}"
+            if result.get("error_message")
+            else ""
+        )
+        + ". You can retry it explicitly.",
         detail=result,
     )
 
@@ -382,9 +394,13 @@ def attempt_summary_for_display(recording: Recording, limit: int = 10) -> list[d
     """Sanitized attempt rows for the detail/history pages.
 
     Exposes only stable, non-sensitive fields: stage, ordinal, outcome,
-    error_code, model/profile, timestamps. Never cli_args_json, raw
-    error messages, or endpoints.
+    error_code, a re-sanitized, length-capped error_message, model,
+    timestamps. Never cli_args_json, context_json, raw stderr, or
+    endpoints. Re-sanitizing at the rendering boundary means historical
+    rows written before stricter persistence cannot leak unsafe content.
     """
+    from workflow.services.transcription import ERROR_DETAIL_CAP, sanitize_error
+
     attempts = recording.attempts.order_by("-started_at", "-pk")[:limit]
     return [
         {
@@ -393,6 +409,7 @@ def attempt_summary_for_display(recording: Recording, limit: int = 10) -> list[d
             "ordinal": attempt.ordinal,
             "outcome": attempt.outcome,
             "error_code": attempt.error_code,
+            "error_message": sanitize_error(attempt.error_message, limit=ERROR_DETAIL_CAP),
             "model_id": attempt.model_id,
             "started_at": attempt.started_at,
             "finished_at": attempt.finished_at,

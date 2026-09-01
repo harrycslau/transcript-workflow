@@ -136,6 +136,28 @@ Non-negotiable principles:
   access.
 - All temporary artifacts (routing samples, lock files) live under
   `data/temp` and are cleaned in `finally`.
+- Full transcription of non-PCM-WAV input (MP3/M4A) uses a temporary
+  normalized 16 kHz mono PCM WAV under
+  `data/temp/transcription/<recording>/attempt_<n>/` (config
+  `macwhisper.normalize_input`, default true). The original source is
+  opened read-only; provenance lives in `ProcessingAttempt.context_json`
+  (never transcript text, prompts, or secrets) while `cli_args_json`
+  keeps its historical argv shape.
+- `finally` cleanup does not run on SIGKILL: orphan temp dirs are swept
+  during recovery ONLY inside the strictly bounded
+  `data/temp/{routing,transcription}` namespaces, only for
+  pattern-validated `<uuid>/attempt_<int>` dirs with no matching
+  unfinished attempt; symlinks and invalid names are never followed,
+  and no path is ever taken blindly from the database.
+- MacWhisper stderr is never stored raw: meaningful `Error:` lines are
+  selected (progress lines ignored), sanitized, capped (300 chars) at
+  persistence AND rendering, with a stable error category kept separate
+  from the free-text detail.
+- Speakers fallback (`macwhisper.speakers_fallback`, default false)
+  may retry ONCE with `--no-speakers` only on a stable, synthetic
+  -validated diarization-specific failure signature; both runs stay in
+  `context_json` and the degraded (no speaker labels) result is
+  visibly reported. Requested diarization is never silently dropped.
 - `mw` is invoked with argv arrays only, per-run `--model` overrides,
   bounded timeouts (`cli_timeout_seconds` is a hard cap:
   `min(cap, max(minimum, duration-scaled))`), `--format json` output
@@ -153,6 +175,24 @@ Non-negotiable principles:
   `routing_verified=false`; low confidence / zh-ambiguity /
   classifier-unavailable → `needs_review`. Script ratio is weak
   evidence only; never decisive for Cantonese-vs-Mandarin.
+- Heuristic auto-route gate (classifier invalid/unavailable ONLY):
+  conservative, configurable, multiple independent conditions (family
+  verdict, unambiguous zh verdict, CJK ratio, marker minimum, dominance
+  ratio, opposing-score ceiling, non-silent coverage) must ALL hold for
+  exactly one enabled Chinese family; Cantonese and Mandarin have
+  independent thresholds and kill switches; no European gate. Gate
+  scores are heuristic evidence, NOT calibrated probabilities.
+  `ready_to_transcribe` from the gate still passes through
+  `_apply_outcome`, so `routing.auto_transcribe=false` ⇒ Needs Review.
+  Reason codes `auto_confident_heuristic_classifier_invalid` /
+  `auto_confident_heuristic_classifier_unavailable`; `routing_verified`
+  stays false for audit; gate config is fingerprinted into evidence.
+- Classifier requests are a finite state machine (max: one structured
+  request; one plain request only after an explicit HTTP 400/422
+  response_format/json_schema capability rejection; one repair request
+  only after an HTTP-successful schema-invalid response). No loops.
+  Bounded stable validation categories only in evidence — never raw
+  model output, prompts, or response bodies.
 - Never claim routing accuracy without evaluation against human
   confirmations.
 

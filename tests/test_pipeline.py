@@ -96,7 +96,7 @@ def mock_full_transcription(monkeypatch, stdout=MW_JSON):
 
     real = transcription_service.transcribe_recording
 
-    def fake_transcribe(config, recording, source_path, model_id, language_arg, runner=None):
+    def fake_transcribe(config, recording, source_path, model_id, language_arg, runner=None, source_info=None):
         def ok_runner(argv, **kwargs):
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
 
@@ -194,7 +194,7 @@ class TestRunPipeline:
 
         real_transcribe = transcription_service.transcribe_recording
 
-        def failing_transcribe(config, recording, source_path, model_id, language_arg, runner=None):
+        def failing_transcribe(config, recording, source_path, model_id, language_arg, runner=None, source_info=None):
             def bad_runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Error: x")
 
@@ -294,7 +294,7 @@ class TestManualRouting:
 
         real_transcribe = transcription_service.transcribe_recording
 
-        def flaky_transcribe(config, recording, source_path, model_id, language_arg, runner=None):
+        def flaky_transcribe(config, recording, source_path, model_id, language_arg, runner=None, source_info=None):
             attempts["n"] += 1
             if attempts["n"] == 1:
                 def bad_runner(argv, **kwargs):
@@ -418,7 +418,7 @@ class TestCliManualRoute:
 
         real = transcription_service.transcribe_recording
 
-        def fake(config, rec, source_path, model_id, language_arg, runner=None):
+        def fake(config, rec, source_path, model_id, language_arg, runner=None, source_info=None):
             def ok_runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 0, stdout=MW_JSON, stderr="")
 

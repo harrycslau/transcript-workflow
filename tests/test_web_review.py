@@ -305,7 +305,7 @@ class TestReviewQueryScaling:
             "recording_id", "kind", "route", "confidence", "profile",
         }
         assert set(payload["failed_retranscription"][0]) == {
-            "recording_id", "kind", "attempt_id", "error_code", "route",
+            "recording_id", "kind", "attempt_id", "error_code", "error_message", "route",
         }
         assert set(payload["failed"][0]) == {"recording_id", "kind"}
         assert set(payload["awaiting_summary"][0]) == {"recording_id", "kind"}

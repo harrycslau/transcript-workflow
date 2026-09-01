@@ -25,6 +25,7 @@ from workflow.models import (
     RoutingDecision,
     SummaryState,
 )
+from workflow.services.transcription import ERROR_DETAIL_CAP, sanitize_error
 
 
 def _active_decisions_prefetch() -> Prefetch:
@@ -78,6 +79,11 @@ def build_review_report() -> dict:
                     "kind": "failed_retranscription",
                     "attempt_id": failed_attempt.pk if failed_attempt is not None else None,
                     "error_code": failed_attempt.error_code if failed_attempt is not None else "",
+                    "error_message": sanitize_error(
+                        failed_attempt.error_message, limit=ERROR_DETAIL_CAP
+                    )
+                    if failed_attempt is not None
+                    else "",
                     "route": decision.route_suggestion if decision else None,
                 }
             )

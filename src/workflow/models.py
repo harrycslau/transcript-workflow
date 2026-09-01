@@ -273,6 +273,11 @@ class ProcessingAttempt(models.Model):
     exit_code = models.IntegerField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True, default="")
     error_message = models.TextField(blank=True, default="")
+    # Bounded structured provenance (e.g. input normalization, multi-run
+    # speakers fallback). Never contains transcript text, raw model
+    # output, prompts, or secrets. cli_args_json keeps its historical
+    # per-stage shape.
+    context_json = models.JSONField(null=True, blank=True)
 
     class Meta:
         ordering = ["recording", "stage", "ordinal"]

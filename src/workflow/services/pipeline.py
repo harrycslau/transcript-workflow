@@ -225,9 +225,17 @@ def recover_interruptions(config: AppConfig) -> dict:
             if recording is not None:
                 reconcile_recording_summary_state(recording, recovered_attempt=attempt)
 
+    # Orphaned temp dirs (SIGKILL/process death skips ``finally``):
+    # strictly namespace-bounded, name-validated, DB-aware sweep. Runs
+    # under the pipeline lock; never touches summary or failure state.
+    from workflow.services.tempcleanup import sweep_orphan_attempt_dirs
+
+    temp_dirs_removed = sweep_orphan_attempt_dirs(config)
+
     return {
         "recovered_attempts": recovered_attempts,
         "recovered_recordings": recovered_recordings,
+        "temp_dirs_removed": temp_dirs_removed,
     }
 
 
@@ -596,18 +604,27 @@ def transcribe_one(config: AppConfig, recording: Recording) -> dict:
         Path(source.path),
         model_id=decision.model_id,
         language_arg=decision.language_arg,
+        source_info={"source_audio_source_id": source.pk},
     )
     if attempt.outcome == AttemptOutcome.SUCCESS:
-        return {
+        result = {
             "recording_id": recording.pk,
             "result": "transcribed",
             "attempt_id": attempt.pk,
             "retranscription": had_active_transcript,
         }
+        context = attempt.context_json or {}
+        if context.get("speakers_fallback"):
+            # Visible degradation: diarization failed, one --no-speakers
+            # retry succeeded (both runs recorded in attempt context).
+            result["speakers_fallback"] = True
+            result["warning"] = "transcribed without speaker labels after a diarization failure"
+        return result
     return {
         "recording_id": recording.pk,
         "result": "failed",
         "error_code": attempt.error_code,
+        "error_message": attempt.error_message,
         "kept_active_transcript": had_active_transcript,
     }
 

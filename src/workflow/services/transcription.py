@@ -50,6 +50,65 @@ MIN_TIMEOUT_SECONDS = 300
 # Seconds of transcription budget per second of audio, plus startup slack.
 TIMEOUT_FACTOR = 4.0
 TIMEOUT_SLACK = 120
+# Stored error detail cap (applied at persistence AND rendering).
+ERROR_DETAIL_CAP = 300
+
+# Stable error categories, matched only on the extracted Error line with
+# a small explicit pattern set. Raw sanitized detail stays separate.
+_CONNECTION_PATTERNS = (
+    "could not connect",
+    "connection refused",
+    "cli.sock",
+    "operation not permitted",
+)
+_SPEAKER_PATTERNS = ("speaker detection", "diarization")
+_INPUT_PATTERNS = (
+    "could not read",
+    "cannot read",
+    "unreadable",
+    "unsupported",
+    "invalid file",
+    "not a valid",
+    "failed to open",
+)
+
+
+def categorize_mw_error(detail: str) -> str:
+    """Map extracted error text to a stable category (conservative)."""
+    text = (detail or "").lower()
+    if any(pattern in text for pattern in _CONNECTION_PATTERNS):
+        return "mw_connection_failure"
+    if any(pattern in text for pattern in _SPEAKER_PATTERNS):
+        return "mw_speakers_failure"
+    if any(pattern in text for pattern in _INPUT_PATTERNS):
+        return "mw_input_unreadable"
+    return "mw_nonzero_exit"
+
+
+def extract_mw_error(stderr: str) -> tuple[str, str]:
+    """Select the meaningful MacWhisper error from stderr.
+
+    MacWhisper writes a progress line (``Transcribing <file>...``)
+    first and the real ``Error:`` line afterwards. This selects the
+    first ``Error:`` line plus up to two following diagnostic lines and
+    falls back to the LAST non-empty line — never the leading progress
+    line. Returns ``(stable_category, sanitized_detail)`` where the
+    detail is path-sanitized and capped at ``ERROR_DETAIL_CAP``; raw
+    unbounded stderr is never returned.
+    """
+    lines = [line.strip() for line in (stderr or "").splitlines() if line.strip()]
+    error_index = next(
+        (index for index, line in enumerate(lines) if line.lower().startswith("error:")),
+        None,
+    )
+    if error_index is not None:
+        selected = lines[error_index : error_index + 3]
+    elif lines:
+        selected = [lines[-1]]
+    else:
+        return "mw_nonzero_exit", ""
+    detail = sanitize_error(" | ".join(selected), limit=ERROR_DETAIL_CAP)
+    return categorize_mw_error(detail), detail
 
 
 class TranscriptionError(Exception):
@@ -134,11 +193,12 @@ def run_mw_transcription(
         logger.warning("mw transcribe failed to start: %s", type(exc).__name__)
         return None
     if result.returncode != 0:
-        # stderr may contain paths; log only its first line, error type only.
-        first_line = (result.stderr or "").strip().splitlines()
+        # Meaningful error extraction only: sanitized, bounded, never the
+        # leading progress line.
+        error_code, detail = extract_mw_error(result.stderr)
         logger.warning(
             "mw transcribe exited %s for %s: %s",
-            result.returncode, audio_path.name, first_line[0][:120] if first_line else "",
+            result.returncode, audio_path.name, detail or error_code,
         )
         return None
     stdout = result.stdout or ""
@@ -257,6 +317,11 @@ def get_mw_version(config: AppConfig, runner=None) -> str:
     return (result.stdout or "").strip().splitlines()[0][:64] if (result.stdout or "").strip() else ""
 
 
+def transcription_attempt_temp_dir(config: AppConfig, recording: Recording, attempt: ProcessingAttempt) -> Path:
+    """Bounded temp dir for one transcription attempt's normalized input."""
+    return Path(config.storage.temp) / "transcription" / str(recording.pk) / f"attempt_{attempt.ordinal}"
+
+
 def transcribe_recording(
     config: AppConfig,
     recording: Recording,
@@ -264,8 +329,25 @@ def transcribe_recording(
     model_id: str,
     language_arg: str | None,
     runner=None,
+    source_info: dict | None = None,
 ) -> ProcessingAttempt:
     """Run full transcription for ``recording`` and persist versioned output.
+
+    Input handling: with ``macwhisper.normalize_input`` (default true),
+    non-PCM-WAV sources (MP3/M4A/...) are converted to a temporary
+    16 kHz mono PCM WAV under ``data/temp/transcription/`` (removed in
+    ``finally`` and by stage-aware orphan recovery); the ORIGINAL file
+    is read-only and never moved, renamed, or deleted. Provenance
+    (normalization, per-run outcomes, speakers fallback) is stored in
+    ``ProcessingAttempt.context_json``; ``cli_args_json`` keeps its
+    historical argv shape. Timeouts derive from the recording's real
+    audio duration (null/unknown uses the bounded safe fallback).
+
+    Speakers fallback (``macwhisper.speakers_fallback``, default OFF):
+    after a stable diarization-specific failure (validated against
+    MacWhisper 14.8), one automatic ``--no-speakers`` retry runs within
+    the same attempt; both runs are recorded in ``context_json`` and the
+    degradation is visible in the returned attempt.
 
     State semantics (see statemachine.record_failure):
     - success: new Transcript (active) + segments + one whole-recording
@@ -276,6 +358,11 @@ def transcribe_recording(
     - failure without an active transcript: status -> failed,
       failure_stage=transcription.
     """
+    import shutil
+
+    from workflow.services import audiosamples
+    from workflow.services.audiosamples import SampleExtractionError
+
     attempt = ProcessingAttempt.objects.create(
         recording=recording,
         stage=AttemptStage.TRANSCRIPTION,
@@ -283,38 +370,126 @@ def transcribe_recording(
         model_id=model_id,
         language_arg=language_arg,
     )
-    argv = build_mw_argv(config, Path(source_path), model_id, language_arg, config.macwhisper.speakers)
-    attempt.cli_args_json = argv
-    attempt.mw_version = get_mw_version(config)
-    attempt.save(update_fields=["cli_args_json", "mw_version"])
 
-    duration = recording.duration_seconds
-    timeout = timeout_for(duration, config)
+    source = Path(source_path)
+    context: dict = {
+        "input": {
+            "normalized": False,
+            "source_format": source.suffix.lstrip(".").lower(),
+            **(source_info or {}),
+        },
+        "runs": [],
+    }
+
+    input_path = source
+    temp_dir: Path | None = None
     try:
+        if config.macwhisper.normalize_input and not audiosamples.is_pcm_wav(source):
+            temp_dir = transcription_attempt_temp_dir(config, recording, attempt)
+            try:
+                input_path = audiosamples.convert_to_pcm_16k(source, temp_dir / "normalized.wav")
+            except SampleExtractionError as exc:
+                # Clean, finished failure attempt: no MacWhisper contact
+                # (no version probe, no transcription), bounded
+                # normalization provenance, immediate temp cleanup via the
+                # outer finally.
+                context["normalization_failure"] = exc.reason_code
+                attempt.context_json = context
+                attempt.save(update_fields=["context_json"])
+                return _finish_failure(
+                    attempt, recording, AttemptOutcome.NONZERO_EXIT,
+                    "normalization_failed", exc.reason_code,
+                )
+            context["input"]["normalized"] = True
+
+        attempt.cli_args_json = build_mw_argv(config, input_path, model_id, language_arg, config.macwhisper.speakers)
+        attempt.mw_version = get_mw_version(config)
+        attempt.context_json = context
+        attempt.save(update_fields=["cli_args_json", "mw_version", "context_json"])
+
+        # Timeout derives from the REAL audio duration; null/unknown duration
+        # falls back to the bounded safe minimum inside timeout_for().
+        duration = recording.duration_seconds
+        timeout = timeout_for(duration, config)
         runner = runner or subprocess.run
-        result = runner(argv, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return _finish_failure(attempt, recording, AttemptOutcome.TIMEOUT, "timeout", "")
-    except OSError as exc:
-        return _finish_failure(attempt, recording, AttemptOutcome.NONZERO_EXIT, "mw_unreachable", type(exc).__name__)
+        speakers = config.macwhisper.speakers
+        result = None
+        while True:
+            argv = build_mw_argv(config, input_path, model_id, language_arg, speakers)
+            try:
+                result = runner(argv, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                context["runs"].append(
+                    {"speakers": speakers, "outcome": AttemptOutcome.TIMEOUT, "error_code": "timeout", "detail": ""}
+                )
+                attempt.context_json = context
+                return _finish_failure(attempt, recording, AttemptOutcome.TIMEOUT, "timeout", "")
+            except OSError as exc:
+                context["runs"].append(
+                    {
+                        "speakers": speakers,
+                        "outcome": AttemptOutcome.NONZERO_EXIT,
+                        "error_code": "mw_unreachable",
+                        "detail": type(exc).__name__,
+                    }
+                )
+                attempt.context_json = context
+                return _finish_failure(
+                    attempt, recording, AttemptOutcome.NONZERO_EXIT, "mw_unreachable", type(exc).__name__
+                )
 
-    attempt.exit_code = result.returncode
-    if result.returncode != 0:
-        first_line = (result.stderr or "").strip().splitlines()
-        return _finish_failure(
-            attempt, recording, AttemptOutcome.NONZERO_EXIT, "mw_nonzero_exit",
-            sanitize_error(first_line[0]) if first_line else "",
-        )
+            attempt.exit_code = result.returncode
+            if result.returncode == 0:
+                context["runs"].append({"speakers": speakers, "outcome": AttemptOutcome.SUCCESS})
+                attempt.context_json = context
+                break
 
-    stdout = result.stdout or ""
-    if len(stdout.encode("utf-8", errors="replace")) > STDOUT_CAP_BYTES:
-        return _finish_failure(attempt, recording, AttemptOutcome.INVALID_OUTPUT, "stdout_too_large", "")
-    parsed = parse_mw_json(stdout)
-    if parsed is None:
-        return _finish_failure(attempt, recording, AttemptOutcome.INVALID_OUTPUT, "invalid_mw_json", "")
+            error_code, detail = extract_mw_error(result.stderr)
+            context["runs"].append(
+                {
+                    "speakers": speakers,
+                    "outcome": AttemptOutcome.NONZERO_EXIT,
+                    "error_code": error_code,
+                    "detail": detail,
+                }
+            )
+            if (
+                speakers
+                and config.macwhisper.speakers_fallback
+                and error_code == "mw_speakers_failure"
+            ):
+                # Exactly one fallback per attempt: only the stable
+                # diarization category triggers it; the degradation is
+                # recorded in context_json and surfaced by callers.
+                speakers = False
+                context["speakers_fallback"] = True
+                continue
+            attempt.context_json = context
+            return _finish_failure(attempt, recording, AttemptOutcome.NONZERO_EXIT, error_code, detail)
 
-    _persist_transcript(attempt, recording, parsed, stdout)
-    return attempt
+        stdout = result.stdout or ""
+        if len(stdout.encode("utf-8", errors="replace")) > STDOUT_CAP_BYTES:
+            return _finish_failure(attempt, recording, AttemptOutcome.INVALID_OUTPUT, "stdout_too_large", "")
+        parsed = parse_mw_json(stdout)
+        if parsed is None:
+            return _finish_failure(attempt, recording, AttemptOutcome.INVALID_OUTPUT, "invalid_mw_json", "")
+
+        _persist_transcript(attempt, recording, parsed, stdout)
+        return attempt
+    finally:
+        if temp_dir is not None:
+            # Defense in depth: EVERY normal Python exit path (success,
+            # non-zero exit, timeout, expected and unexpected exceptions)
+            # cleans the exact namespace-bounded attempt dir. The deletion
+            # target is derived only from config + recording + attempt —
+            # never from exception text or external input.
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            # Best-effort removal of the now-empty recording dir; rmdir
+            # only succeeds when empty (never deletes user data).
+            try:
+                temp_dir.parent.rmdir()
+            except OSError:
+                pass
 
 
 def _finish_failure(

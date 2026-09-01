@@ -84,6 +84,14 @@ _DEFAULTS: dict[str, Any] = {
         "model": None,
         "language": "auto",
         "speakers": True,
+        # Convert non-PCM-WAV input (MP3/M4A/...) to a temporary 16 kHz
+        # mono PCM WAV under data/temp before full transcription.
+        "normalize_input": True,
+        # One automatic --no-speakers retry after a stable
+        # diarization-specific failure when speakers was requested.
+        # Validated against MacWhisper 14.8: apple zh models reject
+        # --speakers with a stable error.
+        "speakers_fallback": False,
         "output_format": "json",
         "file_stable_seconds": 30,
         "cli_timeout_seconds": 7200,
@@ -92,6 +100,21 @@ _DEFAULTS: dict[str, Any] = {
             "auto_transcribe": True,
             "confidence_threshold": 0.80,
             "default_profile": "european",
+            # Conservative deterministic auto-route gate used ONLY when
+            # the oMLX classifier is invalid or unavailable. Multiple
+            # independent conditions must all hold; heuristic scores are
+            # NOT calibrated probabilities.
+            "heuristic_auto_route": {
+                "enabled": True,
+                "min_non_silent_windows": 2,
+                "min_cjk_ratio": 0.60,
+                "cantonese_enabled": True,
+                "cantonese_min_score": 4.0,
+                "mandarin_enabled": True,
+                "mandarin_min_score": 4.0,
+                "dominance_ratio": 3.0,
+                "max_opposing_score": 0.5,
+            },
             "profiles": {
                 "cantonese": {"model": "apple:zh-HK", "language": None, "manual_only": False},
                 "mandarin": {"model": "apple:zh-CN", "language": None, "manual_only": False},
@@ -171,12 +194,32 @@ class RoutingProfile:
 
 
 @dataclass(frozen=True)
+class HeuristicAutoRouteConfig:
+    """Conservative deterministic auto-route gate (classifier-invalid/unavailable only).
+
+    All conditions must hold; heuristic scores are uncalibrated
+    evidence, never probabilities.
+    """
+
+    enabled: bool
+    min_non_silent_windows: int
+    min_cjk_ratio: float
+    cantonese_enabled: bool
+    cantonese_min_score: float
+    mandarin_enabled: bool
+    mandarin_min_score: float
+    dominance_ratio: float
+    max_opposing_score: float
+
+
+@dataclass(frozen=True)
 class RoutingConfig:
     enabled: bool
     auto_transcribe: bool
     confidence_threshold: float
     default_profile: str
     profiles: dict[str, RoutingProfile]
+    heuristic_auto_route: HeuristicAutoRouteConfig
 
     def profile(self, name: str) -> RoutingProfile | None:
         return self.profiles.get(name)
@@ -188,6 +231,8 @@ class MacWhisperConfig:
     model: str | None  # legacy key; see legacy_model_notice
     language: str
     speakers: bool
+    normalize_input: bool
+    speakers_fallback: bool
     output_format: str
     file_stable_seconds: int
     cli_timeout_seconds: int
@@ -349,6 +394,53 @@ def _parse_routing_profile(name: str, raw: Any) -> RoutingProfile:
     return RoutingProfile(name=name, model=model.strip(), language=language, manual_only=manual_only)
 
 
+def _parse_heuristic_auto_route(s: dict[str, Any]) -> HeuristicAutoRouteConfig:
+    h_raw = dict(_DEFAULTS["macwhisper"]["routing"]["heuristic_auto_route"])
+    provided = s.get("heuristic_auto_route")
+    if provided is not None:
+        if not isinstance(provided, dict):
+            raise ConfigError(f"[macwhisper.routing.heuristic_auto_route] must be a mapping, got {type(provided).__name__}")
+        h_raw.update(provided)
+    path = "macwhisper.routing.heuristic_auto_route"
+    enabled = _get(h_raw, "enabled", path, bool)
+    min_windows = _get_number(h_raw, "min_non_silent_windows", path, int, positive=True)
+    min_cjk = _get_number(h_raw, "min_cjk_ratio", path, (int, float))
+    cantonese_enabled = _get(h_raw, "cantonese_enabled", path, bool)
+    cantonese_min = _get_number(h_raw, "cantonese_min_score", path, (int, float))
+    mandarin_enabled = _get(h_raw, "mandarin_enabled", path, bool)
+    mandarin_min = _get_number(h_raw, "mandarin_min_score", path, (int, float))
+    dominance = _get_number(h_raw, "dominance_ratio", path, (int, float))
+    max_opposing = _get_number(h_raw, "max_opposing_score", path, (int, float))
+    if not 0.0 <= float(min_cjk) <= 1.0:
+        raise ConfigError(f"[{path}]: 'min_cjk_ratio' must be between 0 and 1, got {min_cjk}")
+    for key, value in (("cantonese_min_score", cantonese_min), ("mandarin_min_score", mandarin_min)):
+        if float(value) < 0:
+            raise ConfigError(f"[{path}]: '{key}' must be >= 0, got {value}")
+    if float(dominance) < 1.0:
+        raise ConfigError(f"[{path}]: 'dominance_ratio' must be >= 1.0, got {dominance}")
+    if float(max_opposing) < 0:
+        raise ConfigError(f"[{path}]: 'max_opposing_score' must be >= 0, got {max_opposing}")
+    active_min_scores = [
+        float(v) for on, v in ((cantonese_enabled, cantonese_min), (mandarin_enabled, mandarin_min)) if on
+    ]
+    if active_min_scores and float(max_opposing) >= min(active_min_scores):
+        raise ConfigError(
+            f"[{path}]: 'max_opposing_score' ({max_opposing}) must be below every enabled "
+            f"min score (cantonese_min_score, mandarin_min_score)"
+        )
+    return HeuristicAutoRouteConfig(
+        enabled=enabled,
+        min_non_silent_windows=int(min_windows),
+        min_cjk_ratio=float(min_cjk),
+        cantonese_enabled=cantonese_enabled,
+        cantonese_min_score=float(cantonese_min),
+        mandarin_enabled=mandarin_enabled,
+        mandarin_min_score=float(mandarin_min),
+        dominance_ratio=float(dominance),
+        max_opposing_score=float(max_opposing),
+    )
+
+
 def _parse_routing(macwhisper_section: dict[str, Any]) -> RoutingConfig:
     s = dict(_DEFAULTS["macwhisper"]["routing"])
     provided = macwhisper_section.get("routing")
@@ -394,6 +486,7 @@ def _parse_routing(macwhisper_section: dict[str, Any]) -> RoutingConfig:
         confidence_threshold=float(threshold),
         default_profile=default_profile,
         profiles=profiles,
+        heuristic_auto_route=_parse_heuristic_auto_route(s),
     )
 
 
@@ -425,6 +518,7 @@ def _parse_macwhisper(raw: dict[str, Any]) -> MacWhisperConfig:
                 confidence_threshold=routing.confidence_threshold,
                 default_profile="legacy",
                 profiles=routing.profiles,
+                heuristic_auto_route=routing.heuristic_auto_route,
             )
             legacy_notice = (
                 "legacy 'macwhisper.model' mapped to manual-only 'legacy' profile; "
@@ -443,6 +537,8 @@ def _parse_macwhisper(raw: dict[str, Any]) -> MacWhisperConfig:
         model=model,
         language=_get(s, "language", "macwhisper", str),
         speakers=_get(s, "speakers", "macwhisper", bool),
+        normalize_input=_get(s, "normalize_input", "macwhisper", bool),
+        speakers_fallback=_get(s, "speakers_fallback", "macwhisper", bool),
         output_format=_get_nonblank(s, "output_format", "macwhisper"),
         file_stable_seconds=_get_number(s, "file_stable_seconds", "macwhisper", int, positive=True),
         cli_timeout_seconds=_get_number(s, "cli_timeout_seconds", "macwhisper", int, positive=True),

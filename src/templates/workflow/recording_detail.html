@@ -207,7 +207,7 @@
   {% if attempts %}
     <table>
       <thead>
-        <tr><th>Stage</th><th>#</th><th>Outcome</th><th>Error code</th><th>Model</th><th>Started</th></tr>
+        <tr><th>Stage</th><th>#</th><th>Outcome</th><th>Error code</th><th>Detail</th><th>Model</th><th>Started</th></tr>
       </thead>
       <tbody>
         {% for attempt in attempts %}
@@ -216,6 +216,7 @@
             <td>{{ attempt.ordinal }}</td>
             <td>{{ attempt.outcome }}</td>
             <td>{{ attempt.error_code|default:"—" }}</td>
+            <td>{{ attempt.error_message|default:"—" }}</td>
             <td>{{ attempt.model_id|default:"—" }}</td>
             <td>{{ attempt.started_at|local_time }}</td>
           </tr>

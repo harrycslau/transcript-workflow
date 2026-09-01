@@ -111,7 +111,12 @@ def convert_to_pcm_16k(source: Path, dest: Path) -> Path:
     afconvert = shutil.which("afconvert")
     if afconvert is None:
         raise SampleExtractionError("afconvert_unavailable")
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Expected filesystem failure (permissions, full disk, ...):
+        # stable reason, never a raw traceback.
+        raise SampleExtractionError("temp_dir_unwritable", str(exc)[:200]) from None
     try:
         result = subprocess.run(
             [afconvert, "-f", "WAVE", "-d", "LEI16@16000", "-c", "1", str(source), str(dest)],

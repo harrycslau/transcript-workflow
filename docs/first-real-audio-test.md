@@ -74,7 +74,11 @@ uv run brain run
 ```
 
 高信心 routing 可以自動繼續，但仍會標示為未經人手確認；語言不明確嘅錄音
-會停喺 Needs Review，唔會亂揀 model。
+會停喺 Needs Review，唔會亂揀 model。另外，當 oMLX classifier 無效或
+不能連線時，如果 deterministic 證據非常強（廣東話／普通話 marker 分數、
+CJK 比例、覆蓋度全部過晒嚴格門檻），系統會用保守 heuristic gate 自動揀
+profile——呢啲分數係 heuristic 證據，唔係校準過嘅概率。如果
+`auto_transcribe: false`，呢啲結果同樣會停喺 Needs Review。
 
 ## 3. 開啟網頁介面
 
@@ -175,6 +179,15 @@ uv run brain summarize RECORDING_ID --regenerate
 ```
 
 失敗嘅 retranscription 或 re-summarization 唔會刪除之前成功嘅版本。
+
+Transcription 失敗時，attempt history 會顯示真正嘅 MacWhisper 錯誤
+（已去除檔案路徑、長度受限），而唔係「Transcribing ...」進度行。常見
+情況：`apple:zh-HK`／`apple:zh-CN` 唔支援 `--speakers`（speaker
+detection）。如果要保留 speaker labels，請改用支援 diarization 嘅
+model；如果唔需要，可以喺 `config.yaml` 設
+`macwhisper.speakers_fallback: true`（預設關閉），失敗後會自動用
+`--no-speakers` 重試一次，並喺結果中明確報告「冇 speaker labels」。
+MP3／M4A 會先自動轉做暫存 PCM WAV 先交俾 MacWhisper；原檔只會被讀取。
 
 ## 7. 原音頻可以幾時刪？
 

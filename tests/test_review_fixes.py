@@ -521,7 +521,7 @@ class TestManualReroute:
 
         real = PRISTINE_TRANSCRIBE
 
-        def fake(config, rec, source_path, model_id, language_arg, runner=None):
+        def fake(config, rec, source_path, model_id, language_arg, runner=None, source_info=None):
             def ok_runner(argv, **kwargs):
                 return subprocess.CompletedProcess(
                     argv, 0, stdout=json.dumps({"segments": [{"start": 0, "end": 5, "text": "v2"}], "text": "v2"}),
@@ -565,7 +565,7 @@ class TestManualReroute:
 
         real = PRISTINE_TRANSCRIBE
 
-        def failing(config, rec, source_path, model_id, language_arg, runner=None):
+        def failing(config, rec, source_path, model_id, language_arg, runner=None, source_info=None):
             def bad_runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Error: x")
 
@@ -593,7 +593,7 @@ class TestFailedRetranscription:
 
         real = PRISTINE_TRANSCRIBE
 
-        def failing(config, rec, source_path, model_id, language_arg, runner=None):
+        def failing(config, rec, source_path, model_id, language_arg, runner=None, source_info=None):
             def bad_runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Error: x")
 
@@ -627,7 +627,7 @@ class TestFailedRetranscription:
 
         real = PRISTINE_TRANSCRIBE
 
-        def ok(config, rec, source_path, model_id, language_arg, runner=None):
+        def ok(config, rec, source_path, model_id, language_arg, runner=None, source_info=None):
             def ok_runner(argv, **kwargs):
                 return subprocess.CompletedProcess(
                     argv, 0,
@@ -662,7 +662,7 @@ class TestFailedRetranscription:
 
         real = PRISTINE_TRANSCRIBE
 
-        def failing(config, rec, source_path, model_id, language_arg, runner=None):
+        def failing(config, rec, source_path, model_id, language_arg, runner=None, source_info=None):
             def bad_runner(argv, **kwargs):
                 return subprocess.CompletedProcess(argv, 1, stdout="", stderr="Error: x")
 
