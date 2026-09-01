@@ -23,6 +23,9 @@ from workflow.services import summarize as summarize_service
 from workflow.services.llm import LLMInvalid, LLMTimeout, LLMUnavailable
 from workflow.services.summarize import (
     SummaryRelationError,
+    _final_system_prompt,
+    _map_system_prompt,
+    _reduce_user_prompt,
     persist_summary,
     validate_final_payload,
     validate_map_payload,
@@ -212,7 +215,33 @@ class TestFinalValidation:
 class TestMapValidation:
     def test_valid(self):
         payload = validate_map_payload(json.loads(map_summary_json()))
-        assert payload == {"overview": "Part summary.", "key_points": ["Point one"]}
+        assert payload == {
+            "overview": "Part summary.",
+            "key_points": ["Point one"],
+        }
+
+
+class TestSummaryPrompts:
+    def test_final_prompt_requires_requested_style_and_grounding(self):
+        prompt = _final_system_prompt([])
+        assert "ALWAYS use Traditional Chinese" in prompt
+        assert "50–80 Chinese" in prompt
+        assert "maximum three levels" in prompt
+        assert "never force hierarchy" in prompt
+        assert "If uncertain use []" in prompt
+        assert "explicitly named identifiable people" in prompt
+        assert "fill for completeness" in prompt
+
+    def test_map_and_reduce_preserve_evidence_without_invention(self):
+        map_prompt = _map_system_prompt()
+        assert "ALWAYS use Traditional Chinese" in map_prompt
+        assert "explicit future actions" in map_prompt
+        assert "named people/organizations" in map_prompt
+
+        reduce_prompt = _reduce_user_prompt(
+            [{"overview": "摘要", "key_points": ["重點"]}], final=True
+        )
+        assert "add no new actions, people, organizations, or topics" in reduce_prompt
 
     def test_missing_overview_rejected(self):
         with pytest.raises(LLMInvalid, match="overview"):
@@ -744,13 +773,13 @@ class TestMapReduce:
                 chunk_characters=60,
                 chunk_overlap_characters=0,
                 max_chunk_count=8,
-                max_input_characters=4000,
+                max_input_characters=4500,
             ),
             tags=tags_config("Academic"),
         )
         recording, _, _ = make_transcribed_recording([f"segment {i} " + "w" * 50 for i in range(6)])
         # Intermediates with long overviews: six of them together exceed
-        # the 4000-char cap; pairs fit.
+        # the 4500-char cap; pairs fit including the current prompt scaffolding.
         big_map = map_summary_json(overview="o" * 600, key_points=["p" * 100] * 3)
         sub_map = map_summary_json(overview="m" * 600, key_points=["p" * 100] * 3)
         final_calls = {"n": 0}
