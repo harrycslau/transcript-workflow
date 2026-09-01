@@ -302,7 +302,7 @@ def final_summary_json(**overrides) -> str:
     payload = {
         "title": "Meeting about grading",
         "overview": "Discussed grading plans.",
-        "key_points": ["Grading starts Monday"],
+        "key_points": [{"text": "Grading starts Monday", "level": 1}],
         "action_items": [{"text": "Prepare rubric", "owner": None, "due_date": None}],
         "people": ["Alice"],
         "organizations": [],

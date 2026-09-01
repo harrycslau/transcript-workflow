@@ -8,9 +8,9 @@
   {% if summary.key_points %}
     <section class="summary-points">
       <h3>Key points</h3>
-      <ul>
-        {% for point in summary.key_points %}<li>{{ point }}</li>{% endfor %}
-      </ul>
+      <div class="key-points">
+        {% for point in summary.key_points|key_point_lines %}<p>{{ point }}</p>{% endfor %}
+      </div>
     </section>
   {% endif %}
   <section class="summary-actions">

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from workflow.services.rendering import render_markdown, render_text, summary_to_dict
+from workflow.services.rendering import key_point_lines, render_markdown, render_text, summary_to_dict
 
 pytestmark = pytest.mark.django_db
 
@@ -98,6 +98,23 @@ class TestMarkdown:
         text = render_markdown(make_summary())
         assert '"suggested_tags"' not in text
         assert "{" not in text
+
+    def test_structured_points_are_numbered_deterministically(self):
+        summary = make_summary(
+            key_points=[
+                {"text": "Main", "level": 1},
+                {"text": "Child", "level": 2},
+                {"text": "Grandchild", "level": 3},
+                {"text": "Extra detail", "level": 0},
+                {"text": "Second main", "level": 1},
+            ]
+        )
+        text = render_markdown(summary)
+        assert "1. Main\n1.1 Child\n1.1.1 Grandchild\n- Extra detail\n2. Second main" in text
+
+
+def test_key_point_lines_support_historical_strings():
+    assert key_point_lines(["Old point"]) == ["- Old point"]
 
 
 class TestPlainText:

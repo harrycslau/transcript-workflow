@@ -80,3 +80,11 @@ def mmss(ms) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+
+@register.filter
+def key_point_lines(value):
+    """Deterministically number structured summary points."""
+    from workflow.services.rendering import key_point_lines as render_lines
+
+    return render_lines(value)

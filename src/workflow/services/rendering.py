@@ -13,6 +13,38 @@ from __future__ import annotations
 from workflow.models import Summary
 
 
+def key_point_lines(points) -> list[str]:
+    """Render new structured points and historical string points safely.
+
+    Number counters are application-owned, so model output cannot produce
+    duplicate or malformed outline numbers. Historical summaries remain
+    readable as ordinary bullets.
+    """
+    lines: list[str] = []
+    counters = [0, 0, 0]
+    for point in points if isinstance(points, list) else []:
+        if isinstance(point, str):
+            lines.append(f"- {point}")
+            continue
+        if not isinstance(point, dict):
+            continue
+        text = str(point.get("text", "")).strip()
+        if not text:
+            continue
+        level = point.get("level", 0)
+        if isinstance(level, bool) or level not in (1, 2, 3):
+            lines.append(f"- {text}")
+            continue
+        index = level - 1
+        counters[index] += 1
+        for lower in range(index + 1, 3):
+            counters[lower] = 0
+        number = ".".join(str(value) for value in counters[:level])
+        label = f"{number}." if level == 1 else number
+        lines.append(f"{label} {text}")
+    return lines
+
+
 def _action_item_line(item: dict) -> str:
     parts = [item.get("text", "")]
     owner = item.get("owner")
@@ -32,7 +64,7 @@ def render_markdown(summary: Summary) -> str:
     lines: list[str] = [f"# {summary.title}", "", "## Overview", "", summary.overview]
     if summary.key_points:
         lines += ["", "## Key points"]
-        lines += [f"- {point}" for point in summary.key_points]
+        lines += key_point_lines(summary.key_points)
     lines += ["", "## Action items"]
     if summary.action_items:
         lines += [f"- {_action_item_line(item)}" for item in summary.action_items]
@@ -56,7 +88,7 @@ def render_text(summary: Summary) -> str:
     lines: list[str] = [f"Title: {summary.title}", "", f"Overview: {summary.overview}"]
     if summary.key_points:
         lines += ["", "Key points:"]
-        lines += [f"- {point}" for point in summary.key_points]
+        lines += key_point_lines(summary.key_points)
     lines += ["", "Action items:"]
     if summary.action_items:
         lines += [f"- {_action_item_line(item)}" for item in summary.action_items]

@@ -71,7 +71,8 @@ logger = logging.getLogger(__name__)
 PARSER_VERSION = "1"
 
 FINAL_SHAPE_DOC = (
-    '{"title": string, "overview": string, "key_points": [string], '
+    '{"title": string, "overview": string, '
+    '"key_points": [{"text": string, "level": 0|1|2|3}], '
     '"action_items": [{"text": string, "owner": string|null, "due_date": string|null}], '
     '"people": [string], "organizations": [string], "topics": [string], '
     '"suggested_tags": [string], "language": string}'
@@ -97,6 +98,7 @@ MAX_SUGGESTED_TAGS = 50
 MAX_TAG_NAME_CHARS = 64
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +117,18 @@ def _final_system_prompt(tags: list[Tag]) -> str:
         "You are a transcript summarizer. You receive the text of a recorded session "
         "and must respond with ONLY a JSON object — no prose, no Markdown fences.\n"
         "Rules:\n"
-        "- Use the dominant language. For all Chinese—including Cantonese, Mandarin, or "
-        "Simplified Chinese—ALWAYS use Traditional Chinese; retain needed English terms.\n"
-        "- `overview`: about 50–80 Chinese characters, or equally concise; avoid repetition.\n"
-        "- `key_points`: detailed reasoning, examples, decisions, and conclusions. Number only "
-        "genuine hierarchy as `1.`, `1.1`, `1.1.1` (maximum three levels); never force hierarchy; "
-        "leave unrelated/deeper details unnumbered.\n"
+        "- First determine the transcript's dominant language, then write ALL summary prose in "
+        "that language. An English transcript MUST produce English; Finnish and other non-Chinese "
+        "languages must likewise remain in their source language. NEVER translate them into Chinese. "
+        "Only when the dominant language is Chinese (Cantonese or Mandarin), use Traditional Chinese "
+        "even if the source uses Simplified Chinese; retain needed English terms.\n"
+        "- `overview`: concise—about 50–80 Chinese characters for Chinese, or a similarly short "
+        "one-to-three sentences in another language; avoid repetition.\n"
+        "- `key_points`: detailed reasoning, examples, decisions, and conclusions. Set `level` "
+        "to 1/2/3 only for genuine hierarchy (maximum three levels); the app generates `1.`, "
+        "`1.1`, `1.1.1`. Use level "
+        "0 for unrelated items or detail beyond level 3. Never write numbering inside `text`, "
+        "force hierarchy, or jump from level 1 directly to level 3.\n"
         "- `action_items`: only explicit future commitments, assignments, or requests—not advice, "
         "possibilities, discussion, or completed work. Owner/due date must be explicit, else null.\n"
         "- `people`: explicitly named identifiable people only; no pronouns, roles, or generic "
@@ -139,7 +147,8 @@ def _map_system_prompt() -> str:
         "You are a transcript summarizer working on ONE chunk of a longer recording. "
         "Respond with ONLY a JSON object — no prose, no Markdown fences.\n"
         "Rules:\n"
-        "- Use the dominant language; for all Chinese ALWAYS use Traditional Chinese.\n"
+        "- Keep the chunk's dominant language: English MUST stay English and other non-Chinese "
+        "languages must not be translated into Chinese. Only Chinese output uses Traditional Chinese.\n"
         "- Retain useful reasoning, examples, decisions, explicit future actions, named people/"
         "organizations, and substantive topics so final merge need not infer them.\n"
         "- Never fabricate or force chunk-level numbering.\n\n"
@@ -227,6 +236,41 @@ def _str_list(value, field: str, max_items: int, max_item_chars: int) -> list[st
     ]
 
 
+def _key_point_list(value) -> list[dict]:
+    """Validate structured key points; numbering is rendered deterministically."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise llm_service.LLMInvalid("schema_validation", "field 'key_points' must be a list")
+    if len(value) > MAX_KEY_POINTS:
+        raise llm_service.LLMInvalid(
+            "schema_validation", f"field 'key_points' exceeds the maximum of {MAX_KEY_POINTS} items"
+        )
+    points: list[dict] = []
+    previous_numbered_level = 0
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise llm_service.LLMInvalid(
+                "schema_validation", f"field 'key_points[{index}]' must be an object"
+            )
+        text = _require_str(
+            item.get("text"), f"key_points[{index}].text", max_length=MAX_KEY_POINT_CHARS
+        )
+        level = item.get("level")
+        if isinstance(level, bool) or not isinstance(level, int) or level not in (0, 1, 2, 3):
+            raise llm_service.LLMInvalid(
+                "schema_validation", f"field 'key_points[{index}].level' must be 0, 1, 2, or 3"
+            )
+        if level > 0:
+            if level > previous_numbered_level + 1:
+                raise llm_service.LLMInvalid(
+                    "schema_validation", f"field 'key_points[{index}].level' skips a hierarchy level"
+                )
+            previous_numbered_level = level
+        points.append({"text": text, "level": level})
+    return points
+
+
 def _validate_action_items(value) -> list[dict]:
     if value is None:
         return []
@@ -284,6 +328,35 @@ def validate_map_payload(data: dict) -> dict:
     }
 
 
+def _payload_prose(payload: dict) -> str:
+    """Collect bounded validated prose fields for a script-consistency check."""
+    values = [str(payload.get("title", "")), str(payload.get("overview", ""))]
+    for point in payload.get("key_points", []):
+        values.append(str(point.get("text", "")) if isinstance(point, dict) else str(point))
+    for item in payload.get("action_items", []):
+        if isinstance(item, dict):
+            values.append(str(item.get("text", "")))
+    return "\n".join(values)
+
+
+def _reject_unexpected_chinese(payload: dict, *, source_has_no_cjk: bool) -> dict:
+    """Reject a clearly Chinese output for a transcript containing no CJK text.
+
+    This intentionally catches only high-confidence contradictions. A few CJK
+    characters in names or quoted terms remain valid for non-Chinese summaries.
+    """
+    if not source_has_no_cjk:
+        return payload
+    prose = _payload_prose(payload)
+    cjk_count = len(_CJK_RE.findall(prose))
+    visible_count = sum(not char.isspace() for char in prose)
+    if cjk_count >= 10 and cjk_count / max(1, visible_count) >= 0.10:
+        raise llm_service.LLMInvalid(
+            "language_mismatch", "summary language does not match the transcript language"
+        )
+    return payload
+
+
 def validate_final_payload(data: dict, allowed: dict[str, Tag]) -> dict:
     """Validate the final structured summary; returns the canonical payload.
 
@@ -294,7 +367,7 @@ def validate_final_payload(data: dict, allowed: dict[str, Tag]) -> dict:
     """
     title = _require_str(data.get("title"), "title", max_length=MAX_TITLE_CHARS)
     overview = _require_str(data.get("overview"), "overview", max_length=MAX_OVERVIEW_CHARS)
-    key_points = _str_list(data.get("key_points"), "key_points", MAX_KEY_POINTS, MAX_KEY_POINT_CHARS)
+    key_points = _key_point_list(data.get("key_points"))
     action_items = _validate_action_items(data.get("action_items"))
     people = _str_list(data.get("people"), "people", MAX_NAME_ITEMS, MAX_NAME_CHARS)
     organizations = _str_list(data.get("organizations"), "organizations", MAX_NAME_ITEMS, MAX_NAME_CHARS)
@@ -400,6 +473,7 @@ def _reduce_layer(
     allowed: dict[str, Tag],
     *,
     final: bool,
+    source_has_no_cjk: bool,
     transport=None,
     llm_call=None,
 ) -> dict:
@@ -411,9 +485,13 @@ def _reduce_layer(
     fails cleanly BEFORE any HTTP call.
     """
     if final:
-        validate = lambda data: validate_final_payload(data, allowed)  # noqa: E731
+        validate = lambda data: _reject_unexpected_chinese(  # noqa: E731
+            validate_final_payload(data, allowed), source_has_no_cjk=source_has_no_cjk
+        )
     else:
-        validate = validate_map_payload
+        validate = lambda data: _reject_unexpected_chinese(  # noqa: E731
+            validate_map_payload(data), source_has_no_cjk=source_has_no_cjk
+        )
     try:
         return _call_llm(
             config,
@@ -428,13 +506,16 @@ def _reduce_layer(
             raise
         mid = len(intermediates) // 2
         left = _reduce_layer(
-            intermediates[:mid], config, allowed, final=False, transport=transport, llm_call=llm_call
+            intermediates[:mid], config, allowed, final=False,
+            source_has_no_cjk=source_has_no_cjk, transport=transport, llm_call=llm_call
         )
         right = _reduce_layer(
-            intermediates[mid:], config, allowed, final=False, transport=transport, llm_call=llm_call
+            intermediates[mid:], config, allowed, final=False,
+            source_has_no_cjk=source_has_no_cjk, transport=transport, llm_call=llm_call
         )
         return _reduce_layer(
-            [left, right], config, allowed, final=final, transport=transport, llm_call=llm_call
+            [left, right], config, allowed, final=final,
+            source_has_no_cjk=source_has_no_cjk, transport=transport, llm_call=llm_call
         )
 
 
@@ -448,12 +529,15 @@ def _generate_summary(
 ) -> tuple[dict, int]:
     """Run the map/reduce flow; returns (canonical payload, chunk_count)."""
     allowed = {tag.name_key: tag for tag in tags}
+    source_has_no_cjk = not any(_CJK_RE.search(chunk) for chunk in plan.chunks)
     if len(plan.chunks) == 1:
         payload = _call_llm(
             config,
             system=_final_system_prompt(tags),
             user=_user_transcript_prompt(plan.chunks[0]),
-            validate=lambda data: validate_final_payload(data, allowed),
+            validate=lambda data: _reject_unexpected_chinese(
+                validate_final_payload(data, allowed), source_has_no_cjk=source_has_no_cjk
+            ),
             transport=transport,
             llm_call=llm_call,
         )
@@ -467,12 +551,17 @@ def _generate_summary(
                 config,
                 system=_map_system_prompt(),
                 user=_map_user_prompt(chunk, index + 1, total),
-                validate=validate_map_payload,
+                validate=lambda data: _reject_unexpected_chinese(
+                    validate_map_payload(data), source_has_no_cjk=source_has_no_cjk
+                ),
                 transport=transport,
                 llm_call=llm_call,
             )
         )
-    final = _reduce_layer(intermediates, config, allowed, final=True, transport=transport, llm_call=llm_call)
+    final = _reduce_layer(
+        intermediates, config, allowed, final=True, source_has_no_cjk=source_has_no_cjk,
+        transport=transport, llm_call=llm_call
+    )
     return final, total
 
 

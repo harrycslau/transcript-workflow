@@ -145,6 +145,35 @@ class TestFinalValidation:
         with pytest.raises(LLMInvalid, match="key_points"):
             validate_final_payload(self._payload(key_points=[True]), self._allowed())
 
+    def test_structured_key_point_levels(self):
+        points = [
+            {"text": "Main", "level": 1},
+            {"text": "Child", "level": 2},
+            {"text": "Grandchild", "level": 3},
+            {"text": "Plain detail", "level": 0},
+        ]
+        result = validate_final_payload(self._payload(key_points=points), self._allowed())
+        assert result["key_points"] == points
+
+    @pytest.mark.parametrize("level", [-1, 4, True, "2"])
+    def test_invalid_key_point_level_rejected(self, level):
+        with pytest.raises(LLMInvalid, match="level"):
+            validate_final_payload(
+                self._payload(key_points=[{"text": "Point", "level": level}]), self._allowed()
+            )
+
+    def test_key_point_level_jump_rejected(self):
+        with pytest.raises(LLMInvalid, match="skips"):
+            validate_final_payload(
+                self._payload(
+                    key_points=[
+                        {"text": "Main", "level": 1},
+                        {"text": "Skipped", "level": 3},
+                    ]
+                ),
+                self._allowed(),
+            )
+
     def test_wrong_field_types_rejected(self):
         with pytest.raises(LLMInvalid, match="key_points"):
             validate_final_payload(self._payload(key_points="not a list"), self._allowed())
@@ -164,7 +193,9 @@ class TestFinalValidation:
 
     def test_excessive_list_counts_rejected(self):
         with pytest.raises(LLMInvalid, match="30"):
-            validate_final_payload(self._payload(key_points=["p"] * 31), self._allowed())
+            validate_final_payload(
+                self._payload(key_points=[{"text": "p", "level": 1}] * 31), self._allowed()
+            )
         with pytest.raises(LLMInvalid, match="50"):
             validate_final_payload(self._payload(people=["n"] * 51), self._allowed())
 
@@ -224,17 +255,23 @@ class TestMapValidation:
 class TestSummaryPrompts:
     def test_final_prompt_requires_requested_style_and_grounding(self):
         prompt = _final_system_prompt([])
-        assert "ALWAYS use Traditional Chinese" in prompt
+        assert "An English transcript MUST produce English" in prompt
+        assert "NEVER translate them into Chinese" in prompt
+        assert "Only when the dominant language is Chinese" in prompt
+        assert "Traditional Chinese" in prompt
         assert "50–80 Chinese" in prompt
         assert "maximum three levels" in prompt
-        assert "never force hierarchy" in prompt
+        assert "force hierarchy" in prompt
+        assert "Never write numbering inside `text`" in prompt
         assert "If uncertain use []" in prompt
         assert "explicitly named identifiable people" in prompt
         assert "fill for completeness" in prompt
 
     def test_map_and_reduce_preserve_evidence_without_invention(self):
         map_prompt = _map_system_prompt()
-        assert "ALWAYS use Traditional Chinese" in map_prompt
+        assert "English MUST stay English" in map_prompt
+        assert "must not be translated into Chinese" in map_prompt
+        assert "Only Chinese output uses Traditional Chinese" in map_prompt
         assert "explicit future actions" in map_prompt
         assert "named people/organizations" in map_prompt
 
@@ -242,6 +279,50 @@ class TestSummaryPrompts:
             [{"overview": "摘要", "key_points": ["重點"]}], final=True
         )
         assert "add no new actions, people, organizations, or topics" in reduce_prompt
+
+    def test_clear_chinese_output_for_cjk_free_source_is_rejected(self):
+        payload = {
+            "title": "教育研究統計方法",
+            "overview": "本次工作坊詳細介紹統計方法及研究設計中的重要注意事項。",
+            "key_points": [{"text": "不顯著結果不代表沒有效果", "level": 1}],
+            "action_items": [],
+        }
+        with pytest.raises(LLMInvalid) as exc:
+            summarize_service._reject_unexpected_chinese(payload, source_has_no_cjk=True)
+        assert exc.value.code == "language_mismatch"
+
+    def test_small_cjk_name_in_english_output_is_allowed(self):
+        payload = {
+            "title": "Research discussion with 王明",
+            "overview": "The session discusses statistical methods and missing data.",
+            "key_points": [{"text": "王明 presented the method", "level": 1}],
+            "action_items": [],
+        }
+        assert summarize_service._reject_unexpected_chinese(
+            payload, source_has_no_cjk=True
+        ) is payload
+
+    def test_english_transcript_retries_chinese_summary_then_accepts_english(self, tmp_path):
+        config = make_config(
+            tmp_path,
+            llm=make_llm_config(tmp_path).llm,
+            summarization=small_config(tmp_path),
+            tags=tags_config("Academic"),
+        )
+        recording, _, _ = make_transcribed_recording(
+            ["This English-only lecture discusses statistical methods and missing data."]
+        )
+        chinese = final_summary_json(
+            title="教育研究統計方法",
+            overview="本次工作坊詳細介紹統計方法及研究設計中的重要注意事項。",
+            key_points=[{"text": "不顯著結果不代表沒有效果", "level": 1}],
+            language="en",
+        )
+        llm = ScriptedLLM([chinese, final_summary_json()])
+        result = summarize_service.summarize_one(config, recording, llm_call=llm)
+        assert result["result"] == "summarized"
+        assert len(llm.calls) == 2
+        assert recording.current_summary().title == "Meeting about grading"
 
     def test_missing_overview_rejected(self):
         with pytest.raises(LLMInvalid, match="overview"):
@@ -773,13 +854,13 @@ class TestMapReduce:
                 chunk_characters=60,
                 chunk_overlap_characters=0,
                 max_chunk_count=8,
-                max_input_characters=4500,
+                max_input_characters=5000,
             ),
             tags=tags_config("Academic"),
         )
         recording, _, _ = make_transcribed_recording([f"segment {i} " + "w" * 50 for i in range(6)])
         # Intermediates with long overviews: six of them together exceed
-        # the 4500-char cap; pairs fit including the current prompt scaffolding.
+        # the 5000-char cap; pairs fit including the current prompt scaffolding.
         big_map = map_summary_json(overview="o" * 600, key_points=["p" * 100] * 3)
         sub_map = map_summary_json(overview="m" * 600, key_points=["p" * 100] * 3)
         final_calls = {"n": 0}
@@ -836,7 +917,7 @@ class TestMapReduce:
             tmp_path,
             llm=make_llm_config(tmp_path).llm,
             summarization=small_config(
-                tmp_path, chunk_characters=120, chunk_overlap_characters=20, max_input_characters=3000
+                tmp_path, chunk_characters=120, chunk_overlap_characters=20, max_input_characters=3500
             ),
             tags=tags_config("Academic"),
         )
@@ -1485,7 +1566,7 @@ class TestErrorHygiene:
         recording, _, _ = make_transcribed_recording([TRANSCRIPT_SENTINEL])
         bad_content = json.dumps({
             "title": PRIVATE_VALUE_SENTINEL, "overview": "ok",
-            "key_points": ["x" * 2000],  # over-limit item carrying the value
+            "key_points": [{"text": "x" * 2000, "level": 1}],  # over-limit item carrying value
         })
         llm = ScriptedLLM([bad_content, bad_content])
         with caplog.at_level("DEBUG"):
