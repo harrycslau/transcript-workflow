@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Brain — UI Prototype</title>
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .proto-banner { background: #2c2825; color: #f5f3f0; text-align: center; padding: 5px 12px; font-size: 11px; font-weight: 600; letter-spacing: 0.04em; position: fixed; top: 0; left: 0; right: 0; z-index: 999; }
+    .proto-banner span { opacity: 0.6; margin: 0 8px; }
+    body { padding-top: 24px; }
+    .topbar { top: 24px; }
+    @media (max-width: 768px) { .topbar { top: 24px; height: 48px; } .main { margin-top: calc(48px + 24px); } }
+    @media (min-width: 769px) { .main { margin-top: calc(52px + 24px); } }
+  </style>
+</head>
+<body>
+
+<div class="proto-banner">
+  DESIGN PROTOTYPE — Not production code
+  <span>|</span>
+  Type to search, use filters and view toggle
+  <span>|</span>
+  All data is fictional
+</div>
+
+<!-- TOP BAR -->
+<header class="topbar" role="banner">
+  <a class="topbar-brand" href="#" data-screen="library" title="Back to Library">
+    <span class="topbar-brand-icon">B</span>
+    <span class="topbar-brand-name">Brain</span>
+  </a>
+
+  <div class="topbar-search" role="search">
+    <span class="search-icon">&#128269;</span>
+    <input type="search" id="global-search" placeholder="Search or browse recordings..." aria-label="Search recordings, transcripts, summaries" autocomplete="off">
+    <div style="position:relative">
+      <button class="search-mode-trigger" id="mode-trigger" aria-haspopup="true" aria-expanded="false">
+        <span class="trigger-label">Hybrid</span>
+        <span class="chevron">&#9662;</span>
+      </button>
+      <div class="search-mode-dropdown" id="mode-dropdown" role="menu">
+        <button class="search-mode-option active" role="menuitem" data-mode="hybrid">Hybrid<span class="option-desc">Keyword + semantic</span></button>
+        <button class="search-mode-option" role="menuitem" data-mode="keyword">Keyword<span class="option-desc">Full-text match</span></button>
+        <button class="search-mode-option" role="menuitem" data-mode="semantic">Semantic<span class="option-desc">Meaning similarity</span></button>
+      </div>
+    </div>
+  </div>
+
+  <div class="topbar-right">
+    <button class="topbar-btn" data-screen="review">Review <span class="badge">3</span></button>
+    <button class="topbar-btn" data-screen="status"><span class="btn-label">Status</span></button>
+  </div>
+</header>
+
+<!-- MAIN -->
+<div class="main">
+  <main class="main-content">
+
+    <!-- =============== SCREEN: LIBRARY / SEARCH =============== -->
+    <div id="library" class="screen active">
+
+      <!-- Mobile: filter drawer trigger + active chips (always visible) -->
+      <div style="margin-bottom:var(--sp-3)">
+        <button class="filter-drawer-trigger" id="filter-drawer-trigger">Filters &#9662;</button>
+      </div>
+      <div class="active-filters" id="mobile-active-filters" style="display:none">
+        <div id="mobile-active-chips"></div>
+        <button class="clear-filters" id="mobile-clear-filters">Clear</button>
+      </div>
+
+      <!-- Mobile filter drawer -->
+      <div class="filter-drawer" id="filter-drawer">
+        <div class="filter-group" style="margin-bottom:var(--sp-3)">
+          <span class="filter-group-label">Tags</span>
+          <div style="display:flex;flex-wrap:wrap;gap:var(--sp-1)">
+            <button class="filter-chip" data-filter="tag" data-value="Work">Work</button>
+            <button class="filter-chip" data-filter="tag" data-value="Personal">Personal</button>
+            <button class="filter-chip" data-filter="tag" data-value="Research">Research</button>
+            <button class="filter-chip" data-filter="tag" data-value="Meeting">Meeting</button>
+            <button class="filter-chip" data-filter="tag" data-value="Language">Language</button>
+            <button class="filter-chip" data-filter="tag" data-value="Idea">Idea</button>
+          </div>
+        </div>
+        <div class="filter-group" style="margin-bottom:var(--sp-3)">
+          <span class="filter-group-label">Date</span>
+          <input type="date" class="filter-date-input" value="2026-08-01">
+          <span style="color:var(--color-text-3);font-size:var(--fs-xs)">to</span>
+          <input type="date" class="filter-date-input" value="2026-09-02">
+        </div>
+        <div class="filter-group">
+          <span class="filter-group-label">Sort</span>
+          <select id="sort-mobile"><option value="date-desc">Newest first</option><option value="date-asc">Oldest first</option><option value="title-asc">Title A&#8211;Z</option><option value="title-desc">Title Z&#8211;A</option><option value="duration">Duration</option></select>
+        </div>
+      </div>
+
+      <!-- Desktop filter area -->
+      <div class="filter-area">
+        <!-- Row 1: dates, sort, view toggle -->
+        <div class="filter-row-1">
+          <div class="filter-group">
+            <span class="filter-group-label">From</span>
+            <input type="date" class="filter-date-input" value="2026-08-01" aria-label="From date">
+          </div>
+          <div class="filter-group">
+            <span class="filter-group-label">To</span>
+            <input type="date" class="filter-date-input" value="2026-09-02" aria-label="To date">
+          </div>
+          <div class="filter-separator"></div>
+          <div class="filter-group filter-sort">
+            <label class="filter-group-label" for="sort-desktop">Sort</label>
+            <select id="sort-desktop">
+              <option value="date-desc">Newest first</option>
+              <option value="date-asc">Oldest first</option>
+              <option value="title-asc">Title A&#8211;Z</option>
+              <option value="title-desc">Title Z&#8211;A</option>
+              <option value="duration">Duration</option>
+            </select>
+          </div>
+          <div class="filter-spacer"></div>
+          <div class="view-toggle" role="radiogroup" aria-label="View mode">
+            <button class="view-toggle-btn active" data-view="cards" role="radio" aria-checked="true" aria-label="Card view" title="Card view">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
+            </button>
+            <button class="view-toggle-btn" data-view="table" role="radio" aria-checked="false" aria-label="Table view" title="Table view">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="1" y="2" width="14" height="2" rx="0.5"/><rect x="1" y="7" width="14" height="2" rx="0.5"/><rect x="1" y="12" width="14" height="2" rx="0.5"/></svg>
+            </button>
+          </div>
+        </div>
+        <!-- Row 2: tags -->
+        <div class="filter-row-2">
+          <span class="filter-group-label">Tags</span>
+          <button class="filter-chip" data-filter="tag" data-value="Work">Work</button>
+          <button class="filter-chip" data-filter="tag" data-value="Personal">Personal</button>
+          <button class="filter-chip" data-filter="tag" data-value="Research">Research</button>
+          <button class="filter-chip" data-filter="tag" data-value="Meeting">Meeting</button>
+          <button class="filter-chip" data-filter="tag" data-value="Language">Language</button>
+          <button class="filter-chip" data-filter="tag" data-value="Idea">Idea</button>
+        </div>
+      </div>
+
+      <!-- Active filters (desktop) -->
+      <div class="active-filters" id="active-filters" style="display:none">
+        <div id="active-filter-chips"></div>
+        <button class="clear-filters" id="clear-filters">Clear all</button>
+      </div>
+
+      <!-- Results count -->
+      <div class="results-header">
+        <span class="results-count" id="results-count">24 recordings</span>
+      </div>
+
+      <!-- ===== CARD VIEW ===== -->
+      <div id="card-view">
+        <div class="date-group-header" data-group="2026-09">September 2026</div>
+        <ul class="recording-list">
+          <li class="recording-card" data-detail data-date="2026-09-01" data-title="Weekly product sync — AI features roadmap" data-duration="42">
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Weekly product sync — AI features roadmap</a></div>
+              <span class="status status-transcribed">transcribed</span>
+            </div>
+            <div class="recording-card-meta"><span>1 Sep 2026, 14:30</span><span>42 min</span><span>parakeet-v3</span></div>
+            <div class="recording-card-excerpt">Discussion of the Q4 AI feature roadmap including local LLM integration, on-device speech recognition improvements, and the privacy-first approach to embedding generation...</div>
+            <div class="recording-card-footer">
+              <div class="recording-card-tags"><span class="tag tag-confirmed">Work</span><span class="tag tag-suggested">Meeting</span><span class="tag">Research</span></div>
+              <div class="recording-card-langs"><span class="lang-dot has"></span><span class="lang-dot has"></span><span class="lang-dot has"></span><span class="lang-dot missing"></span></div>
+            </div>
+          </li>
+        </ul>
+
+        <div class="date-group-header" data-group="2026-08">August 2026</div>
+        <ul class="recording-list">
+          <li class="recording-card" data-detail data-date="2026-08-31" data-title="Morning thoughts on Cantonese language learning" data-duration="18">
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Morning thoughts on Cantonese language learning</a></div>
+              <span class="status status-transcribed">transcribed</span>
+            </div>
+            <div class="recording-card-meta"><span>31 Aug 2026, 08:15</span><span>18 min</span><span>parakeet-v3</span></div>
+            <div class="recording-card-excerpt">Reflecting on the progress with Cantonese pronunciation, comparing tones with Mandarin, and discussing effective study methods for tonal languages...</div>
+            <div class="recording-card-footer">
+              <div class="recording-card-tags"><span class="tag tag-confirmed">Personal</span><span class="tag">Language</span></div>
+              <div class="recording-card-langs"><span class="lang-dot has"></span><span class="lang-dot has"></span><span class="lang-dot has"></span><span class="lang-dot missing"></span></div>
+            </div>
+          </li>
+
+          <li class="recording-card needs-attention" data-detail data-date="2026-08-30" data-title="Brainstorm — personal knowledge system architecture" data-duration="55">
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Brainstorm — personal knowledge system architecture</a></div>
+              <span class="status status-needs_review">needs review</span>
+            </div>
+            <div class="recording-card-meta"><span>30 Aug 2026, 16:00</span><span>55 min</span><span>unknown profile</span></div>
+            <div class="recording-card-excerpt">Ideas for building a local-first personal knowledge management system with speech-to-text, automatic summarization, and semantic search capabilities...</div>
+            <div class="recording-card-footer">
+              <div class="recording-card-tags"><span class="tag">Idea</span><span class="tag tag-suggested">Research</span></div>
+              <div class="recording-card-langs"><span class="lang-dot missing"></span><span class="lang-dot missing"></span><span class="lang-dot missing"></span><span class="lang-dot missing"></span></div>
+            </div>
+          </li>
+
+          <li class="recording-card" data-detail data-date="2026-08-28" data-title="Finnish vocabulary study session — academic register" data-duration="25">
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Finnish vocabulary study session — academic register</a></div>
+              <span class="status status-transcribed">transcribed</span>
+            </div>
+            <div class="recording-card-meta"><span>28 Aug 2026, 19:00</span><span>25 min</span><span>parakeet-v3</span></div>
+            <div class="recording-card-excerpt">Went through Finnish academic vocabulary list, practiced pronunciation of long compound words, and reviewed example sentences from university lectures...</div>
+            <div class="recording-card-footer">
+              <div class="recording-card-tags"><span class="tag tag-confirmed">Language</span><span class="tag">Personal</span></div>
+              <div class="recording-card-langs"><span class="lang-dot has"></span><span class="lang-dot has"></span><span class="lang-dot missing"></span><span class="lang-dot has"></span></div>
+            </div>
+          </li>
+
+          <li class="recording-card" data-detail data-date="2026-08-25" data-title="Podcast notes — privacy in the age of cloud AI" data-duration="37">
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Podcast notes — privacy in the age of cloud AI</a></div>
+              <span class="status status-transcribed">transcribed</span>
+            </div>
+            <div class="recording-card-meta"><span>25 Aug 2026, 10:45</span><span>37 min</span><span>parakeet-v3</span></div>
+            <div class="recording-card-excerpt">Notes and reactions to a podcast episode about the tension between cloud-based AI convenience and the importance of local-first, privacy-preserving approaches to personal data...</div>
+            <div class="recording-card-footer">
+              <div class="recording-card-tags"><span class="tag tag-confirmed">Research</span></div>
+              <div class="recording-card-langs"><span class="lang-dot has"></span><span class="lang-dot has"></span><span class="lang-dot has"></span><span class="lang-dot missing"></span></div>
+            </div>
+          </li>
+
+          <li class="recording-card" data-detail data-date="2026-08-22" data-title="Therapy session notes — managing perfectionism" data-duration="50">
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Therapy session notes — managing perfectionism</a></div>
+              <span class="status status-transcribed">transcribed</span>
+            </div>
+            <div class="recording-card-meta"><span>22 Aug 2026, 11:00</span><span>50 min</span><span>parakeet-v3</span></div>
+            <div class="recording-card-excerpt">Discussion about perfectionism patterns, strategies for "good enough" completion, and how to maintain high standards without paralysis...</div>
+            <div class="recording-card-footer">
+              <div class="recording-card-tags"><span class="tag tag-confirmed">Personal</span></div>
+              <div class="recording-card-langs"><span class="lang-dot has"></span><span class="lang-dot has"></span><span class="lang-dot missing"></span><span class="lang-dot missing"></span></div>
+            </div>
+          </li>
+
+          <li class="recording-card" data-detail data-date="2026-08-20" data-title="Cantonese conversation practice with Man Yee" data-duration="30">
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Cantonese conversation practice with Man Yee</a></div>
+              <span class="status status-failed">failed</span>
+            </div>
+            <div class="recording-card-meta"><span>20 Aug 2026, 20:30</span><span>30 min</span><span>cantonese-v3</span></div>
+            <div class="recording-card-excerpt">Practice conversation in Cantonese about weekend plans and local food recommendations in Hong Kong...</div>
+            <div class="recording-card-footer">
+              <div class="recording-card-tags"><span class="tag tag-confirmed">Language</span><span class="tag">Personal</span></div>
+              <div class="recording-card-langs"><span class="lang-dot missing"></span><span class="lang-dot missing"></span><span class="lang-dot missing"></span><span class="lang-dot missing"></span></div>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <!-- ===== TABLE VIEW (hidden by default) ===== -->
+      <div id="table-view" class="recording-table-wrap" style="display:none">
+        <table class="recording-table">
+          <thead>
+            <tr>
+              <th>Date &amp; time</th>
+              <th>Title</th>
+              <th>Duration</th>
+              <th>Tags</th>
+              <th>Languages</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="table-body">
+            <!-- Populated by JS -->
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Search results (hidden, shown when query active) -->
+      <div id="search-results" style="display:none">
+        <div class="results-header">
+          <span class="results-count" id="search-count">6 results</span>
+        </div>
+        <ul class="recording-list">
+          <li class="recording-card" data-detail>
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Weekly product sync — AI features roadmap</a></div>
+              <span style="font-size:var(--fs-xs);color:var(--color-text-3)">1 Sep 2026</span>
+            </div>
+            <div class="search-result-excerpt">...On-device <mark>speech recognition</mark> should achieve &lt;5% WER for English and &lt;15% for <mark>Cantonese</mark> by end of Q4 through fine-tuning on domain-specific data...</div>
+            <div class="search-result-meta">
+              <span class="search-result-source">Summary</span>
+              <span class="tag tag-confirmed">Work</span>
+              <span class="tag">Research</span>
+              <div class="relevance-indicator"><div class="relevance-bar"><span class="filled"></span><span class="filled"></span><span class="filled"></span><span class="filled"></span><span></span></div>High</div>
+            </div>
+          </li>
+          <li class="recording-card" data-detail>
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Weekly product sync — AI features roadmap</a></div>
+              <span style="font-size:var(--fs-xs);color:var(--color-text-3)">1 Sep 2026</span>
+            </div>
+            <div class="search-result-excerpt">...I've been looking at Whisper fine-tuning on <mark>Cantonese</mark> data. The current WER is around 18% which is... not great. We need more training data, specifically conversational <mark>Cantonese</mark> with mixed English code-switching...</div>
+            <div class="search-result-meta">
+              <span class="search-result-source">Transcript</span>
+              <span class="tag tag-confirmed">Work</span>
+              <span class="tag">Research</span>
+              <div class="relevance-indicator"><div class="relevance-bar"><span class="filled"></span><span class="filled"></span><span class="filled"></span><span class="filled"></span><span></span></div>High</div>
+            </div>
+          </li>
+          <li class="recording-card" data-detail>
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Morning thoughts on Cantonese language learning</a></div>
+              <span style="font-size:var(--fs-xs);color:var(--color-text-3)">31 Aug 2026</span>
+            </div>
+            <div class="search-result-excerpt">...Reflecting on the progress with <mark>Cantonese</mark> pronunciation, comparing tones with Mandarin, and discussing effective study methods for tonal languages...</div>
+            <div class="search-result-meta">
+              <span class="search-result-source">Summary</span>
+              <span class="tag tag-confirmed">Personal</span>
+              <span class="tag">Language</span>
+              <div class="relevance-indicator"><div class="relevance-bar"><span class="filled"></span><span class="filled"></span><span class="filled"></span><span></span><span></span></div>Medium</div>
+            </div>
+          </li>
+          <li class="recording-card" data-detail>
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Brainstorm — personal knowledge system architecture</a></div>
+              <span style="font-size:var(--fs-xs);color:var(--color-text-3)">30 Aug 2026</span>
+            </div>
+            <div class="search-result-excerpt">...Ideas for building a local-first personal knowledge management system with <mark>speech</mark>-to-text, automatic summarisation, and semantic search capabilities...</div>
+            <div class="search-result-meta">
+              <span class="search-result-source">Transcript</span>
+              <span class="tag">Idea</span>
+              <span class="tag tag-suggested">Research</span>
+              <div class="relevance-indicator"><div class="relevance-bar"><span class="filled"></span><span class="filled"></span><span></span><span></span><span></span></div>Low</div>
+            </div>
+          </li>
+          <li class="recording-card" data-detail>
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="#">Cantonese conversation practice with Man Yee</a></div>
+              <span style="font-size:var(--fs-xs);color:var(--color-text-3)">20 Aug 2026</span>
+            </div>
+            <div class="search-result-excerpt">...Practice conversation in <mark>Cantonese</mark> about weekend plans and local food recommendations in Hong Kong...<br><em style="font-size:var(--fs-xs);color:var(--color-danger)">(Transcription failed — no transcript available)</em></div>
+            <div class="search-result-meta">
+              <span class="search-result-source">Metadata only</span>
+              <span class="tag tag-confirmed">Language</span>
+              <span class="tag">Personal</span>
+              <div class="relevance-indicator"><div class="relevance-bar"><span class="filled"></span><span></span><span></span><span></span><span></span></div>Low</div>
+            </div>
+          </li>
+        </ul>
+      </div>
+
+      <!-- No-results -->
+      <div id="no-results" class="state-empty" style="display:none">
+        <div class="state-icon">&#128269;</div>
+        <h3>No results found</h3>
+        <p>Try broadening your search, adjusting filters, or switching search modes.</p>
+      </div>
+
+    </div><!-- /library screen -->
+
+
+    <!-- =============== SCREEN: RECORDING DETAIL =============== -->
+    <div id="detail" class="screen">
+      <div class="breadcrumb"><a href="#" id="back-to-library">&larr; Library</a></div>
+
+      <div class="detail-header">
+        <h1 class="detail-title">Weekly product sync — AI features roadmap</h1>
+        <div class="detail-meta">
+          <span class="meta-item">1 September 2026, 14:30</span>
+          <span class="meta-item">42 min</span>
+          <span class="meta-item"><span class="status status-transcribed">transcribed</span></span>
+          <span class="meta-item">parakeet-v3 &middot; verified routing</span>
+        </div>
+        <div class="detail-tags">
+          <span class="tag tag-confirmed">Work</span>
+          <span class="tag tag-suggested">Meeting</span>
+          <span class="tag">Research</span>
+          <button class="add-tag-btn">+ Add tag</button>
+        </div>
+      </div>
+
+      <nav class="detail-nav" aria-label="Recording content">
+        <button class="detail-nav-tab active" data-panel="summary">Summary</button>
+        <button class="detail-nav-tab" data-panel="transcript">Transcript</button>
+        <button class="detail-nav-tab" data-panel="history">History</button>
+      </nav>
+
+      <div class="lang-tabs" role="tablist" aria-label="Summary language">
+        <button class="lang-tab active" role="tab">Default <span class="tab-status tab-status-ok"></span></button>
+        <button class="lang-tab" role="tab">English <span class="tab-status tab-status-ok"></span></button>
+        <button class="lang-tab" role="tab">&#32321;&#39636;&#20013;&#25991; <span class="tab-status tab-status-ok"></span></button>
+        <button class="lang-tab" role="tab">Original <span class="tab-status tab-status-missing"></span></button>
+      </div>
+
+      <div class="copy-row">
+        <button class="copy-btn">Copy Markdown</button>
+        <div class="export-links"><a href="#">Markdown</a><a href="#">Plain text</a><a href="#">JSON</a></div>
+        <span style="margin-left:auto;font-size:var(--fs-xs);color:var(--color-text-3)">Language: Default &middot; Source: English</span>
+      </div>
+
+      <div data-panel="summary" class="panel active">
+        <div class="summary-body">
+          <div class="summary-section">
+            <div class="summary-section-title">Overview</div>
+            <div class="summary-overview">The team discussed the Q4 product roadmap with a focus on AI-powered features. Key decisions included prioritising local LLM integration for privacy-sensitive use cases, improving on-device speech recognition accuracy, and adopting a hybrid approach where cloud services are optional rather than required. Budget allocation and timeline milestones were agreed upon.</div>
+          </div>
+          <div class="summary-section">
+            <div class="summary-section-title">Key points</div>
+            <ol class="key-points">
+              <li>Local LLM integration is the top priority for Q4, with a target of running 7B-parameter models on consumer hardware within existing memory constraints.</li>
+              <li>On-device speech recognition should achieve &lt;5% WER for English and &lt;15% for Cantonese by end of Q4 through fine-tuning on domain-specific data.</li>
+              <li>Cloud services will remain optional — all core features must work offline. Cloud is used only for heavy batch processing and model updates.</li>
+              <li>Budget approved: 40% engineering, 30% data collection, 20% testing, 10% documentation. Total envelope is within the previously discussed range.</li>
+              <li>Privacy review checkpoint scheduled for mid-October before any external-facing features ship.</li>
+            </ol>
+          </div>
+          <div class="summary-section">
+            <div class="summary-section-title">Action items</div>
+            <ul class="action-items">
+              <li><div>Draft local LLM integration technical specification<div class="action-item-meta">Owner: Harry &middot; Due: 8 Sep 2026</div></div></li>
+              <li><div>Set up Cantonese speech recognition fine-tuning pipeline<div class="action-item-meta">Owner: Harry &middot; Due: 15 Sep 2026</div></div></li>
+              <li><div>Schedule privacy review meeting with external advisor<div class="action-item-meta">Owner: Sarah &middot; Due: 1 Oct 2026</div></div></li>
+            </ul>
+          </div>
+          <div class="summary-section">
+            <div class="summary-section-title">People</div>
+            <div class="topic-list"><span class="tag">Harry</span><span class="tag">Sarah</span><span class="tag">David</span></div>
+          </div>
+          <div class="summary-section">
+            <div class="summary-section-title">Topics</div>
+            <div class="topic-list"><span class="tag">AI roadmap</span><span class="tag">local LLM</span><span class="tag">speech recognition</span><span class="tag">privacy</span><span class="tag">budget</span></div>
+          </div>
+        </div>
+        <button class="provenance-toggle"><span class="chevron">&#9654;</span> Provenance &amp; technical details</button>
+        <div class="provenance-body">
+          <dl class="provenance-grid">
+            <dt>Summary version</dt><dd>#3</dd>
+            <dt>Output language</dt><dd>Default (en)</dd>
+            <dt>Source language</dt><dd>en</dd>
+            <dt>Model</dt><dd>mlx-community/Llama-3-8B-Instruct</dd>
+            <dt>Prompt / parser</dt><dd>v4 / v2</dd>
+            <dt>Generation</dt><dd>chunked (4 chunks, 12,847 chars)</dd>
+            <dt>Created</dt><dd>1 Sep 2026, 15:12</dd>
+          </dl>
+        </div>
+      </div>
+
+      <div data-panel="transcript" class="panel">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--sp-4)">
+          <p style="font-size:var(--fs-sm);color:var(--color-text-3)">187 segments &middot; Version from 1 Sep 2026, 14:55</p>
+          <div style="display:flex;gap:var(--sp-3)"><a href="#" style="font-size:var(--fs-xs)">Plain text</a><a href="#" style="font-size:var(--fs-xs)">Timestamped</a></div>
+        </div>
+        <div class="transcript-segments" lang="en">
+          <div class="transcript-segment"><span class="segment-time">00:00</span><span class="segment-speaker">Harry:</span><span>Alright, let's get started. I want to go through the AI features roadmap for Q4 and make sure we're aligned on priorities.</span></div>
+          <div class="transcript-segment"><span class="segment-time">00:12</span><span class="segment-speaker">Sarah:</span><span>Sounds good. I've prepared the slides on local LLM integration. Should I start there?</span></div>
+          <div class="transcript-segment"><span class="segment-time">00:18</span><span class="segment-speaker">Harry:</span><span>Yes, please. I think that's the most critical piece. The whole privacy-first approach depends on getting this right.</span></div>
+          <div class="transcript-segment"><span class="segment-time">00:30</span><span class="segment-speaker">Sarah:</span><span>So the key question is whether we can run a 7B model on consumer hardware. Our tests show that with quantisation to 4-bit, we can fit within 8GB of unified memory on the M-series chips.</span></div>
+          <div class="transcript-segment"><span class="segment-time">00:48</span><span class="segment-speaker">David:</span><span>That's the bottleneck for most users. Even on the MacBook Air with 8GB, it should work — but just barely. We need to be careful about context window size.</span></div>
+          <div class="transcript-segment"><span class="segment-time">01:02</span><span class="segment-speaker">Harry:</span><span>Agreed. Let's set a hard constraint: the default configuration must work on 8GB machines. Anything beyond that is optional enhancement.</span></div>
+          <div class="transcript-segment"><span class="segment-time">01:15</span><span class="segment-speaker">Sarah:</span><span>That's a good design principle. For the speech recognition side, I've been looking at Whisper fine-tuning on Cantonese data. The current WER is around 18% which is... not great.</span></div>
+          <div class="transcript-segment"><span class="segment-time">01:32</span><span class="segment-speaker">Harry:</span><span>Yeah, 18% is borderline unusable. What would it take to get to 15% or better?</span></div>
+          <div class="transcript-segment"><span class="segment-time">01:40</span><span class="segment-speaker">Sarah:</span><span>We need more training data, specifically conversational Cantonese with mixed English code-switching. I've found a few open datasets, but they're mostly formal speech.</span></div>
+          <div class="transcript-segment"><span class="segment-time">01:55</span><span class="segment-speaker">David:</span><span>Could we generate synthetic training data using the LLM? Have it produce Cantonese conversations with natural code-switching patterns?</span></div>
+        </div>
+        <p style="text-align:center;padding:var(--sp-6) 0;font-size:var(--fs-sm);color:var(--color-text-3)"><a href="#">Show all 187 segments</a></p>
+      </div>
+
+      <div data-panel="history" class="panel">
+        <h2 style="font-size:var(--fs-md);font-weight:600;margin-bottom:var(--sp-4)">Processing History</h2>
+        <div class="summary-section">
+          <div class="summary-section-title">Routing</div>
+          <table class="history-table"><thead><tr><th>Date</th><th>Method</th><th>Profile</th><th>Model</th><th>Verified</th></tr></thead><tbody><tr><td>1 Sep 2026, 14:32</td><td>auto</td><td>european</td><td>parakeet-v3</td><td><span class="tag tag-confirmed">Yes</span></td></tr></tbody></table>
+        </div>
+        <div class="summary-section">
+          <div class="summary-section-title">Transcription attempts</div>
+          <table class="history-table"><thead><tr><th>#</th><th>Outcome</th><th>Error</th><th>Model</th><th>Started</th><th>Duration</th></tr></thead><tbody><tr><td>1</td><td><span class="status status-transcribed">success</span></td><td>&mdash;</td><td>parakeet-v3</td><td>1 Sep 2026, 14:35</td><td>8m 12s</td></tr></tbody></table>
+        </div>
+        <div class="summary-section">
+          <div class="summary-section-title">Summary attempts</div>
+          <table class="history-table"><thead><tr><th>#</th><th>Language</th><th>Outcome</th><th>Model</th><th>Started</th></tr></thead><tbody>
+            <tr><td>1</td><td>Default (en)</td><td><span class="status status-transcribed">success</span></td><td>Llama-3-8B-Instruct</td><td>1 Sep 2026, 15:05</td></tr>
+            <tr><td>2</td><td>English</td><td><span class="status status-transcribed">success</span></td><td>Llama-3-8B-Instruct</td><td>1 Sep 2026, 15:10</td></tr>
+            <tr><td>3</td><td>&#32321;&#39636;&#20013;&#25991;</td><td><span class="status status-transcribed">success</span></td><td>Llama-3-8B-Instruct</td><td>1 Sep 2026, 15:15</td></tr>
+          </tbody></table>
+        </div>
+        <div class="summary-section">
+          <div class="summary-section-title">Source information</div>
+          <dl class="provenance-grid" style="max-width:400px">
+            <dt>Recording ID</dt><dd>a3f8c2e1</dd>
+            <dt>SHA-256</dt><dd>a3f8c2e1...b7d4</dd>
+            <dt>Source file</dt><dd>product_sync_20260901.m4a</dd>
+            <dt>Discovered</dt><dd>1 Sep 2026, 14:30</dd>
+            <dt>Duration</dt><dd>42m 18s</dd>
+            <dt>Audio status</dt><dd>present</dd>
+          </dl>
+        </div>
+      </div>
+
+      <div class="action-bar">
+        <span class="action-bar-label">Summary current &middot; No pending actions</span>
+        <button class="btn btn-sm" data-confirm>Regenerate</button>
+      </div>
+    </div><!-- /detail screen -->
+
+
+    <!-- =============== SCREEN: REVIEW =============== -->
+    <div id="review" class="screen">
+      <div class="page-header">
+        <a href="#" class="back-btn" data-screen="library">&larr; Library</a>
+        <h1 style="font-size:var(--fs-xl);font-weight:700">Review Queue</h1>
+      </div>
+      <div class="review-section">
+        <div class="review-section-title">Needs language review <span class="review-count">2</span></div>
+        <ul class="recording-list">
+          <li class="recording-card needs-attention" data-detail>
+            <div class="recording-card-header"><div class="recording-card-title"><a href="#">Brainstorm — personal knowledge system architecture</a></div><span class="status status-needs_review">needs review</span></div>
+            <div class="recording-card-meta"><span>30 Aug 2026</span><span>55 min</span></div>
+            <div style="margin-top:var(--sp-2);font-size:var(--fs-sm);color:var(--color-text-2)">Routing determined "needs review" — source language ambiguous. Please verify the language profile before transcription.</div>
+          </li>
+          <li class="recording-card needs-attention" data-detail>
+            <div class="recording-card-header"><div class="recording-card-title"><a href="#">Cantonese conversation practice with Man Yee</a></div><span class="status status-failed">failed</span></div>
+            <div class="recording-card-meta"><span>20 Aug 2026</span><span>30 min</span></div>
+            <div style="margin-top:var(--sp-2);font-size:var(--fs-sm);color:var(--color-text-2)">Transcription failed. Error: model timeout. The source file is present and unchanged.</div>
+          </li>
+        </ul>
+      </div>
+      <div class="review-section">
+        <div class="review-section-title">Unverified routing <span class="review-count">1</span></div>
+        <ul class="recording-list">
+          <li class="recording-card" data-detail>
+            <div class="recording-card-header"><div class="recording-card-title"><a href="#">Finnish vocabulary study session — academic register</a></div><span class="status status-transcribed">transcribed</span></div>
+            <div class="recording-card-meta"><span>28 Aug 2026</span><span>25 min</span></div>
+            <div style="margin-top:var(--sp-2);font-size:var(--fs-sm);color:var(--color-text-2)">Auto-routed to European profile but routing is not verified. Consider confirming.</div>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+
+    <!-- =============== SCREEN: STATUS =============== -->
+    <div id="status" class="screen">
+      <div class="page-header">
+        <a href="#" class="back-btn" data-screen="library">&larr; Library</a>
+        <h1 style="font-size:var(--fs-xl);font-weight:700">System Status</h1>
+      </div>
+      <div class="status-grid-page">
+        <div class="status-card"><div class="status-card-label">Recordings</div><div class="status-card-value">24</div><div class="status-card-detail">21 transcribed &middot; 2 needs review &middot; 1 failed</div></div>
+        <div class="status-card"><div class="status-card-label">Summaries</div><div class="status-card-value">18</div><div class="status-card-detail">16 current &middot; 1 failed &middot; 1 re-summarization failed</div></div>
+        <div class="status-card"><div class="status-card-label">Tags</div><div class="status-card-value">12</div><div class="status-card-detail">From config &middot; 48 total assignments</div></div>
+        <div class="status-card"><div class="status-card-label">MacWhisper</div><div class="status-card-value" style="font-size:var(--fs-lg);color:var(--color-ok)">Available</div><div class="status-card-detail">parakeet-v3 selected</div></div>
+        <div class="status-card"><div class="status-card-label">oMLX Endpoint</div><div class="status-card-value" style="font-size:var(--fs-lg);color:var(--color-ok)">Connected</div><div class="status-card-detail">localhost:8080 &middot; Llama-3-8B-Instruct</div></div>
+        <div class="status-card"><div class="status-card-label">Pipeline Lock</div><div class="status-card-value" style="font-size:var(--fs-lg);color:var(--color-ok)">Available</div><div class="status-card-detail">No active pipeline process</div></div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- Confirmation dialog -->
+<div class="confirm-overlay" role="dialog" aria-label="Confirm action" style="visibility:hidden;pointer-events:none">
+  <div class="confirm-dialog">
+    <h3>Regenerate summary?</h3>
+    <p>This will generate a new summary in the <strong>Default</strong> language, replacing the current version. The previous version will be retained in history.</p>
+    <div class="confirm-summary"><strong>Recording:</strong> Weekly product sync — AI features roadmap<br><strong>Language:</strong> Default (English)</div>
+    <div class="confirm-actions"><button class="btn confirm-cancel">Cancel</button><button class="btn btn-primary">Confirm regenerate</button></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
