@@ -35,6 +35,7 @@ def make_summary(**overrides):
         organizations=[" university "],
         topics=["grading"],
         language="zh-HK",
+        output_language="zh-Hant",
         suggested_tags_raw={"suggested": ["Academic", "Read2Learn"], "rejected": []},
         generation_mode="automatic",
     )

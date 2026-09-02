@@ -1,8 +1,117 @@
 # Project status — implementation handoff (end of Step 4)
 
 This file reflects the repository as of the end of Step 4 plus the
-post-incident routing/transcription fixes. It is a snapshot, not a
-durable instruction file; `AGENTS.md` holds the standing rules.
+post-incident routing/transcription fixes and the multilingual summary
+corrective round. It is a snapshot, not a durable instruction file;
+`AGENTS.md` holds the standing rules.
+
+## Multilingual summary variants (corrective round — delivered)
+
+The multilingual-summary work was reassigned and corrected; the previous
+round's completion claims did not match repository evidence. What is now
+in place (all verified by genuine workflow tests):
+
+- **Language policy** (`workflow/services/languages.py`): single
+  canonicalization — BCP-47 canonical casing (primary lowercase, script
+  Titlecase, region uppercase; e.g. `en`, `en-US`, `zh-HK`, `zh-Hant`);
+  Chinese family `zh|yue|cmn[*]` → `zh-Hant` for default AND original
+  output; malformed values never persisted. `workflow/services/langresolve.py`
+  holds default/original resolution; `summarize` re-exports for
+  compatibility. The migration 0007 keeps a documented local copy that
+  mirrors these semantics for historical models.
+- **Variant-state reconciler** (`workflow/services/variant_state.py`):
+  the ONLY writer of `SummaryVariantState` and the Recording-level
+  default summary tuple. Identity/event-driven: derives truth from the
+  DB inside one transaction (locks the Recording row, verifies
+  transcript∈recording and section∈transcript, queries the exact active
+  Summary and the newest exact matching finished failed attempt).
+  `current` ⇔ active Summary for the exact scope; `failed` ⇔ no active
+  Summary + matching failure; `regeneration_failed` requires a matching
+  failure with attempt ordinal NEWER than the Summary's attempt
+  (ordinal, not wall-clock). Recording-level fields update only when
+  the variant is the currently derived default of the ACTIVE
+  transcript's ordinal-0 section.
+- **Recovery** (`recover_interruptions`): exact-scope only. Detection
+  attempts (`language_detection`) and provenance-less legacy attempts
+  change NOTHING (stable diagnostics `detection_attempts` /
+  `legacy_scope_unknown` in the recovery report); forged provenance
+  (foreign transcript/section) is rejected without writes. Idempotent.
+- **Manual source-language correction** (`brain transcript-language
+  ID --set CODE`): one outer pipeline lock (no nesting), atomic, full
+  state matrix incl. `current + regeneration_failed` (recency by
+  attempt ordinal). Contention exits 3 without mutation.
+- **Detection**: bounded (max 2 calls; invalid output retries once;
+  endpoint/HTTP/timeout/request-too-large/response-too-large never
+  retry); `request_too_large` is a distinct durable category
+  (`input_too_large` outcome), never conflated with invalid output;
+  complete safe provenance (`transcript_id`, `section_id`,
+  `requested: "original"`, `language_detection: true`), no fake
+  resolved language, no content/secrets.
+- **Generation selectors vs read selectors**: generation accepts only
+  `default`, `original`, `en`, `zh-Hant`. Read/display/export
+  additionally accept concrete languages that already exist. The
+  view-model derives each tab's `action_selector`: a Finnish tab
+  regenerates via `original` (redirect returns to the `fi` tab through
+  a separately validated `return_language`); concrete tabs no selector
+  can produce are read-only (no action). Unknown concrete languages →
+  friendly 404 (pages and exports); exports never silently fall back
+  to the default language.
+- **Final-payload source language**: `validate_final_payload`
+  canonicalizes the model-reported source language through the
+  language policy; empty is allowed only as the unknown-source case;
+  malformed codes raise a stable schema-validation error (the normal
+  invalid-output retry applies). `Summary.language` and
+  `Transcript.language_observed` receive the same canonical value.
+- **Reconciler identity validation**: the reconciler rejects
+  malformed, noncanonical, source-style Chinese (`yue`, `zh-HK`, …)
+  and `und` output identities with a stable scope error and zero
+  writes; recovery surfaces a distinct `invalid_output_identity`
+  diagnostic. The reconciler is the single runtime writer of summary
+  lifecycle state; the one initialization exception is the
+  transcription-activation hook setting the new transcript's default
+  `summary_status=missing`.
+- **Detection categories surfaced**: `_detect_source_language_with_attempt`
+  returns a structured result; `summarize_one` returns the durable
+  attempt's actual stable category (`endpoint_unavailable`, `timeout`,
+  `http_error`, `request_too_large`, `response_too_large`,
+  `source_language_unknown`) — verified end-to-end through
+  `summarize_one` with mocked LLM calls.
+- **Web** (`workflow/services/variant_view.py`): one read-only variant
+  view-model consumed by detail, summary, exports and the POST action
+  layer — requested selector vs resolved language, selected Summary +
+  variant state + action mode + derived generation selector, unresolved-
+  Original status, all tab options (Default/English/Traditional
+  Chinese/Original + existing concrete variants such as Finnish).
+  Language preserved through confirmation and POST→redirect→GET;
+  actions return to their origin page via a server-owned
+  `return_view` allowlist token (`detail | summary`); the action-state
+  fingerprint binds every language-resolution input (transcript id,
+  canonical source language + verifier, resolved default and Original
+  outputs with an explicit unresolved marker), so a source-language
+  correction invalidates rendered confirmations even with no new
+  attempt and an unchanged action mode; summary history shows output
+  language; GET remains strictly read-only (test-proven).
+- **Source-language provenance**: one deterministic rule in
+  `validate_final_payload(…, source_language=…)` — a known canonical
+  Transcript source is authoritative for `Summary.language` (the
+  model's empty/contradictory/malformed answer is ignored); a genuinely
+  unknown source accepts a canonicalized model value (empty stays the
+  unknown case; malformed → stable schema-validation error with the
+  normal invalid-output retry). `Summary.language` and
+  `Transcript.language_observed` always agree (test-proven end to
+  end, including after Original detection).
+- **Migration 0007** (repaired in place, no 0008): invariant validation
+  FIRST (corrupted legacy data fails clearly and atomically — no
+  winner selection, no historical-row deactivation); constraint swap;
+  data backfill LAST; reversible-check via `Migration.unapply`
+  pre-check proves `IrreversibleError` before any mutation. Covered by
+  genuine `MigrationExecutor` tests on isolated per-test SQLite
+  databases (historical 0006 fixtures, forward + reverse).
+- Tests: 985 passing (final corrective pass: +19 focused regression
+  tests binding the confirmation fingerprint to language resolution,
+  authoritative source-language provenance, and validated return-view
+  redirects). `manage.py check`,
+  `makemigrations --check`, `git diff --check` clean.
 
 ## Post-incident fixes (routing + MP3/M4A transcription)
 

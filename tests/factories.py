@@ -399,6 +399,7 @@ def make_summary_version(recording, transcript, section, *, title="Meeting about
         organizations=[],
         topics=["grading"],
         language="en",
+        output_language="en",
         suggested_tags_raw={"suggested": [], "rejected": []},
         model_id="test-model",
         prompt_version="1",

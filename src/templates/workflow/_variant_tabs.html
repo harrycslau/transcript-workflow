@@ -1,0 +1,21 @@
+{% comment %}
+Shared language-tab bar for the recording detail and summary pages.
+
+Expects: variant (read-only variant view-model), tab_base (URL without
+query string — set by the including template via {% url ... as var %}).
+Strictly read-only: links only.
+{% endcomment %}
+{% if variant.has_transcript %}
+<nav class="language-tabs" aria-label="Summary language">
+  {% for option in variant.options %}
+    <a href="{{ tab_base }}?language={{ option.selector }}"
+       class="tab{% if variant.requested == option.selector %} active{% endif %}">
+      {{ option.label }}{% if option.is_default %} (default){% endif %}
+      {% if option.status == 'current' %}<span class="variant-ok" title="Active">&#10003;</span>
+      {% elif option.status == 'failed' %}<span class="variant-fail" title="Failed">&#10007;</span>
+      {% elif option.status == 'missing' %}<span class="variant-missing" title="Not generated">&#8212;</span>{% endif %}
+      {% if option.regeneration_failed %}<span class="variant-regen-fail" title="Regeneration failed">!</span>{% endif %}
+    </a>
+  {% endfor %}
+</nav>
+{% endif %}

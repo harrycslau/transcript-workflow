@@ -218,9 +218,33 @@ def recover_interruptions(config: AppConfig) -> dict:
         # summarization attempt counts as the transcript's one automatic
         # attempt (failed / warned, explicit retry required). Unrelated
         # routing/transcription interruptions never touch summary state.
+        #
+        # Exact-scope only: attempts are classified first. Detection
+        # attempts and provenance-less legacy attempts are NEVER
+        # attributed to a variant or to the Recording-level default —
+        # they are surfaced as stable diagnostics instead.
         from workflow.services.summarize import reconcile_recording_summary_state
+        from workflow.services.variant_state import (
+            has_complete_scope_provenance,
+            has_scope_provenance_ids,
+            is_detection_attempt,
+        )
 
+        detection_attempts = 0
+        legacy_scope_unknown = 0
+        invalid_output_identity = 0
         for recording_id, attempt in recovered_summarization:
+            if is_detection_attempt(attempt):
+                detection_attempts += 1
+                continue
+            if not has_scope_provenance_ids(attempt):
+                legacy_scope_unknown += 1
+                continue
+            if not has_complete_scope_provenance(attempt):
+                # Scope ids present but the resolved output-language
+                # identity is malformed/noncanonical: never attributed.
+                invalid_output_identity += 1
+                continue
             recording = Recording.objects.filter(pk=recording_id).first()
             if recording is not None:
                 reconcile_recording_summary_state(recording, recovered_attempt=attempt)
@@ -236,6 +260,11 @@ def recover_interruptions(config: AppConfig) -> dict:
         "recovered_attempts": recovered_attempts,
         "recovered_recordings": recovered_recordings,
         "temp_dirs_removed": temp_dirs_removed,
+        "summary_reconciliation": {
+            "detection_attempts": detection_attempts,
+            "legacy_scope_unknown": legacy_scope_unknown,
+            "invalid_output_identity": invalid_output_identity,
+        },
     }
 
 

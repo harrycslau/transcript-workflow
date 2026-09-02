@@ -38,6 +38,7 @@ import hashlib
 import json
 import logging
 import re
+from dataclasses import dataclass
 
 from django.db import transaction
 from django.utils import timezone
@@ -61,14 +62,23 @@ from workflow.models import (
     Section,
 )
 from workflow.services import chunking
+from workflow.services import languages
 from workflow.services import llm as llm_service
 from workflow.services import tags as tags_service
+from workflow.services import variant_state as variant_state_service
 from workflow.services.chunking import ChunkPlan, InputTooLarge, build_chunks, check_chunk_limits
+from workflow.services.langresolve import (  # noqa: F401 (re-exported)
+    resolve_default_language,
+    resolve_output_language,
+)
 from workflow.services.transcription import next_ordinal, sanitize_error
 
 logger = logging.getLogger(__name__)
 
 PARSER_VERSION = "1"
+# Code-owned prompt implementation version. Stored on Summary for
+# provenance. Replaces config-driven prompt_version for new summaries.
+PROMPT_IMPLEMENTATION_VERSION = "2"
 
 FINAL_SHAPE_DOC = (
     '{"title": string, "overview": string, '
@@ -102,6 +112,102 @@ _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 
 # ---------------------------------------------------------------------------
+# Language resolution
+#
+# The canonical language policy lives in workflow.services.languages and
+# output-language resolution in workflow.services.langresolve; both are
+# re-exported here for backwards compatibility. There is no second
+# normalization policy anywhere in the runtime.
+# ---------------------------------------------------------------------------
+
+is_chinese_family = languages.is_chinese_family  # noqa: F401 (re-export)
+normalize_source_language = languages.canonicalize_language  # noqa: F401 (re-export)
+canonical_source_for_output = languages.output_language_for_source  # noqa: F401 (re-export)
+
+
+def _detect_source_language(
+    config: AppConfig, transcript: Transcript, *, transport=None, llm_call=None
+) -> tuple[str | None, llm_service.LLMError | None]:
+    """Bounded local source-language detection via the oMLX endpoint.
+
+    Returns (canonical_language_code_or_None, error_or_None).
+    Invalid output may retry once (max 2 calls). Endpoint/HTTP/timeout
+    failures do not retry. No raw prompts, responses, or transcript
+    text are persisted.
+    """
+    segments = list(transcript.segments.order_by("ordinal").values_list("text", flat=True))
+    if not segments and transcript.text_normalized:
+        segments = [transcript.text_normalized]
+    if not segments:
+        return None, None
+    # Bound input to first 4000 characters
+    text = "\n".join(segments)[:4000]
+
+    system = (
+        "You are a language detector. Given a transcript, return ONLY a "
+        'JSON object: {"language": "<BCP-47 code>"}. Detect the dominant '
+        "spoken language. Use standard codes like en, fi, zh-HK, zh-CN, "
+        "yue, sv, etc."
+    )
+    user = f"<transcript>\n{text}\n</transcript>\n\nDetect the language. Respond with ONLY the JSON object."
+
+    def _validate(data):
+        lang = data.get("language", "")
+        if not isinstance(lang, str) or not lang.strip():
+            raise llm_service.LLMInvalid("schema_validation", "field 'language' must be a non-empty string")
+        lang = lang.strip()
+        if len(lang) > MAX_LANGUAGE_CHARS:
+            raise llm_service.LLMInvalid("schema_validation", "language code too long")
+        # Canonicalize casing first, then validate
+        canonical = normalize_source_language(lang)
+        if not canonical:
+            raise llm_service.LLMInvalid("schema_validation", f"invalid language code: {lang}")
+        return canonical
+
+    try:
+        result = _call_llm(
+            config,
+            system=system,
+            user=user,
+            validate=_validate,
+            transport=transport,
+            llm_call=llm_call,
+        )
+        return result, None
+    except llm_service.LLMInvalid:
+        # Invalid output: _call_llm already retried once; return failure
+        return None, llm_service.LLMInvalid("source_language_unknown", "invalid detector output after retry")
+    except llm_service.LLMError as exc:
+        # Endpoint/HTTP/timeout failures: no retry, preserve category
+        return None, exc
+    except InputTooLarge as exc:
+        # Request-too-large is its own stable category — never
+        # conflated with invalid output. No retry.
+        raise
+
+
+def _language_instruction(output_language: str, source_language: str) -> str:
+    """Return the language-specific instruction block for prompts."""
+    if output_language == "en":
+        return (
+            "- Write ALL summary prose (title, overview, key_points text, "
+            "action_items text) in English. Preserve necessary proper nouns "
+            "and technical terms."
+        )
+    if output_language == "zh-Hant":
+        return (
+            "- Write ALL summary prose in Traditional Chinese (繁體中文). "
+            "All Chinese characters MUST be Traditional Chinese, never "
+            "Simplified. Retain needed English terms and proper nouns."
+        )
+    # Concrete language code (e.g. "fi")
+    return (
+        f"- Write ALL summary prose in {output_language}. "
+        "Do not translate into another language. Retain proper nouns."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
 
@@ -112,16 +218,15 @@ def _tag_lines(tags: list[Tag]) -> str:
     return "\n".join(f"- {tag.name}: {tag.description}" for tag in tags)
 
 
-def _final_system_prompt(tags: list[Tag]) -> str:
+def _final_system_prompt(
+    tags: list[Tag], output_language: str = "", source_language: str = ""
+) -> str:
+    lang_instruction = _language_instruction(output_language, source_language)
     return (
         "You are a transcript summarizer. You receive the text of a recorded session "
         "and must respond with ONLY a JSON object — no prose, no Markdown fences.\n"
         "Rules:\n"
-        "- First determine the transcript's dominant language, then write ALL summary prose in "
-        "that language. An English transcript MUST produce English; Finnish and other non-Chinese "
-        "languages must likewise remain in their source language. NEVER translate them into Chinese. "
-        "Only when the dominant language is Chinese (Cantonese or Mandarin), use Traditional Chinese "
-        "even if the source uses Simplified Chinese; retain needed English terms.\n"
+        f"{lang_instruction}\n"
         "- `overview`: concise—about 50–80 Chinese characters for Chinese, or a similarly short "
         "one-to-three sentences in another language; avoid repetition.\n"
         "- `key_points`: detailed reasoning, examples, decisions, and conclusions. Set `level` "
@@ -136,19 +241,20 @@ def _final_system_prompt(tags: list[Tag]) -> str:
         "- If uncertain use []; never infer, fill for completeness, or fabricate.\n"
         "- `suggested_tags`: choose zero or more from the ALLOWED TAGS list below, "
         "using the exact names. Use `Unknown` only when no other allowed tag fits.\n"
-        "- `language`: the primary language of the transcript (for example zh-HK, en, fi).\n\n"
+        "- `language`: the primary language of the transcript (for example zh-HK, en, fi). "
+        "This is the transcript's dominant language, NOT the summary output language.\n\n"
         f"ALLOWED TAGS:\n{_tag_lines(tags)}\n\n"
         f"Respond with ONLY a JSON object with exactly this shape:\n{FINAL_SHAPE_DOC}"
     )
 
 
-def _map_system_prompt() -> str:
+def _map_system_prompt(output_language: str = "", source_language: str = "") -> str:
+    lang_instruction = _language_instruction(output_language, source_language)
     return (
         "You are a transcript summarizer working on ONE chunk of a longer recording. "
         "Respond with ONLY a JSON object — no prose, no Markdown fences.\n"
         "Rules:\n"
-        "- Keep the chunk's dominant language: English MUST stay English and other non-Chinese "
-        "languages must not be translated into Chinese. Only Chinese output uses Traditional Chinese.\n"
+        f"{lang_instruction}\n"
         "- Retain useful reasoning, examples, decisions, explicit future actions, named people/"
         "organizations, and substantive topics so final merge need not infer them.\n"
         "- Never fabricate or force chunk-level numbering.\n\n"
@@ -339,31 +445,66 @@ def _payload_prose(payload: dict) -> str:
     return "\n".join(values)
 
 
-def _reject_unexpected_chinese(payload: dict, *, source_has_no_cjk: bool) -> dict:
-    """Reject a clearly Chinese output for a transcript containing no CJK text.
+def _validate_language_consistency(
+    payload: dict, *, output_language: str
+) -> dict:
+    """Validate that summary prose matches the expected output language.
 
-    This intentionally catches only high-confidence contradictions. A few CJK
-    characters in names or quoted terms remain valid for non-Chinese summaries.
+    Uses script-level checks only. Conservative: rejects high-confidence
+    contradictions. Cannot distinguish Latin-script languages (Finnish vs
+    English) — relies on the LLM following the prompt.
     """
-    if not source_has_no_cjk:
-        return payload
+    if output_language == "original" or not output_language:
+        return payload  # no validation for original or empty
+
     prose = _payload_prose(payload)
     cjk_count = len(_CJK_RE.findall(prose))
-    visible_count = sum(not char.isspace() for char in prose)
-    if cjk_count >= 10 and cjk_count / max(1, visible_count) >= 0.10:
-        raise llm_service.LLMInvalid(
-            "language_mismatch", "summary language does not match the transcript language"
-        )
+    visible_count = sum(not c.isspace() for c in prose)
+
+    if output_language == "en":
+        # Reject clearly Chinese prose
+        if cjk_count >= 10 and cjk_count / max(1, visible_count) >= 0.10:
+            raise llm_service.LLMInvalid(
+                "language_mismatch",
+                "expected English output but detected predominantly Chinese characters",
+            )
+    elif output_language == "zh-Hant":
+        # Reject clearly non-Chinese prose (need enough text to be meaningful)
+        if visible_count > 50 and cjk_count / max(1, visible_count) < 0.05:
+            raise llm_service.LLMInvalid(
+                "language_mismatch",
+                "expected Chinese output but detected no Chinese characters",
+            )
+    # For other Latin-script languages: no script-level check is possible.
+    # We rely on the LLM following the prompt instruction.
+
     return payload
 
 
-def validate_final_payload(data: dict, allowed: dict[str, Tag]) -> dict:
+def validate_final_payload(
+    data: dict, allowed: dict[str, Tag], *, source_language: str = ""
+) -> dict:
     """Validate the final structured summary; returns the canonical payload.
 
     ``suggested_tags`` are matched case-insensitively against configured
     tags; unknown names are returned as ``rejected`` and never persisted
     as tags. A suggested ``Unknown`` is dropped whenever any real tag is
     also suggested.
+
+    Source-language provenance (one deterministic rule):
+
+    - If ``source_language`` is a valid canonical code (the Transcript's
+      already-resolved source), it is AUTHORITATIVE: it is stored as
+      ``payload["language"]`` and the model's own ``language`` value —
+      empty or contradictory — is ignored. A user-verified Transcript
+      language is never displaced by the summary model.
+    - If the Transcript source is genuinely unknown, the model's value
+      is canonicalized: empty stays empty (the documented
+      unknown-source case); any non-empty value that is not a valid
+      BCP-47 tag raises ``LLMInvalid`` with a stable schema-validation
+      code so the established invalid-output retry policy applies.
+
+    Raw mixed-case or malformed model values never reach persistence.
     """
     title = _require_str(data.get("title"), "title", max_length=MAX_TITLE_CHARS)
     overview = _require_str(data.get("overview"), "overview", max_length=MAX_OVERVIEW_CHARS)
@@ -372,9 +513,21 @@ def validate_final_payload(data: dict, allowed: dict[str, Tag]) -> dict:
     people = _str_list(data.get("people"), "people", MAX_NAME_ITEMS, MAX_NAME_CHARS)
     organizations = _str_list(data.get("organizations"), "organizations", MAX_NAME_ITEMS, MAX_NAME_CHARS)
     topics = _str_list(data.get("topics"), "topics", MAX_NAME_ITEMS, MAX_NAME_CHARS)
-    language = _require_str(
+    raw_language = _require_str(
         data.get("language", ""), "language", max_length=MAX_LANGUAGE_CHARS, allow_empty=True
     )
+    known_source = languages.canonicalize_language(source_language)
+    if known_source:
+        # The Transcript source was resolved before generation; it is
+        # the single authoritative provenance for this Summary.
+        canonical_language = known_source
+    else:
+        canonical_language = languages.canonicalize_language(raw_language)
+        if raw_language and not canonical_language:
+            raise llm_service.LLMInvalid(
+                "schema_validation",
+                "field 'language' is not a valid BCP-47 language tag",
+            )
     suggested_raw = _validate_suggested_tags(data.get("suggested_tags"))
 
     resolved: list[Tag] = []
@@ -398,7 +551,7 @@ def validate_final_payload(data: dict, allowed: dict[str, Tag]) -> dict:
         "people": people,
         "organizations": organizations,
         "topics": topics,
-        "language": language,
+        "language": canonical_language,
         "suggested": resolved,
         "rejected": rejected,
     }
@@ -473,7 +626,8 @@ def _reduce_layer(
     allowed: dict[str, Tag],
     *,
     final: bool,
-    source_has_no_cjk: bool,
+    output_language: str,
+    source_language: str,
     transport=None,
     llm_call=None,
 ) -> dict:
@@ -485,17 +639,18 @@ def _reduce_layer(
     fails cleanly BEFORE any HTTP call.
     """
     if final:
-        validate = lambda data: _reject_unexpected_chinese(  # noqa: E731
-            validate_final_payload(data, allowed), source_has_no_cjk=source_has_no_cjk
+        validate = lambda data: _validate_language_consistency(  # noqa: E731
+            validate_final_payload(data, allowed, source_language=source_language),
+            output_language=output_language,
         )
     else:
-        validate = lambda data: _reject_unexpected_chinese(  # noqa: E731
-            validate_map_payload(data), source_has_no_cjk=source_has_no_cjk
+        validate = lambda data: _validate_language_consistency(  # noqa: E731
+            validate_map_payload(data), output_language=output_language
         )
     try:
         return _call_llm(
             config,
-            system=_final_system_prompt(list(allowed.values())) if final else _map_system_prompt(),
+            system=_final_system_prompt(list(allowed.values()), output_language, source_language) if final else _map_system_prompt(output_language, source_language),
             user=_reduce_user_prompt(intermediates, final=final),
             validate=validate,
             transport=transport,
@@ -507,15 +662,18 @@ def _reduce_layer(
         mid = len(intermediates) // 2
         left = _reduce_layer(
             intermediates[:mid], config, allowed, final=False,
-            source_has_no_cjk=source_has_no_cjk, transport=transport, llm_call=llm_call
+            output_language=output_language, source_language=source_language,
+            transport=transport, llm_call=llm_call,
         )
         right = _reduce_layer(
             intermediates[mid:], config, allowed, final=False,
-            source_has_no_cjk=source_has_no_cjk, transport=transport, llm_call=llm_call
+            output_language=output_language, source_language=source_language,
+            transport=transport, llm_call=llm_call,
         )
         return _reduce_layer(
             [left, right], config, allowed, final=final,
-            source_has_no_cjk=source_has_no_cjk, transport=transport, llm_call=llm_call
+            output_language=output_language, source_language=source_language,
+            transport=transport, llm_call=llm_call,
         )
 
 
@@ -524,19 +682,21 @@ def _generate_summary(
     plan: ChunkPlan,
     tags: list[Tag],
     *,
+    output_language: str,
+    source_language: str,
     transport=None,
     llm_call=None,
 ) -> tuple[dict, int]:
     """Run the map/reduce flow; returns (canonical payload, chunk_count)."""
     allowed = {tag.name_key: tag for tag in tags}
-    source_has_no_cjk = not any(_CJK_RE.search(chunk) for chunk in plan.chunks)
     if len(plan.chunks) == 1:
         payload = _call_llm(
             config,
-            system=_final_system_prompt(tags),
+            system=_final_system_prompt(tags, output_language, source_language),
             user=_user_transcript_prompt(plan.chunks[0]),
-            validate=lambda data: _reject_unexpected_chinese(
-                validate_final_payload(data, allowed), source_has_no_cjk=source_has_no_cjk
+            validate=lambda data: _validate_language_consistency(
+                validate_final_payload(data, allowed, source_language=source_language),
+                output_language=output_language,
             ),
             transport=transport,
             llm_call=llm_call,
@@ -549,18 +709,19 @@ def _generate_summary(
         intermediates.append(
             _call_llm(
                 config,
-                system=_map_system_prompt(),
+                system=_map_system_prompt(output_language, source_language),
                 user=_map_user_prompt(chunk, index + 1, total),
-                validate=lambda data: _reject_unexpected_chinese(
-                    validate_map_payload(data), source_has_no_cjk=source_has_no_cjk
+                validate=lambda data: _validate_language_consistency(
+                    validate_map_payload(data), output_language=output_language
                 ),
                 transport=transport,
                 llm_call=llm_call,
             )
         )
     final = _reduce_layer(
-        intermediates, config, allowed, final=True, source_has_no_cjk=source_has_no_cjk,
-        transport=transport, llm_call=llm_call
+        intermediates, config, allowed, final=True,
+        output_language=output_language, source_language=source_language,
+        transport=transport, llm_call=llm_call,
     )
     return final, total
 
@@ -570,16 +731,17 @@ def _generate_summary(
 # ---------------------------------------------------------------------------
 
 
-def config_fingerprint(config: AppConfig, tags: list[Tag]) -> str:
+def config_fingerprint(config: AppConfig, tags: list[Tag], output_language: str = "") -> str:
     """Safe fingerprint of the summarization-relevant configuration.
 
-    Contains model/endpoint identity, prompt/parser versions, limits and
-    configured tag identities — never secrets or prompt text.
+    Contains model/endpoint identity, prompt/parser versions, limits,
+    configured tag identities, and output_language — never secrets or
+    prompt text.
     """
     payload = {
         "model": config.llm.model,
         "base_url": config.llm.base_url,
-        "prompt_version": config.summarization.prompt_version,
+        "prompt_version": PROMPT_IMPLEMENTATION_VERSION,
         "parser_version": PARSER_VERSION,
         "temperature": config.summarization.temperature,
         "max_output_tokens": config.summarization.max_output_tokens,
@@ -589,6 +751,7 @@ def config_fingerprint(config: AppConfig, tags: list[Tag]) -> str:
         "max_chunk_count": config.summarization.max_chunk_count,
         "max_total_characters": config.summarization.max_total_characters,
         "tags": sorted(tag.name_key for tag in tags),
+        "output_language": output_language,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -625,36 +788,34 @@ def _finish_attempt_failure(
     outcome: str,
     error_code: str,
     message: str,
+    *,
+    output_language: str,
+    transcript: Transcript,
+    section: Section,
 ) -> None:
-    """Finish a failed attempt; update orthogonal summary state only.
+    """Finish a failed attempt; reconcile variant state via the
+    centralized reconciler.
 
-    Never touches ``processing_status``. Every completed failure — with
-    or without a current summary — durably records the failed attempt on
-    the recording (``last_failed_attempt``):
-
-    - no current summary: ``summary_status=failed``,
-      ``resummarization_failed=False``;
-    - current summary (failed regeneration): it stays active,
-      ``summary_status=current``, ``resummarization_failed=True``.
-
-    Successful persistence clears all three fields (see
-    ``persist_summary``); a new active transcript clears them too.
+    Never touches ``processing_status``. The attempt is finished
+    durably, then :func:`variant_state.reconcile_variant_state` derives
+    the variant tuple and — only when this exact scope is the
+    currently derived default of the active transcript's ordinal-0
+    section — the Recording-level default tuple from the database.
+    Optional variants never touch Recording-level summary fields.
     """
     attempt.outcome = outcome
     attempt.error_code = error_code
     attempt.error_message = sanitize_error(message)
     attempt.finished_at = timezone.now()
     with transaction.atomic():
-        rec = Recording.objects.select_for_update().get(pk=recording.pk)
         attempt.save()
-        if rec.current_summary() is not None:
-            rec.summary_status = SummaryState.CURRENT
-            rec.resummarization_failed = True
-        else:
-            rec.summary_status = SummaryState.FAILED
-            rec.resummarization_failed = False
-        rec.last_failed_attempt = attempt
-        rec.save()
+        variant_state_service.reconcile_variant_state(
+            recording=recording,
+            transcript=transcript,
+            section=section,
+            output_language=output_language,
+            triggering_attempt=attempt,
+        )
 
 
 def reconcile_recording_summary_state(recording: Recording, recovered_attempt: ProcessingAttempt | None = None) -> bool:
@@ -662,78 +823,108 @@ def reconcile_recording_summary_state(recording: Recording, recovered_attempt: P
 
     Contract:
 
-    - ``recovered_attempt`` (the recommended path) is the specific
-      summarization attempt just converted to ``interrupted`` by
-      recovery; because the pipeline lock excludes concurrent workflow
-      mutations, it is the authoritative event being reconciled:
-      - no current Summary: ``summary_status=failed``,
-        ``resummarization_failed=False``,
-        ``last_failed_attempt=<recovered attempt>``;
-      - current Summary (interrupted regeneration): it stays active,
-        ``summary_status=current``, ``resummarization_failed=True``,
-        ``last_failed_attempt=<recovered attempt>``.
+    - ``recovered_attempt`` is REQUIRED for any state change: it is the
+      specific summarization attempt just converted to ``interrupted``
+      by recovery. Reconciliation is EXACT-SCOPE ONLY — the attempt's
+      durable provenance (``context_json["language"]`` with
+      ``transcript_id``, ``section_id``, ``resolved``) decides which
+      variant state is updated; the Recording-level default tuple is
+      touched only when that exact scope is still the currently derived
+      default of the ACTIVE transcript's ordinal-0 section.
 
-      In both states normal ``brain run`` must not retry; explicit
-      retry is required.
+      Conservative rules (no guessing, ever):
 
-    - Without ``recovered_attempt`` (defensive/direct use only) the
-      function makes ONLY corrections that cannot violate the locked
-      retry rule: it never upgrades an existing ``failed`` to
-      ``missing`` and never touches failure markers. It sets
-      ``missing`` only when the recording has ZERO summarization
-      attempts (durable proof of "never attempted"); recordings whose
-      only summarization attempts belong to older transcripts are left
-      untouched (a new active transcript receives ``missing`` from the
-      transcription persistence hook, which is the valid event).
+      - source-language-detection attempts (``language_detection``) are
+        not variant events: nothing is updated;
+      - attempts WITHOUT complete scope provenance (legacy, or a
+        malformed/noncanonical ``resolved`` identity) never update any
+        state — a stable ``legacy_attempt_scope_unknown`` diagnostic is
+        logged; the attempt stays ``interrupted``;
+      - forged provenance (transcript belonging to another recording,
+        section belonging to another transcript) is rejected without
+        any write.
 
-    Returns True when the recording was saved. Repeated runs compare
-    the expected state before saving, so they never create attempts,
-    change ordinals, or rewrite an already-correct state.
+      In the proven, exact-scope case: no current Summary for that
+      variant → ``failed``; current Summary with a newer matching
+      failure → ``current`` + ``regeneration_failed``. Normal
+      ``brain run`` must not retry either state; explicit retry only.
+
+    - Without ``recovered_attempt`` the function is a documented NO-OP.
+      There is no production caller for an attempt-less defensive
+      write: the reconciler is the single runtime writer of summary
+      lifecycle state after an active transcript exists, and the new
+      transcript's initial ``missing`` default state is set by the
+      transcription-activation hook (the one documented initialization
+      exception). Keeping this entry point write-free means no code
+      path can "helpfully" guess state outside the reconciler.
+
+    Returns True when the recording row changed (only possible with a
+    recovered attempt).
     """
-    if not recording.transcripts.filter(is_active=True).exists():
-        if recording.summary_status != SummaryState.NOT_READY:
-            recording.summary_status = SummaryState.NOT_READY
-            recording.save(update_fields=["summary_status"])
+    if recovered_attempt is None:
+        # Documented no-op: state is derived exclusively from recovery
+        # events through the reconciler (see docstring).
         return False
 
-    if recovered_attempt is not None:
-        current = recording.current_summary()
-        expected: dict
-        if current is None:
-            expected = dict(
-                summary_status=SummaryState.FAILED,
-                resummarization_failed=False,
-                last_failed_attempt_id=recovered_attempt.pk,
-            )
-        else:
-            expected = dict(
-                summary_status=SummaryState.CURRENT,
-                resummarization_failed=True,
-                last_failed_attempt_id=recovered_attempt.pk,
-            )
-        changed = any(getattr(recording, field) != value for field, value in expected.items())
-        if changed:
-            for field, value in expected.items():
-                setattr(recording, field, value)
-            recording.save()
-        return changed
-
-    # Defensive path (no recovered attempt): conservative corrections only.
-    current = recording.current_summary()
-    if current is not None:
-        if recording.summary_status != SummaryState.CURRENT:
-            recording.summary_status = SummaryState.CURRENT
-            recording.save(update_fields=["summary_status"])
-            return True
+    if variant_state_service.is_detection_attempt(recovered_attempt):
+        # Detection failures are not summary-variant events.
         return False
-    has_any_summarization_attempt = ProcessingAttempt.objects.filter(
-        recording=recording, stage=AttemptStage.SUMMARIZATION
-    ).exists()
-    if not has_any_summarization_attempt and recording.summary_status != SummaryState.MISSING:
-        recording.summary_status = SummaryState.MISSING
-        recording.save(update_fields=["summary_status"])
-        return True
-    return False
+    if not variant_state_service.has_complete_scope_provenance(recovered_attempt):
+        logger.warning(
+            "legacy_attempt_scope_unknown: interrupted summarization attempt %s "
+            "carries no complete exact-scope provenance (legacy data or invalid "
+            "output-language identity); summary state left unchanged "
+            "(conservative recovery)",
+            recovered_attempt.pk,
+        )
+    lang = (recovered_attempt.context_json or {}).get("language", {})
+    attempt_transcript = Transcript.objects.filter(
+        pk=str(lang.get("transcript_id", ""))
+    ).first()
+    if attempt_transcript is None:
+        logger.warning(
+            "legacy_attempt_scope_unknown: attempt %s provenance transcript "
+            "does not exist; state left unchanged",
+            recovered_attempt.pk,
+        )
+        return False
+    if attempt_transcript.recording_id != recovered_attempt.recording_id:
+        # Forged/mismatched transcript identity: never write.
+        logger.warning(
+            "Recovery: attempt %s provenance transcript %s does not belong to "
+            "recording %s; state left unchanged",
+            recovered_attempt.pk, attempt_transcript.pk, recovered_attempt.recording_id,
+        )
+        return False
+    attempt_section = Section.objects.filter(pk=str(lang.get("section_id", ""))).first()
+    if attempt_section is None or attempt_section.transcript_id != attempt_transcript.pk:
+        logger.warning(
+            "Recovery: attempt %s provenance section does not belong to provenance "
+            "transcript %s; state left unchanged",
+            recovered_attempt.pk, attempt_transcript.pk,
+        )
+        return False
+
+    output_language = str(lang.get("resolved", ""))
+    before = (
+        recording.summary_status,
+        recording.resummarization_failed,
+        recording.last_failed_attempt_id,
+    )
+    variant_state_service.reconcile_variant_state(
+        recording=recording,
+        transcript=attempt_transcript,
+        section=attempt_section,
+        output_language=output_language,
+        triggering_attempt=recovered_attempt,
+    )
+    recording.refresh_from_db()
+    after = (
+        recording.summary_status,
+        recording.resummarization_failed,
+        recording.last_failed_attempt_id,
+    )
+    return before != after
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +943,8 @@ def persist_summary(
     section: Section,
     attempt: ProcessingAttempt,
     payload: dict,
+    output_language: str,
+    is_default: bool,
     model_id: str,
     base_url: str,
     prompt_version: str,
@@ -768,10 +961,10 @@ def persist_summary(
     - ``section.transcript_id == transcript.pk`` and
       ``transcript.recording_id == recording.pk`` (nothing is written on
       mismatch);
-    - exactly one active Summary per (transcript, section) scope: active
-      summaries of THIS transcript are deactivated atomically before the
-      new one activates. Summaries of older transcripts are untouched —
-      they stay historically active in their own scopes.
+    - exactly one active Summary per (transcript, section, output_language):
+      active summaries of THIS transcript with the same output_language
+      are deactivated atomically before the new one activates. Summaries
+      of older transcripts or different output_languages are untouched.
     """
     if section.transcript_id != transcript.pk:
         raise SummaryRelationError("section does not belong to the summary's transcript")
@@ -781,9 +974,11 @@ def persist_summary(
     now = timezone.now()
     with transaction.atomic():
         rec = Recording.objects.select_for_update().get(pk=recording.pk)
-        Summary.objects.filter(transcript=transcript, section=section, is_active=True).update(
-            is_active=False, superseded_at=now
-        )
+        # Deactivate only same output_language active summaries
+        Summary.objects.filter(
+            transcript=transcript, section=section,
+            output_language=output_language, is_active=True,
+        ).update(is_active=False, superseded_at=now)
         last = Summary.objects.filter(recording=rec).order_by("-ordinal").first()
         summary = Summary.objects.create(
             recording=rec,
@@ -801,6 +996,7 @@ def persist_summary(
             organizations=payload["organizations"],
             topics=payload["topics"],
             language=payload["language"],
+            output_language=output_language,
             suggested_tags_raw={
                 "suggested": [tag.name for tag in payload["suggested"]],
                 "rejected": payload["rejected"],
@@ -816,11 +1012,21 @@ def persist_summary(
             limits_used=limits_used,
             generation_mode=generation_mode,
         )
-        _materialize_tags(rec, summary, payload["suggested"])
-        rec.summary_status = SummaryState.CURRENT
-        rec.resummarization_failed = False
-        rec.last_failed_attempt = None
-        rec.save()
+        # Materialize tags only for the default language variant
+        if is_default:
+            _materialize_tags(rec, summary, payload["suggested"])
+
+        # Derive the variant state (and, when this variant is the
+        # currently derived default, the Recording tuple) from the
+        # database via the centralized reconciler.
+        variant_state_service.reconcile_variant_state(
+            recording=recording,
+            transcript=transcript,
+            section=section,
+            output_language=output_language,
+            triggering_attempt=attempt,
+        )
+
         attempt.outcome = AttemptOutcome.SUCCESS
         attempt.error_code = ""
         attempt.error_message = ""
@@ -898,30 +1104,95 @@ def summarize_one(
     config: AppConfig,
     recording: Recording,
     *,
+    target_language: str = "default",
     regenerate: bool = False,
     generation_mode: str = GenerationMode.MANUAL,
     transport=None,
     llm_call=None,
 ) -> dict:
-    """Summarize one recording under the caller's pipeline lock."""
+    """Summarize one recording under the caller's pipeline lock.
+
+    ``target_language``: one of the generation selectors ``default``,
+    ``original``, ``en``, ``zh-Hant`` — nothing else may create a
+    variant. Resolved to a concrete ``output_language`` before
+    generation.
+    """
+    if target_language not in languages.GENERATION_SELECTORS:
+        raise ConfigError(
+            f"unsupported generation target: {target_language!r} "
+            f"(allowed: {', '.join(languages.GENERATION_SELECTORS)})"
+        )
     recording = Recording.objects.get(pk=recording.pk)
     if not config.summarization.enabled:
         return _skip(recording, "summarization_disabled")
     transcript = recording.transcripts.filter(is_active=True).first()
     if transcript is None:
         return _skip(recording, "no_active_transcript")
-    current = recording.current_summary()
-    if current is not None and not regenerate:
-        return _skip(recording, "summary_current")
     if not config.llm.model.strip():
         raise ConfigError("no summarization model configured (llm.model is blank)")
     section = transcript.sections.filter(ordinal=0).first()
     if section is None:
         raise ConfigError("active transcript has no whole-recording section")
 
-    # Synchronize configured tags inside the locked mutating path (never
-    # on read-only commands); retired rows are kept, never deleted.
+    # Resolve target_language to output_language
+    output_language = resolve_output_language(transcript, target_language)
+
+    # Handle "original" when source language is unknown
+    if target_language == "original" and not output_language:
+        detection = _detect_source_language_with_attempt(
+            config, recording, transcript, section,
+            transport=transport, llm_call=llm_call,
+        )
+        if not detection.language:
+            # Surface the durable attempt's actual stable category
+            # (endpoint_unavailable, timeout, http_error,
+            # request_too_large, response_too_large,
+            # source_language_unknown, ...). No variant state is created
+            # until a concrete output language exists.
+            return _failed(
+                recording, detection.error_code or "source_language_unknown",
+                kept_current=False,
+            )
+        detected = detection.language
+        # Persist detection on transcript
+        now = timezone.now()
+        transcript.language_observed = detected
+        transcript.language_observed_verified_by = "llm_detection"
+        transcript.language_observed_verified_at = now
+        transcript.save(update_fields=[
+            "language_observed", "language_observed_verified_by",
+            "language_observed_verified_at",
+        ])
+        # Re-resolve now that source is known
+        output_language = resolve_output_language(transcript, target_language)
+        if not output_language:
+            return _failed(recording, "source_language_unknown", kept_current=False)
+
+    # Determine if this is the default variant
+    default_language = resolve_default_language(transcript)
+    is_default = output_language == default_language
+
+    # Check if variant already exists (unless regenerating)
+    existing_active = Summary.objects.filter(
+        transcript=transcript, section=section,
+        output_language=output_language, is_active=True,
+    ).first()
+    if existing_active is not None and not regenerate:
+        return _skip(recording, "variant_current")
+
+    # Synchronize configured tags inside the locked mutating path
     tags_service.sync_tags(config)
+
+    # Build language provenance for context_json
+    language_provenance = {
+        "requested": target_language,
+        "resolved": output_language,
+        "source": transcript.language_observed or "",
+        "is_default": is_default,
+        "source_method": transcript.language_observed_verified_by or "",
+        "transcript_id": transcript.pk,
+        "section_id": section.pk,
+    }
 
     attempt = ProcessingAttempt.objects.create(
         recording=recording,
@@ -932,10 +1203,11 @@ def summarize_one(
             "kind": "omlx_summarization",
             "base_url": config.llm.base_url,
             "model": config.llm.model,
-            "prompt_version": config.summarization.prompt_version,
+            "prompt_version": PROMPT_IMPLEMENTATION_VERSION,
             "generation_mode": generation_mode,
             "regenerate": regenerate,
         },
+        context_json={"language": language_provenance},
     )
 
     s = config.summarization
@@ -946,6 +1218,8 @@ def summarize_one(
         _finish_attempt_failure(
             attempt, recording, AttemptOutcome.INVALID_OUTPUT, "empty_transcript",
             "active transcript has no text to summarize",
+            output_language=output_language,
+            transcript=transcript, section=section,
         )
         return _failed(recording, "empty_transcript", kept_current=False)
 
@@ -962,28 +1236,43 @@ def summarize_one(
     }
     attempt.save(update_fields=["cli_args_json"])
 
+    source_language = transcript.language_observed or ""
+
+    # Check if target variant has an active summary (for kept_current reporting)
+    target_has_active = Summary.objects.filter(
+        transcript=transcript, section=section,
+        output_language=output_language, is_active=True,
+    ).exists()
+
     try:
         check_chunk_limits(
             plan, max_total_characters=s.max_total_characters, max_chunk_count=s.max_chunk_count
         )
         tags = list(Tag.objects.filter(is_configured=True).order_by("name"))
-        fingerprint = config_fingerprint(config, tags)
+        fingerprint = config_fingerprint(config, tags, output_language=output_language)
         payload, chunk_count = _generate_summary(
-            config, plan, tags, transport=transport, llm_call=llm_call
+            config, plan, tags,
+            output_language=output_language,
+            source_language=source_language,
+            transport=transport, llm_call=llm_call,
         )
     except InputTooLarge as exc:
-        _finish_attempt_failure(attempt, recording, AttemptOutcome.INPUT_TOO_LARGE, "input_too_large", str(exc))
-        return _failed(recording, "input_too_large", kept_current=recording.current_summary() is not None)
+        _finish_attempt_failure(
+            attempt, recording, AttemptOutcome.INPUT_TOO_LARGE, "input_too_large",
+            str(exc), output_language=output_language,
+            transcript=transcript, section=section,
+        )
+        return _failed(recording, "input_too_large", kept_current=target_has_active)
     except llm_service.LLMError as exc:
-        # Never store raw exception messages (they could carry sensitive
-        # content from injected or third-party exceptions): record only
-        # the sanitized exception type plus, for HTTP errors, the status
-        # code. Error codes are stable identifiers.
         message = type(exc).__name__
         if isinstance(exc, llm_service.LLMHTTPError):
             message = f"HTTP {exc.status_code}"
-        _finish_attempt_failure(attempt, recording, _outcome_for(exc), exc.code, message)
-        return _failed(recording, exc.code, kept_current=recording.current_summary() is not None)
+        _finish_attempt_failure(
+            attempt, recording, _outcome_for(exc), exc.code, message,
+            output_language=output_language,
+            transcript=transcript, section=section,
+        )
+        return _failed(recording, exc.code, kept_current=target_has_active)
 
     summary = persist_summary(
         recording=recording,
@@ -991,20 +1280,37 @@ def summarize_one(
         section=section,
         attempt=attempt,
         payload=payload,
+        output_language=output_language,
+        is_default=is_default,
         model_id=config.llm.model,
         base_url=config.llm.base_url,
-        prompt_version=s.prompt_version,
+        prompt_version=PROMPT_IMPLEMENTATION_VERSION,
         fingerprint=fingerprint,
         chunk_count=chunk_count,
         input_characters=plan.input_characters,
         limits_used=_limits_used(config),
         generation_mode=generation_mode,
     )
+
+    # Persist the detected source language using the canonical policy —
+    # never raw model casing. Malformed values are never persisted.
+    if not transcript.language_observed and payload.get("language"):
+        detected_lang = languages.canonicalize_language(payload["language"])
+        if detected_lang:
+            transcript.language_observed = detected_lang
+            transcript.language_observed_verified_by = "llm_detection"
+            transcript.language_observed_verified_at = timezone.now()
+            transcript.save(update_fields=[
+                "language_observed", "language_observed_verified_by",
+                "language_observed_verified_at",
+            ])
+
     return {
         "recording_id": recording.pk,
         "result": "summarized",
         "summary_id": summary.pk,
-        "regeneration": current is not None,
+        "regeneration": existing_active is not None,
+        "output_language": output_language,
         "chunk_count": chunk_count,
         "input_characters": plan.input_characters,
         "tags": [tag.name for tag in payload["suggested"]],
@@ -1042,8 +1348,186 @@ def summarize_pending(config: AppConfig) -> dict:
     return {"tag_sync": sync, "results": results}
 
 
+# ---------------------------------------------------------------------------
+# Language correction service
+#
+# Language family normalization lives in workflow.services.languages
+# (single documented policy) and is re-exported at the top of this
+# module for backwards compatibility.
+# ---------------------------------------------------------------------------
+
+
+def set_transcript_language(
+    recording: Recording,
+    language_code: str,
+    *,
+    transport=None,
+    llm_call=None,
+) -> dict:
+    """Atomically set the source language on the active transcript.
+
+    Must be called under the caller's pipeline lock (the service does
+    NOT acquire the lock itself — no nested/self locking). Updates
+    transcript provenance, derives old/new default output languages,
+    and reconciles the new default's variant state and the Recording
+    tuple through the centralized reconciler, using exact matching
+    evidence from the database:
+
+    - no Summary / no matching failure → ``missing``;
+    - active Summary / no newer failure → ``current``;
+    - no Summary / matching failure → ``failed``;
+    - active Summary / newer matching failed regeneration →
+      ``current`` + ``regeneration_failed`` (recency by attempt
+      ordinal);
+    - failures belonging to the old default, an optional language or a
+      historical transcript are never reused (exact provenance match).
+
+    Existing summaries are preserved when their language becomes
+    optional. Returns a result dict with old/new source and default.
+    """
+    code = languages.canonicalize_language(language_code)
+    if not code:
+        raise ConfigError(f"invalid or unsupported language code: {language_code!r}")
+
+    now = timezone.now()
+    with transaction.atomic():
+        rec = Recording.objects.select_for_update().get(pk=recording.pk)
+        transcript = rec.transcripts.filter(is_active=True).first()
+        if transcript is None:
+            raise ConfigError(f"no active transcript for recording {rec.pk}")
+
+        section = transcript.sections.filter(ordinal=0).first()
+        if section is None:
+            raise ConfigError(f"active transcript has no ordinal-0 section")
+
+        old_source = transcript.language_observed or ""
+        old_default = resolve_default_language(transcript)
+
+        # Update transcript source language with user provenance
+        transcript.language_observed = code
+        transcript.language_observed_verified_by = "user"
+        transcript.language_observed_verified_at = now
+        transcript.save(update_fields=[
+            "language_observed", "language_observed_verified_by",
+            "language_observed_verified_at",
+        ])
+
+        new_default = resolve_default_language(transcript)
+
+        # Reconcile the new default's variant state and the
+        # Recording-level tuple from the database (exact evidence).
+        variant_state_service.reconcile_variant_state(
+            recording=rec,
+            transcript=transcript,
+            section=section,
+            output_language=new_default,
+        )
+        rec.refresh_from_db()
+
+        return {
+            "recording_id": rec.pk,
+            "transcript_id": transcript.pk,
+            "old_source_language": old_source or "(not detected)",
+            "new_source_language": code,
+            "old_default_output": old_default,
+            "new_default_output": new_default,
+            "default_summary_status": rec.summary_status,
+        }
+
+
+@dataclass
+class SourceLanguageDetectionResult:
+    """Outcome of an explicit-Original source-language detection.
+
+    ``language`` is the canonical source language on success (None on
+    failure). ``error_code`` is the stable failure category on failure
+    (None on success) — the SAME code stored on the durable attempt and
+    surfaced by the CLI/Web layers; the attempt remains the source of
+    truth.
+    """
+
+    language: str | None
+    attempt: ProcessingAttempt
+    error_code: str | None
+
+
+def _detect_source_language_with_attempt(
+    config: AppConfig,
+    recording: Recording,
+    transcript: Transcript,
+    section: Section,
+    *,
+    transport=None,
+    llm_call=None,
+) -> SourceLanguageDetectionResult:
+    """Detect source language, creating a durable attempt in every case.
+
+    Returns a :class:`SourceLanguageDetectionResult`. On failure, the
+    finished ProcessingAttempt carries the actual failure category as a
+    stable error code (``request_too_large`` is its own category —
+    never conflated with invalid output). The attempt's
+    ``context_json`` durably proves the exact scope (``transcript_id``,
+    ``section_id``) and the detection nature (``language_detection``,
+    single ``requested: "original"`` entry); no resolved language is
+    faked, and no transcript excerpt, prompt, response, or secret is
+    stored.
+    """
+    attempt = ProcessingAttempt.objects.create(
+        recording=recording,
+        stage=AttemptStage.SUMMARIZATION,
+        ordinal=next_ordinal(recording, AttemptStage.SUMMARIZATION),
+        model_id=config.llm.model,
+        cli_args_json={
+            "kind": "source_language_detection",
+            "base_url": config.llm.base_url,
+            "model": config.llm.model,
+        },
+        context_json={
+            "language_detection": True,
+            "requested": "original",
+            "transcript_id": transcript.pk,
+            "section_id": section.pk,
+        },
+    )
+
+    try:
+        detected, error = _detect_source_language(
+            config, transcript, transport=transport, llm_call=llm_call,
+        )
+    except InputTooLarge:
+        attempt.outcome = AttemptOutcome.INPUT_TOO_LARGE
+        attempt.error_code = "request_too_large"
+        attempt.error_message = sanitize_error("detector request too large")
+        attempt.finished_at = timezone.now()
+        attempt.save()
+        return SourceLanguageDetectionResult(None, attempt, attempt.error_code)
+
+    if detected:
+        attempt.outcome = AttemptOutcome.SUCCESS
+        attempt.error_code = ""
+        attempt.error_message = ""
+        attempt.finished_at = timezone.now()
+        attempt.save()
+        return SourceLanguageDetectionResult(detected, attempt, None)
+
+    # Detection failed — create durable evidence with the actual error
+    # category. Messages are type-level only (sanitized); no raw detail.
+    if error is not None:
+        attempt.outcome = _outcome_for(error)
+        attempt.error_code = error.code
+        attempt.error_message = sanitize_error(type(error).__name__)
+    else:
+        attempt.outcome = AttemptOutcome.INVALID_OUTPUT
+        attempt.error_code = "source_language_unknown"
+        attempt.error_message = sanitize_error("source language detection failed")
+    attempt.finished_at = timezone.now()
+    attempt.save()
+    return SourceLanguageDetectionResult(None, attempt, attempt.error_code)
+
+
 __all__ = [
     "PARSER_VERSION",
+    "PROMPT_IMPLEMENTATION_VERSION",
     "InputTooLarge",
     "SummaryRelationError",
     "summarize_one",
@@ -1053,4 +1537,10 @@ __all__ = [
     "validate_map_payload",
     "config_fingerprint",
     "reconcile_recording_summary_state",
+    "resolve_default_language",
+    "resolve_output_language",
+    "is_chinese_family",
+    "normalize_source_language",
+    "canonical_source_for_output",
+    "set_transcript_language",
 ]

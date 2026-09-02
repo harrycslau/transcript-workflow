@@ -420,10 +420,17 @@ class TestStep2Diagnostics:
 
     def test_legacy_notice_is_warn(self, config):
         from dataclasses import replace
+        from workflow.services.summarize import PROMPT_IMPLEMENTATION_VERSION
 
-        assert diagnostics.check_legacy_config(config) is None
+        # When both legacy notice and prompt version are clean, returns None
+        clean_config = replace(
+            config, summarization=replace(config.summarization, prompt_version=PROMPT_IMPLEMENTATION_VERSION)
+        )
+        assert diagnostics.check_legacy_config(clean_config) is None
+
+        # Legacy notice triggers WARN
         legacy_config = replace(
-            config, macwhisper=replace(config.macwhisper, legacy_model_notice="legacy key detected")
+            clean_config, macwhisper=replace(clean_config.macwhisper, legacy_model_notice="legacy key detected")
         )
         result = diagnostics.check_legacy_config(legacy_config)
         assert result is not None

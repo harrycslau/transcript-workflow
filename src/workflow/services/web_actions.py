@@ -94,6 +94,16 @@ def state_fingerprint(recording: Recording) -> str:
     attempt (success or failure) invalidates an in-flight form — a
     duplicate submission can never re-run the action against the state
     it was confirmed from.
+
+    Also includes every stable local input that determines language
+    resolution (active transcript identity, canonical source language
+    and its verifier, the resolved default and Original output
+    languages with an explicit unresolved marker): a source-language
+    correction does not necessarily create a ProcessingAttempt, so a
+    rendered summarize confirmation would otherwise survive a change
+    that silently redirects `original`/`default` to a different
+    language. Strictly read-only: database SELECTs only — no LLM
+    detection, network, subprocess, or writes.
     """
     summary = recording.current_summary()
     last_attempt_id = (
@@ -102,6 +112,37 @@ def state_fingerprint(recording: Recording) -> str:
         .values_list("pk", flat=True)
         .first()
     )
+    # Include available variant languages for staleness detection
+    from workflow.models import SummaryVariantState
+    from workflow.services.langresolve import (
+        resolve_default_language,
+        resolve_output_language,
+    )
+
+    active_transcript = recording.transcripts.filter(is_active=True).first()
+    variant_languages = []
+    language_state = {
+        "transcript_id": None,
+        "source_language": "",
+        "source_verified_by": "",
+        "default_output": None,
+        # "" means "Original unresolved (source unknown)".
+        "original_output": None,
+    }
+    if active_transcript:
+        variant_languages = sorted(
+            SummaryVariantState.objects.filter(
+                transcript=active_transcript,
+                status=SummaryVariantState.VariantStatus.CURRENT,
+            ).values_list("output_language", flat=True)
+        )
+        language_state = {
+            "transcript_id": active_transcript.pk,
+            "source_language": active_transcript.language_observed or "",
+            "source_verified_by": active_transcript.language_observed_verified_by or "",
+            "default_output": resolve_default_language(active_transcript),
+            "original_output": resolve_output_language(active_transcript, "original"),
+        }
     return json.dumps(
         {
             "status": recording.processing_status,
@@ -110,13 +151,18 @@ def state_fingerprint(recording: Recording) -> str:
             "resummarization_failed": recording.resummarization_failed,
             "summary_ordinal": summary.ordinal if summary is not None else None,
             "last_attempt_id": last_attempt_id,
+            "variant_languages": variant_languages,
+            "language_state": language_state,
         },
         sort_keys=True,
     )
 
 
-def summarize_mode(recording: Recording) -> str | None:
+def summarize_mode(recording: Recording, *, output_language: str = "") -> str | None:
     """Derive the summarization action available right now, or None.
+
+    If ``output_language`` is specified, checks that variant. Otherwise
+    checks the default language variant.
 
     - ``first``: transcribed with an active transcript, never attempted.
     - ``retry_summary``: the one automatic attempt failed; explicit
@@ -128,6 +174,31 @@ def summarize_mode(recording: Recording) -> str | None:
         return None
     if not recording.transcripts.filter(is_active=True).exists():
         return None
+    transcript = recording.transcripts.filter(is_active=True).first()
+    section = transcript.sections.filter(ordinal=0).first() if transcript else None
+    if section is None:
+        return None
+    if output_language:
+        # Check specific variant
+        from workflow.services.langresolve import resolve_default_language
+        from workflow.models import SummaryVariantState
+        vs = SummaryVariantState.objects.filter(
+            transcript=transcript, section=section, output_language=output_language,
+        ).first()
+        if vs and vs.status == SummaryVariantState.VariantStatus.CURRENT:
+            return "regenerate"
+        if vs and vs.status == SummaryVariantState.VariantStatus.FAILED:
+            return "retry_summary"
+        if vs is not None and vs.status == SummaryVariantState.VariantStatus.MISSING:
+            return "first"
+        # No variant-state row (or missing): for the currently derived
+        # DEFAULT language the recording-level tuple is authoritative
+        # (pre-variant data keeps its state there).
+        if output_language == resolve_default_language(transcript):
+            return summarize_mode(recording)
+        return "first"
+        return None
+    # Default language path (existing behavior)
     if recording.current_summary() is not None:
         return "regenerate"
     if recording.summary_status == SummaryState.FAILED:
@@ -170,6 +241,7 @@ def execute_web_action(
     profile_name: str | None = None,
     requested_mode: str | None = None,
     expected_fingerprint: str | None = None,
+    language: str = "default",
 ) -> ActionOutcome:
     """Run one mutating web action under the global pipeline lock.
 
@@ -199,7 +271,7 @@ def execute_web_action(
         if action == "transcribe":
             return _action_transcribe(config, recording)
         if action == "summarize":
-            return _action_summarize(config, recording, requested_mode)
+            return _action_summarize(config, recording, requested_mode, language=language)
         if action == "retry":
             return _action_retry(config, recording)
     raise ActionRejected("unknown_action", f"Unknown action '{action}'.")
@@ -306,11 +378,34 @@ def _action_transcribe(config: AppConfig, recording: Recording) -> ActionOutcome
 
 
 def _action_summarize(
-    config: AppConfig, recording: Recording, requested_mode: str | None
+    config: AppConfig, recording: Recording, requested_mode: str | None,
+    *, language: str = "default",
 ) -> ActionOutcome:
+    from workflow.services.languages import GENERATION_SELECTORS
     from workflow.services.summarize import summarize_one
 
-    mode = summarize_mode(recording)
+    if language not in GENERATION_SELECTORS:
+        raise ActionRejected(
+            "unsupported_language",
+            f"'{language}' is not a valid generation target. Only default, "
+            "English, Traditional Chinese and Original can be generated.",
+        )
+    from workflow.services.summarize import resolve_output_language
+
+    transcript = recording.transcripts.filter(is_active=True).first()
+    if transcript is None:
+        raise ActionRejected(
+            "ineligible_state",
+            "No active transcript for this recording.",
+        )
+    # Resolve exactly as the confirmation page did. An unresolved
+    # Original (unknown source language) is a valid generation request:
+    # execution performs bounded detection first.
+    output_language = resolve_output_language(transcript, language)
+    if not output_language:
+        mode = "first"
+    else:
+        mode = summarize_mode(recording, output_language=output_language)
     if mode is None:
         raise ActionRejected(
             "ineligible_state",
@@ -327,12 +422,16 @@ def _action_summarize(
                 "Reload the page and try again if still needed."
             ),
         )
-    result = summarize_one(config, recording, regenerate=(mode == "regenerate"))
+    result = summarize_one(
+        config, recording,
+        target_language=language,
+        regenerate=(mode == "regenerate"),
+    )
     if result.get("result") == "summarized":
         return ActionOutcome(
             ok=True,
             result="summarized",
-            message="Summary generated.",
+            message=f"Summary generated ({result.get('output_language')}).",
             detail=result,
         )
     if result.get("result") == "skipped":

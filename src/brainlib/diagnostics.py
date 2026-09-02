@@ -400,6 +400,17 @@ def check_audio_tooling() -> CheckResult:
 def check_legacy_config(config: AppConfig) -> CheckResult | None:
     if config.macwhisper.legacy_model_notice:
         return CheckResult("Legacy configuration", WARN, config.macwhisper.legacy_model_notice)
+    # Prompt version deprecation: config value "1" is superseded by code-owned "2"
+    from workflow.services.summarize import PROMPT_IMPLEMENTATION_VERSION
+    if config.summarization.prompt_version != PROMPT_IMPLEMENTATION_VERSION:
+        return CheckResult(
+            "Prompt version",
+            WARN,
+            f"config prompt_version={config.summarization.prompt_version!r} is "
+            f"superseded by code-owned implementation v{PROMPT_IMPLEMENTATION_VERSION}. "
+            "New summaries use the implementation version. "
+            "Update summarization.prompt_version in config to silence this warning.",
+        )
     return None
 
 

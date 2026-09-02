@@ -8,20 +8,39 @@
   <a href="{% url 'recording-history' recording.pk %}">History</a>
 </p>
 
-{% if summary %}
+{% url 'recording-summary' recording.pk as variant_tab_base %}
+{% include "workflow/_variant_tabs.html" with tab_base=variant_tab_base %}
+
+{% if variant.unresolved_original %}
+  <p class="empty-state">
+    The summary in the original language has not been generated yet and the
+    transcript's source language is not known. Generate it below: the source
+    language will be detected locally first (one bounded request, retried at
+    most once on invalid output).
+  </p>
+  {% include "workflow/_variant_action.html" with return_view="summary" %}
+{% elif summary %}
+  <p class="variant-label muted">
+    Language: {{ summary.output_language }}{% if summary.output_language == variant.default_language %} (default){% endif %}
+    · Source language: {{ summary.language|default:"unknown" }}
+    {% if variant.variant_state.regeneration_failed %}<span class="warn-text">(regeneration failed — this summary stays active)</span>{% endif %}
+  </p>
   <p class="copy-controls">
-    <button type="button" class="copy-button" data-copy-url="{% url 'summary-export' recording.pk %}?format=markdown">Copy Markdown</button>
-    <a href="{% url 'summary-export' recording.pk %}?format=markdown">Markdown</a> ·
-    <a href="{% url 'summary-export' recording.pk %}?format=text">Plain text</a> ·
-    <a href="{% url 'summary-export' recording.pk %}?format=json">JSON</a>
+    <button type="button" class="copy-button" data-copy-url="{% url 'summary-export' recording.pk %}?format=markdown{{ variant.export_query }}">Copy Markdown</button>
+    <a href="{% url 'summary-export' recording.pk %}?format=markdown{{ variant.export_query }}">Markdown</a> ·
+    <a href="{% url 'summary-export' recording.pk %}?format=text{{ variant.export_query }}">Plain text</a> ·
+    <a href="{% url 'summary-export' recording.pk %}?format=json{{ variant.export_query }}">JSON</a>
   </p>
   <p class="current-banner">This is the current summary of the recording (version #{{ summary.ordinal }}).</p>
   {% include "workflow/_summary_body.html" %}
+  {% include "workflow/_variant_action.html" with return_view="summary" %}
   <details class="provenance">
     <summary>Provenance</summary>
     <dl>
       <dt>Summary ID</dt><dd><code>{{ summary.pk }}</code></dd>
       <dt>Transcript version</dt><dd><code>{{ summary.transcript_id }}</code></dd>
+      <dt>Output language</dt><dd>{{ summary.output_language }}</dd>
+      <dt>Source language</dt><dd>{{ summary.language|default:"unknown" }}</dd>
       <dt>Model</dt><dd>{{ summary.model_id|default:"unknown" }}</dd>
       <dt>Prompt / parser</dt><dd>v{{ summary.prompt_version }} / v{{ summary.parser_version }}</dd>
       <dt>Generation</dt><dd>{{ summary.generation_mode }}</dd>
@@ -31,7 +50,19 @@
   </details>
 {% else %}
   <p class="empty-state">
-    {% if recording.summary_status == 'failed' %}The last summarization attempt failed. Retry it explicitly from the recording page.{% elif recording.summary_status == 'missing' %}No summary yet — use the Summarize action on the recording page.{% else %}No active transcript to summarize.{% endif %}
+    {% if variant.variant_state and variant.variant_state.status == 'failed' %}
+      The last attempt to generate this language variant failed. Retry it explicitly below.
+    {% elif variant.requested == 'default' and recording.summary_status == 'failed' %}
+      The last summarization attempt failed. Retry it explicitly below.
+    {% elif variant.requested == 'default' and recording.summary_status == 'missing' %}
+      No summary yet — generate it below.
+    {% elif not variant.action_selector %}
+      No summary in this language, and no approved generation target
+      produces it. It remains readable and exportable.
+    {% else %}
+      No summary in this language yet — generate it below.
+    {% endif %}
   </p>
+  {% include "workflow/_variant_action.html" with return_view="summary" %}
 {% endif %}
 {% endblock %}

@@ -254,11 +254,9 @@ class TestMapValidation:
 
 class TestSummaryPrompts:
     def test_final_prompt_requires_requested_style_and_grounding(self):
-        prompt = _final_system_prompt([])
-        assert "An English transcript MUST produce English" in prompt
-        assert "NEVER translate them into Chinese" in prompt
-        assert "Only when the dominant language is Chinese" in prompt
-        assert "Traditional Chinese" in prompt
+        prompt = _final_system_prompt([], output_language="en")
+        assert "Write ALL summary prose" in prompt
+        assert "English" in prompt
         assert "50–80 Chinese" in prompt
         assert "maximum three levels" in prompt
         assert "force hierarchy" in prompt
@@ -267,11 +265,15 @@ class TestSummaryPrompts:
         assert "explicitly named identifiable people" in prompt
         assert "fill for completeness" in prompt
 
+    def test_final_prompt_zh_hant_includes_traditional_chinese(self):
+        prompt = _final_system_prompt([], output_language="zh-Hant")
+        assert "Traditional Chinese" in prompt
+        assert "繁體中文" in prompt
+
     def test_map_and_reduce_preserve_evidence_without_invention(self):
-        map_prompt = _map_system_prompt()
-        assert "English MUST stay English" in map_prompt
-        assert "must not be translated into Chinese" in map_prompt
-        assert "Only Chinese output uses Traditional Chinese" in map_prompt
+        map_prompt = _map_system_prompt(output_language="en")
+        assert "Write ALL summary prose" in map_prompt
+        assert "English" in map_prompt
         assert "explicit future actions" in map_prompt
         assert "named people/organizations" in map_prompt
 
@@ -280,7 +282,7 @@ class TestSummaryPrompts:
         )
         assert "add no new actions, people, organizations, or topics" in reduce_prompt
 
-    def test_clear_chinese_output_for_cjk_free_source_is_rejected(self):
+    def test_clear_chinese_output_for_english_target_is_rejected(self):
         payload = {
             "title": "教育研究統計方法",
             "overview": "本次工作坊詳細介紹統計方法及研究設計中的重要注意事項。",
@@ -288,7 +290,7 @@ class TestSummaryPrompts:
             "action_items": [],
         }
         with pytest.raises(LLMInvalid) as exc:
-            summarize_service._reject_unexpected_chinese(payload, source_has_no_cjk=True)
+            summarize_service._validate_language_consistency(payload, output_language="en")
         assert exc.value.code == "language_mismatch"
 
     def test_small_cjk_name_in_english_output_is_allowed(self):
@@ -298,8 +300,8 @@ class TestSummaryPrompts:
             "key_points": [{"text": "王明 presented the method", "level": 1}],
             "action_items": [],
         }
-        assert summarize_service._reject_unexpected_chinese(
-            payload, source_has_no_cjk=True
+        assert summarize_service._validate_language_consistency(
+            payload, output_language="en"
         ) is payload
 
     def test_english_transcript_retries_chinese_summary_then_accepts_english(self, tmp_path):
@@ -338,12 +340,36 @@ class TestSummaryPrompts:
 def make_running_attempt(recording, *, running: bool = True) -> ProcessingAttempt:
     from django.utils import timezone
 
+    from workflow.services.langresolve import resolve_default_language
+
+    # Modern summarization attempts carry exact scope provenance; the
+    # recovery reconciliation attributes interrupted attempts ONLY
+    # through that provenance (legacy provenance-less attempts are
+    # conservatively left untouched).
+    transcript = recording.transcripts.filter(is_active=True).first()
+    section = transcript.sections.filter(ordinal=0).first() if transcript else None
+    context_json = None
+    if transcript is not None and section is not None:
+        default_language = resolve_default_language(transcript)
+        context_json = {
+            "language": {
+                "requested": "default",
+                "resolved": default_language,
+                "source": transcript.language_observed or "",
+                "is_default": True,
+                "source_method": transcript.language_observed_verified_by or "",
+                "transcript_id": transcript.pk,
+                "section_id": section.pk,
+            },
+        }
+
     return ProcessingAttempt.objects.create(
         recording=recording,
         stage=AttemptStage.SUMMARIZATION,
         ordinal=ProcessingAttempt.objects.filter(recording=recording).count() + 1,
         started_at=timezone.now(),
         finished_at=None if running else timezone.now(),
+        context_json=context_json,
     )
 
 
@@ -378,6 +404,8 @@ class TestPersistenceInvariants:
                 section=section_b,  # belongs to another transcript
                 attempt=attempt,
                 payload=self._payload(),
+                output_language="en",
+                is_default=True,
                 model_id="m",
                 base_url="u",
                 prompt_version="1",
@@ -400,6 +428,8 @@ class TestPersistenceInvariants:
                 section=section_a,
                 attempt=attempt,
                 payload=self._payload(),
+                output_language="en",
+                is_default=True,
                 model_id="m",
                 base_url="u",
                 prompt_version="1",
@@ -443,7 +473,7 @@ class TestLifecycle:
         assert attempt.stage == AttemptStage.SUMMARIZATION
         # Provenance
         assert summary.model_id == "test-model"
-        assert summary.prompt_version == "1"
+        assert summary.prompt_version == "2"
         assert summary.parser_version == "1"
         assert len(summary.config_fingerprint) == 64
         assert summary.input_truncated is False
@@ -461,7 +491,7 @@ class TestLifecycle:
         assert result == {
             "recording_id": recording.pk,
             "result": "skipped",
-            "reason": "summary_current",
+            "reason": "variant_current",
             "summary_status": SummaryState.CURRENT,
         }
         assert Summary.objects.count() == 1
@@ -1678,10 +1708,32 @@ class TestStageAwareRecovery:
     def _leave_unfinished_attempt(self, recording, stage, ordinal=None):
         from django.utils import timezone as tz
 
+        from workflow.services.langresolve import resolve_default_language
+
+        context_json = None
+        if stage == AttemptStage.SUMMARIZATION:
+            # Modern summarization attempts carry exact scope provenance;
+            # recovery attributes interrupted attempts only through it.
+            transcript = recording.transcripts.filter(is_active=True).first()
+            section = transcript.sections.filter(ordinal=0).first() if transcript else None
+            if transcript is not None and section is not None:
+                context_json = {
+                    "language": {
+                        "requested": "default",
+                        "resolved": resolve_default_language(transcript),
+                        "source": transcript.language_observed or "",
+                        "is_default": True,
+                        "source_method": transcript.language_observed_verified_by or "",
+                        "transcript_id": transcript.pk,
+                        "section_id": section.pk,
+                    },
+                }
+
         return ProcessingAttempt.objects.create(
             recording=recording, stage=stage,
             ordinal=ordinal or ProcessingAttempt.objects.filter(recording=recording).count() + 1,
             started_at=tz.now(),
+            context_json=context_json,
         )
 
     def _failed_first_summary(self, config):

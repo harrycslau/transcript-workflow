@@ -171,24 +171,34 @@ class Recording(models.Model):
     class Meta:
         ordering = ["-discovered_at"]
 
-    def current_summary(self) -> Summary | None:
+    def current_summary(self, *, output_language: str | None = None) -> Summary | None:
         """The recording's current summary: the active Summary belonging
         to the active Transcript's whole-recording Section.
 
         Derived, not constrained: when a new transcript becomes active,
         the old transcript's Summary stays active in its own scope
         (historically valid) but is no longer current for the recording.
+
+        If ``output_language`` is specified, returns only the summary in
+        that language. Otherwise returns the default-language summary.
         """
-        return (
-            Summary.objects.filter(
-                transcript__recording=self,
-                transcript__is_active=True,
-                section__ordinal=0,
-                is_active=True,
-            )
-            .select_related("transcript", "section")
-            .first()
+        from workflow.services.summarize import resolve_default_language
+
+        qs = Summary.objects.filter(
+            transcript__recording=self,
+            transcript__is_active=True,
+            section__ordinal=0,
+            is_active=True,
         )
+        if output_language is not None:
+            qs = qs.filter(output_language=output_language)
+        else:
+            # Return the default-language summary
+            transcript = self.transcripts.filter(is_active=True).first()
+            if transcript:
+                default_lang = resolve_default_language(transcript)
+                qs = qs.filter(output_language=default_lang)
+        return qs.select_related("transcript", "section").first()
 
     def __str__(self) -> str:
         return f"Recording({self.sha256[:12]}…, {self.processing_status})"
@@ -308,6 +318,10 @@ class Transcript(models.Model):
     mw_json = models.JSONField(null=True, blank=True)
     parser_version = models.CharField(max_length=16, default="1")
     language_observed = models.CharField(max_length=32, blank=True, default="")
+    # Provenance for language_observed: who/what set it.
+    # Values: "" (unset), "llm_detection", "routing_confirmed", "user"
+    language_observed_verified_by = models.CharField(max_length=32, blank=True, default="")
+    language_observed_verified_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
@@ -387,13 +401,18 @@ class Tag(models.Model):
 
 
 class Summary(models.Model):
-    """Versioned structured summary; one active per (transcript, section) scope.
+    """Versioned structured summary; one active per (transcript, section, output_language).
 
     Step 3 always writes the whole-recording Summary (the transcript's
     ordinal-0 Section); Step 6 section-level summaries reuse the same
     scope semantics. ``recording`` is denormalized for ordinal/audit
     constraints; the "current summary of a recording" is derived (see
     ``Recording.current_summary``), not constrained.
+
+    ``output_language`` is the resolved language the prose was written in
+    (e.g. ``en``, ``fi``, ``zh-Hant``). It is the variant identity key.
+    ``language`` is the LLM-detected dominant language of the transcript
+    at generation time (backward-compatible field, NOT the variant key).
     """
 
     id = models.CharField(primary_key=True, max_length=36, default=_uuid, editable=False)
@@ -415,6 +434,10 @@ class Summary(models.Model):
     organizations = models.JSONField(default=list, blank=True)
     topics = models.JSONField(default=list, blank=True)
     language = models.CharField(max_length=32, blank=True, default="")
+    # Resolved output language: the language the prose was actually written
+    # in. This is the variant identity key for uniqueness, versioning, and
+    # display. Canonical values: en, fi, zh-Hant, und, etc.
+    output_language = models.CharField(max_length=32, blank=True, default="")
 
     # Provenance / audit. suggested_tags_raw records the model's raw
     # suggestion list including names rejected for not being configured.
@@ -435,18 +458,82 @@ class Summary(models.Model):
         ordering = ["recording", "ordinal"]
         constraints = [
             models.UniqueConstraint(fields=["recording", "ordinal"], name="uniq_summary_ordinal"),
-            # Exactly one active Summary per (transcript, section) scope.
+            # Exactly one active Summary per (transcript, section, output_language).
             # Summaries of older transcripts stay is_active=True forever
             # (historically valid, not current for the recording).
             models.UniqueConstraint(
-                fields=["transcript", "section"],
+                fields=["transcript", "section", "output_language"],
                 condition=Q(is_active=True),
-                name="uniq_active_summary_in_scope",
+                name="uniq_active_summary_in_output_language",
             ),
+        ]
+        indexes = [
+            models.Index(fields=["output_language"], name="summary_output_language_idx"),
         ]
 
     def __str__(self) -> str:
-        return f"Summary(#{self.ordinal}, active={self.is_active}, {self.title[:40]!r})"
+        return f"Summary(#{self.ordinal}, active={self.is_active}, lang={self.output_language}, {self.title[:40]!r})"
+
+
+class SummaryVariantState(models.Model):
+    """Per-language-variant lifecycle state for a transcript section.
+
+    Tracks whether a Summary has been generated for a specific output
+    language. Keyed by (transcript, section, output_language).
+
+    Status semantics:
+    - ``missing``: never generated for this variant.
+    - ``current``: active Summary exists.
+    - ``failed``: first generation failed, no active Summary.
+
+    ``regeneration_failed``: when True with ``current``, the last
+    regeneration attempt failed but the old active Summary is retained.
+    """
+
+    class VariantStatus(models.TextChoices):
+        MISSING = "missing", "Missing"
+        CURRENT = "current", "Current"
+        FAILED = "failed", "Failed"
+
+    transcript = models.ForeignKey(Transcript, on_delete=models.PROTECT, related_name="variant_states")
+    section = models.ForeignKey(Section, on_delete=models.PROTECT, related_name="variant_states")
+    output_language = models.CharField(max_length=32)
+    status = models.CharField(max_length=16, choices=VariantStatus.choices, default=VariantStatus.MISSING)
+    regeneration_failed = models.BooleanField(default=False)
+    last_failed_attempt = models.ForeignKey(
+        "workflow.ProcessingAttempt", null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="failed_variant_states",
+    )
+    activated_at = models.DateTimeField(null=True, blank=True)
+    failed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["transcript", "section", "output_language"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["transcript", "section", "output_language"],
+                name="uniq_variant_state",
+            ),
+            # regeneration_failed=true is only valid with status=current
+            models.CheckConstraint(
+                condition=(
+                    Q(regeneration_failed=True, status="current")
+                    | Q(regeneration_failed=False)
+                ),
+                name="chk_variant_state_regeneration_failed",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["transcript", "output_language"], name="variant_transcript_lang_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"SummaryVariantState({self.output_language}, {self.status}, "
+            f"regen_failed={self.regeneration_failed})"
+        )
 
 
 class SummaryTagSuggestion(models.Model):

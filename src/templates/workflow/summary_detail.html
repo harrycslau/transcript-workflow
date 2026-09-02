@@ -32,6 +32,8 @@
     <dt>Summary ID</dt><dd><code>{{ summary.pk }}</code></dd>
     <dt>Version</dt><dd>#{{ summary.ordinal }}</dd>
     <dt>Transcript version</dt><dd><code>{{ summary.transcript_id }}</code></dd>
+    <dt>Output language</dt><dd>{{ summary.output_language|default:"—" }}</dd>
+    <dt>Source language</dt><dd>{{ summary.language|default:"unknown" }}</dd>
     <dt>Active in scope</dt><dd>{{ summary.is_active|yesno:"yes,no" }}</dd>
     <dt>Current for recording</dt><dd>{{ is_current|yesno:"yes,no" }}</dd>
     <dt>Model</dt><dd>{{ summary.model_id|default:"unknown" }}</dd>

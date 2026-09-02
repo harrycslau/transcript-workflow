@@ -1,0 +1,29 @@
+{% comment %}
+Shared per-variant Generate/Retry/Regenerate action form.
+
+Expects: variant (read-only variant view-model), recording, actions
+(fingerprint availability), and optionally return_view (server-owned
+page token: "detail" | "summary" — set by the including template).
+Renders NOTHING when the selected read selector cannot map to an
+approved generation selector (variant.action_selector is None) — a
+concrete read-only tab such as a historical Finnish variant never
+submits itself as a generation target. The form posts:
+- language: the GENERATION selector (default/original/en/zh-Hant only);
+- return_language: the read selector to keep the selected tab after the
+  action (validated against the read-only view-model by the view);
+- return_view: the page to return to (allowlist token, never a URL);
+- mode: the expected per-language action mode.
+{% endcomment %}
+{% if variant.action_selector and variant.action_mode %}
+<form method="post" action="{% url 'action-summarize' recording.pk %}" class="inline-form">
+  {% csrf_token %}
+  <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+  <input type="hidden" name="mode" value="{{ variant.action_mode }}">
+  <input type="hidden" name="language" value="{{ variant.action_selector }}">
+  <input type="hidden" name="return_language" value="{{ variant.requested }}">
+  <input type="hidden" name="return_view" value="{{ return_view|default:'detail' }}">
+  <button type="submit">
+    {% if variant.action_mode == 'first' %}Generate{% elif variant.action_mode == 'retry_summary' %}Retry{% else %}Regenerate{% endif %}
+  </button>
+</form>
+{% endif %}

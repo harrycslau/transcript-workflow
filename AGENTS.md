@@ -99,6 +99,78 @@ Non-negotiable principles:
   versioned provenance. Manual/confirmed effective assignments are
   user-owned and must not be silently removed by regeneration.
 
+## Multilingual summary variants (standing invariants)
+
+- Language policy has ONE home: `workflow/services/languages.py`
+  (canonical BCP-47 casing: primary lowercase, script Titlecase, region
+  uppercase; `zh|yue|cmn[*]` → `zh-Hant` for default AND original
+  output; malformed values never persisted). Output resolution lives in
+  `workflow/services/langresolve.py`. Never re-implement normalization
+  elsewhere; migration-local copies must mirror semantics explicitly.
+- `workflow/services/variant_state.py:reconcile_variant_state` is the
+  ONLY runtime writer of `SummaryVariantState` and the Recording-level
+  default summary tuple after an active transcript exists. It derives
+  truth from the DB (never trusts caller declarations), verifies
+  transcript∈recording and section∈transcript, validates the
+  output-language identity at its boundary (canonical; Chinese-family
+  output only as `zh-Hant`; `und` is a migration-only marker), and
+  updates Recording-level fields ONLY when the variant is the currently
+  derived default of the ACTIVE transcript's ordinal-0 section.
+  Regeneration-failure recency is by attempt ordinal, never wall-clock
+  alone. The ONE documented initialization exception: the
+  transcription-activation hook sets the new active transcript's
+  default `summary_status=missing` (no reconciler event exists yet).
+- Recovery is exact-scope only: detection attempts
+  (`language_detection`) and provenance-less legacy attempts change no
+  summary state (stable diagnostics surfaced instead); forged
+  provenance and malformed/noncanonical `resolved` identities are
+  rejected without writes. Never infer scope from the currently active
+  transcript.
+- Generation requests accept only `default`, `original`, `en`,
+  `zh-Hant`. Read/display/export may additionally accept a concrete
+  `output_language` that already exists; unknown concrete languages are
+  a friendly 404 — never an uncaught exception and never a silent
+  fallback to the default. Web action forms submit a DERIVED generation
+  selector (`variant.action_selector`: a Finnish tab regenerates via
+  `original`; unrepresentable concrete tabs are read-only with no
+  action) and carry a separately validated read `return_language` for
+  the redirect — the four-selector allowlist is never weakened.
+- The action-state fingerprint binds EVERY stable input that determines
+  language resolution (active transcript id, canonical source language
+  and its verifier, resolved default and Original output languages with
+  an explicit unresolved marker) in addition to recording state,
+  attempts and variant languages — a source-language correction
+  invalidates rendered confirmations even when no attempt is created
+  and the action mode is unchanged. Fingerprinting is read-only
+  (SELECTs only).
+- Actions return to their origin page via a server-owned allowlist
+  token (`return_view`: `detail | summary`) carried through the
+  confirmation interstitial; missing/invalid/forged values fall back to
+  recording detail. Arbitrary client URLs are never accepted.
+- Summary `output_language` is the variant identity key
+  (`uniq_active_summary_in_output_language`); `Summary.language` is the
+  canonicalized detected source language, not the variant key —
+  `validate_final_payload` applies one deterministic provenance rule:
+  a known canonical Transcript source is AUTHORITATIVE (the model's
+  empty/contradictory/malformed value is ignored; a user-verified
+  Transcript language is never displaced), while a genuinely unknown
+  source accepts a canonicalized model value (empty stays the
+  unknown-source case; malformed values raise a stable
+  schema-validation error with the normal invalid-output retry).
+  `Summary.language` and `Transcript.language_observed` always agree.
+  Tags are materialized only from the default variant.
+- Explicit-Original detection is bounded (max two calls; retry only on
+  invalid output) and every failure creates a durable finished attempt
+  whose stable category (`endpoint_unavailable`, `timeout`,
+  `http_error`, `request_too_large`, `response_too_large`,
+  `source_language_unknown`) is surfaced unchanged through
+  `summarize_one`, the CLI and the web layer — the attempt remains the
+  source of truth, and no variant state exists until a concrete output
+  language does.
+- Web GET requests must remain strictly read-only (no detection, no
+  network, no subprocess, no writes); unresolved Original is a status,
+  never resolved by side effects on GET.
+
 ## Failure, retry, recovery
 
 - Failed initial routing/transcription → `processing_status=failed`
@@ -198,11 +270,18 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- Migrations `0001`–`0005` define the current schema (0005 is the
-  Step 4 tag-suppression migration); add NEW migrations, never edit
+- Migrations `0001`–`0007` define the current schema (0007 is the
+  multilingual-summary migration: `Summary.output_language`,
+  `SummaryVariantState`, transcript language-verification fields;
+  intentionally irreversible — repair it in place, never add an 0008
+  on top of an unapproved 0007). Add NEW migrations, never edit
   existing/applied ones. Enforce invariants with DB constraints
   (partial uniques, check constraints), not just application logic.
-  Run `makemigrations --check` in verification.
+  Run `makemigrations --check` in verification. 0007's data migration
+  validates the pre-migration invariant first (corrupted legacy data
+  fails clearly and atomically — never a silent winner selection) and
+  must be covered by genuine `MigrationExecutor` tests on isolated
+  databases, including a real reverse attempt.
 - Migration readiness is enforced, never assumed: `brain doctor`
   carries a `Database migrations` check (read-only via Django's
   `MigrationExecutor`; see `brainlib/migrations.py`), and every ORM

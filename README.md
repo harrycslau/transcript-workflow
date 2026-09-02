@@ -232,6 +232,73 @@ manual-only `legacy` profile when non-blank); migrate to
 `macwhisper.routing.profiles`. The loader never modifies your
 `config/config.yaml`.
 
+### Summaries in multiple languages
+
+Summaries are versioned per **output language** ("variants"). The
+variant identity is the canonical `Summary.output_language` code
+(`en`, `fi`, `zh-Hant`, …), stored on the Summary; a language-aware
+variant state tracks whether each variant is `current`, `missing`, or
+`failed` for the active transcript.
+
+Language policy (single source: `workflow/services/languages.py`):
+
+- Canonical BCP-47 casing: primary subtag lowercase, script Titlecase,
+  region uppercase (`en`, `fi`, `en-US`, `zh-HK`, `yue-HK`, `zh-Hant`).
+  Malformed codes are never persisted.
+- Chinese-family sources (`zh`, `yue`, `cmn` with any subtags) resolve
+  every **default** and **original** output to `zh-Hant` (Traditional
+  Chinese). Non-Chinese sources default to an English summary.
+- The source language on a transcript is provenance-tracked
+  (`language_observed_verified_by`: LLM detection, routing, or user).
+
+Commands:
+
+```sh
+uv run brain summarize <id> --language default    # derived default
+uv run brain summarize <id> --language original   # source language
+uv run brain summarize <id> --language en         # explicit English
+uv run brain summarize <id> --language zh-Hant    # explicit Traditional Chinese
+uv run brain summary <id> --language fi           # display an existing variant
+uv run brain transcript-language <id>             # view detected source language
+uv run brain transcript-language <id> --set yue   # correct it (atomic, locked)
+```
+
+Generation accepts only the four selectors (`default`, `original`,
+`en`, `zh-Hant`). An `original` request with an unknown source language
+performs a bounded local detection first (at most two model calls, and
+only one for endpoint/HTTP/timeout/size failures; the failure category
+— `endpoint_unavailable`, `timeout`, `http_error`, `request_too_large`,
+`response_too_large`, `source_language_unknown` — is stored durably on
+the attempt and surfaced unchanged by the CLI and web). Read/display
+and export additionally accept any concrete language that already
+exists for the recording (e.g. `fi` after an Original generation);
+from a concrete tab whose language an approved selector produces (the
+Finnish example), the Regenerate action submits `original` and returns
+to the `fi` tab. Variants no selector can produce remain readable and
+exportable but offer no generation action. The summary source language
+reported by the model is canonicalized before storage; malformed codes
+are treated as invalid model output (one retry). Tags are materialized
+only from the default variant; other variants never overwrite
+Recording-level default state.
+
+The web interface mirrors this on the recording detail AND summary
+pages: language tabs (Default / English / Traditional Chinese /
+Original plus existing variants such as Finnish), per-variant state,
+Generate/Retry/Regenerate actions with language-preserving
+confirmation, and language-preserving Copy/Markdown/text/JSON export
+links. Action confirmations bind every input that determines language
+resolution (a source-language correction invalidates an already-open
+confirmation), and actions return to the page they originated from
+(detail or summary) with the selected language. All GET requests are
+strictly read-only.
+
+Source-language provenance follows one deterministic rule: a known
+canonical Transcript source language is authoritative for the
+generated Summary (the model's empty or contradictory answer is
+ignored); only when the transcript source is genuinely unknown may the
+model's canonicalized value fill it in. `Summary.language` and
+`Transcript.language_observed` always agree.
+
 ### Web server
 
 ```sh

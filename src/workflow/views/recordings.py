@@ -106,6 +106,18 @@ def recording_detail(request, recording_id):
 
     tag_choices = Tag.objects.filter(is_configured=True).order_by("name")
     retired_tag_choices = Tag.objects.filter(is_configured=False).order_by("name")
+
+    # Read-only variant view-model: resolves the requested selector and
+    # provides the selected summary, variant state, action mode and all
+    # tab options. Unknown concrete languages are a friendly 404.
+    from workflow.services.variant_view import build_variant_view
+
+    variant = build_variant_view(recording, request.GET.get("language", "default"))
+    if variant.error:
+        raise Http404(
+            f"No summary variant '{request.GET.get('language')}' exists for this recording."
+        )
+
     context = {
         "card": card,
         "recording": recording,
@@ -114,22 +126,38 @@ def recording_detail(request, recording_id):
         "segments": segments,
         "segment_pages": segment_pages,
         "summaries": summaries,
-        "current_summary": card.current_summary,
+        "variant": variant,
+        # The displayed summary is the SELECTED variant's summary —
+        # never an arbitrary active row.
+        "current_summary": variant.summary,
+        "default_summary": variant.default_summary,
         "attempts": attempt_summary_for_display(recording, limit=8),
         "actions": _action_availability(config, recording),
         "routing_decision": card.active_route,
         "tag_choices": tag_choices,
         "retired_tag_choices": retired_tag_choices,
+        "default_output_language": variant.default_language,
+        "selected_language": variant.requested,
     }
     return render(request, "workflow/recording_detail.html", context)
 
 
 def recording_summary(request, recording_id):
     config, recording, card = _detail_base(request, recording_id)
+    from workflow.services.variant_view import build_variant_view
+
+    variant = build_variant_view(recording, request.GET.get("language", "default"))
+    if variant.error:
+        raise Http404(
+            f"No summary variant '{request.GET.get('language')}' exists for this recording."
+        )
     context = {
         "card": card,
         "recording": recording,
-        "summary": card.current_summary,
+        "variant": variant,
+        "summary": variant.summary,
+        "selected_language": variant.requested,
+        "default_output_language": variant.default_language,
         "actions": _action_availability(config, recording),
     }
     return render(request, "workflow/recording_summary.html", context)

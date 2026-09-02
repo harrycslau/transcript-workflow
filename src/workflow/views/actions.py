@@ -28,13 +28,61 @@ from workflow.services.web_actions import (
     ActionRejected,
     execute_web_action,
     state_fingerprint,
-    summarize_mode,
 )
 from workflow.services.pipeline_lock import PipelineBusy
 from workflow.views.helpers import conflict_response, get_config, rejection_response
 from workflow.forms import RouteForm
 
 _CONFIRMED = "1"
+
+# Server-owned allowlist of pages an action may return to. Never a raw
+# client URL: anything outside this set falls back to recording detail.
+RETURN_VIEWS = {
+    "detail": "recording-detail",
+    "summary": "recording-summary",
+}
+
+
+def _validated_return_view(request) -> str:
+    raw = (request.POST.get("return_view") or "").strip()
+    return raw if raw in RETURN_VIEWS else "detail"
+
+
+def _redirect_outcome(
+    request,
+    recording: Recording,
+    outcome,
+    *,
+    language: str = "default",
+    return_language: str | None = None,
+    return_view: str = "detail",
+):
+    if isinstance(outcome, ActionOutcome):
+        if not outcome.ok:
+            dj_messages.error(request, outcome.message)
+        elif outcome.result == "state_changed":
+            dj_messages.warning(request, outcome.message)
+        else:
+            dj_messages.success(request, outcome.message)
+        # Return to the page the action originated from (server-owned
+        # allowlist token — never an arbitrary client URL), keeping the
+        # validated read selector. The return selector is a READ
+        # selector (validated against the read-only view-model by the
+        # caller); it may differ from the generation selector (e.g. a
+        # Finnish tab regenerates via `original`). Unvalidated or
+        # unknown return selectors fall back to the generation
+        # selector — never arbitrary query injection.
+        target = return_language or language
+        url_name = RETURN_VIEWS.get(return_view, "recording-detail")
+        if target and target != "default":
+            from django.urls import reverse
+
+            url = reverse(url_name, args=[recording.pk])
+            return redirect(f"{url}?language={target}")
+        return redirect(url_name, recording.pk)
+    # Already a rendered response (409 conflict page or friendly 400
+    # rejection) — return it unchanged.
+    return outcome
 
 
 def _recording_or_404(recording_id: str) -> Recording:
@@ -83,20 +131,6 @@ def _execute(request, recording: Recording, action: str, **kwargs):
         return conflict_response(request, exc.holder_pid)
     except ActionRejected as exc:
         return rejection_response(request, exc.message, exc.code)
-
-
-def _redirect_outcome(request, recording: Recording, outcome):
-    if isinstance(outcome, ActionOutcome):
-        if not outcome.ok:
-            dj_messages.error(request, outcome.message)
-        elif outcome.result == "state_changed":
-            dj_messages.warning(request, outcome.message)
-        else:
-            dj_messages.success(request, outcome.message)
-        return redirect("recording-detail", recording.pk)
-    # Already a rendered response (409 conflict page or friendly 400
-    # rejection) — return it unchanged.
-    return outcome
 
 
 @require_POST
@@ -189,7 +223,46 @@ def action_transcribe(request, recording_id):
 @require_POST
 def action_summarize(request, recording_id):
     recording = _recording_or_404(recording_id)
-    mode = summarize_mode(recording)
+    language = (request.POST.get("language") or "default").strip()
+    if language not in ("default", "original", "en", "zh-Hant"):
+        return rejection_response(
+            request,
+            f"'{language}' is not a valid generation target. Only default, "
+            "English, Traditional Chinese and Original can be generated.",
+            "unsupported_language",
+        )
+    # Optional READ selector to return to after the action (a concrete
+    # tab such as `fi` regenerates via `original`). Validated against
+    # the read-only view-model; anything unknown falls back to the
+    # generation selector at redirect time.
+    return_language = (request.POST.get("return_language") or "").strip() or None
+    if return_language is not None:
+        from workflow.services.variant_view import build_variant_view
+
+        if build_variant_view(recording, return_language).error:
+            return_language = None
+    # Server-owned page token: which page the action was initiated from
+    # (detail | summary). Missing/invalid/forged values fall back to
+    # recording detail; arbitrary client URLs are never accepted.
+    return_view = _validated_return_view(request)
+    # Per-language mode: the confirmation interstitial must describe the
+    # action that will actually run for THIS generation selector, not
+    # the default.
+    from workflow.services.summarize import resolve_output_language
+    from workflow.services.web_actions import summarize_mode as _summarize_mode
+
+    transcript = recording.transcripts.filter(is_active=True).first()
+    mode = None
+    if transcript is not None:
+        try:
+            output_language = resolve_output_language(transcript, language)
+        except Exception:
+            output_language = ""
+        mode = (
+            "first"
+            if not output_language
+            else _summarize_mode(recording, output_language=output_language)
+        )
     requested_mode = (request.POST.get("mode") or "").strip() or None
     if mode is None:
         return rejection_response(
@@ -198,15 +271,29 @@ def action_summarize(request, recording_id):
             "ineligible_state",
         )
     if request.POST.get("confirmed") != _CONFIRMED:
-        label = SUMMARIZE_MODE_LABELS.get(requested_mode or mode, "Summarize")
+        label = SUMMARIZE_MODE_LABELS.get(mode, "Summarize")
         note = SUMMARIZE_MODE_NOTES.get(mode, SUMMARIZE_MODE_NOTES["first"])
+        if language == "original" and not output_language:
+            # Detection is only needed when the source is unknown.
+            note += (
+                " Target language: Original. If the source language is not known yet, "
+                "it will be detected locally first (one bounded request, retried at "
+                "most once on invalid output)."
+            )
+        elif language != "default":
+            note += f" Target language: {language}."
         return _render_confirmation(
             request,
             recording,
             action="summarize",
             title=f"{label} — are you sure?",
             note=note,
-            extra_hidden={"mode": mode},
+            extra_hidden={
+                "mode": mode,
+                "language": language,
+                "return_view": return_view,
+                **({"return_language": return_language} if return_language else {}),
+            },
         )
     outcome = _execute(
         request,
@@ -214,8 +301,12 @@ def action_summarize(request, recording_id):
         "summarize",
         requested_mode=requested_mode,
         expected_fingerprint=request.POST.get("fingerprint") or None,
+        language=language,
     )
-    return _redirect_outcome(request, recording, outcome)
+    return _redirect_outcome(
+        request, recording, outcome, language=language,
+        return_language=return_language, return_view=return_view,
+    )
 
 
 @require_POST

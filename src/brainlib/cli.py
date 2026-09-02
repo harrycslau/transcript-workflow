@@ -248,6 +248,45 @@ def _read_only_command(args, work) -> int:
     return 0
 
 
+def cmd_transcript_language(args) -> int:
+    """View or set the detected source language of a transcript."""
+    from brainlib.config import ConfigError, load_config
+
+    def _read_work(config):
+        from workflow.models import Recording
+
+        recording = Recording.objects.filter(pk=args.recording_id).first()
+        if recording is None:
+            raise ConfigError(f"recording not found: {args.recording_id}")
+        transcript = recording.transcripts.filter(is_active=True).first()
+        if transcript is None:
+            raise ConfigError(f"no active transcript for recording {args.recording_id}")
+        return {
+            "recording_id": recording.pk,
+            "transcript_id": transcript.pk,
+            "language_observed": transcript.language_observed or "(not detected)",
+            "verified_by": transcript.language_observed_verified_by or "(unknown)",
+            "verified_at": (
+                transcript.language_observed_verified_at.isoformat()
+                if transcript.language_observed_verified_at
+                else "(never)"
+            ),
+        }
+
+    def _set_work(config):
+        from workflow.models import Recording
+        from workflow.services.summarize import set_transcript_language
+
+        recording = Recording.objects.filter(pk=args.recording_id).first()
+        if recording is None:
+            raise ConfigError(f"recording not found: {args.recording_id}")
+        return set_transcript_language(recording, args.set_language.strip())
+
+    if args.set_language:
+        return _pipeline_command(args, _set_work)
+    return _read_only_command(args, _read_work)
+
+
 def cmd_ingest(args) -> int:
     def work(config):
         from workflow.services.pipeline import run_ingest
@@ -407,7 +446,11 @@ def cmd_summarize(args) -> int:
             recording = Recording.objects.filter(pk=args.recording_id).first()
             if recording is None:
                 raise ConfigError(f"recording not found: {args.recording_id}")
-            return summarize_one(config, recording, regenerate=args.regenerate)
+            return summarize_one(
+                config, recording,
+                target_language=getattr(args, "language", "default") or "default",
+                regenerate=args.regenerate,
+            )
         return summarize_pending(config)
 
     return _pipeline_command(args, work)
@@ -428,6 +471,8 @@ def cmd_summaries(args) -> int:
                 "ordinal": s.ordinal,
                 "is_active": s.is_active,
                 "is_current": current is not None and s.pk == current.pk,
+                "output_language": s.output_language,
+                "language": s.language,
                 "title": s.title,
                 "model_id": s.model_id,
                 "prompt_version": s.prompt_version,
@@ -458,9 +503,32 @@ def cmd_summary(args) -> int:
         recording = Recording.objects.filter(pk=args.recording_id).first()
         if recording is None:
             raise ConfigError(f"recording not found: {args.recording_id}")
-        summary = recording.current_summary()
+        language = getattr(args, "language", None)
+        if language:
+            from workflow.services.langresolve import resolve_output_language
+            from workflow.services.variant_view import existing_variant_languages
+            from brainlib.config import ConfigError as _ConfigError
+
+            transcript = recording.transcripts.filter(is_active=True).first()
+            if transcript is None:
+                raise ConfigError(f"no active transcript for recording {args.recording_id}")
+            if language in ("default", "original", "en", "zh-Hant"):
+                output_language = resolve_output_language(transcript, language)
+            elif language in existing_variant_languages(recording, transcript):
+                # Read-only access to an existing concrete variant.
+                output_language = language
+            else:
+                raise _ConfigError(
+                    f"cannot resolve language '{language}' for this recording"
+                )
+            if not output_language:
+                raise ConfigError(f"cannot resolve language '{language}' for this recording")
+            summary = recording.current_summary(output_language=output_language)
+        else:
+            summary = recording.current_summary()
         if summary is None:
-            raise ConfigError(f"no current summary for recording {args.recording_id}")
+            lang_msg = f" in language '{language}'" if language else ""
+            raise ConfigError(f"no current summary{lang_msg} for recording {args.recording_id}")
         if fmt == "markdown":
             return render_markdown(summary)
         if fmt == "text":
@@ -576,6 +644,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Create a new summary version even when a current summary exists",
     )
+    summarize.add_argument(
+        "--language",
+        choices=["default", "original", "en", "zh-Hant"],
+        default="default",
+        help="Target output language (default: auto-detect from source)",
+    )
 
     summaries = add_pipeline_command("summaries", "List summary versions of a recording")
     summaries.add_argument("recording_id", help="Recording to inspect")
@@ -587,6 +661,23 @@ def main(argv: list[str] | None = None) -> int:
         choices=["markdown", "text", "json"],
         default="markdown",
         help="Output format (default markdown; copy-friendly for other LLMs)",
+    )
+    summary.add_argument(
+        "--language",
+        choices=["default", "original", "en", "zh-Hant"],
+        default=None,
+        help="Show summary in a specific language variant",
+    )
+
+    transcript_lang_cmd = add_pipeline_command(
+        "transcript-language", "View or set the detected source language of a transcript"
+    )
+    transcript_lang_cmd.add_argument("recording_id", help="Recording to inspect or correct")
+    transcript_lang_cmd.add_argument(
+        "--set",
+        dest="set_language",
+        metavar="LANGUAGE",
+        help="Set the source language explicitly (e.g. en, fi, zh-HK)",
     )
 
     tags_cmd = add_pipeline_command("tags", "List configured and retired tags (read-only)")
@@ -600,6 +691,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "summarize" and args.regenerate and not args.recording_id:
         parser.error("--regenerate requires a RECORDING_ID")
+    if args.command == "summarize" and args.language != "default" and not args.recording_id:
+        parser.error("--language requires a RECORDING_ID")
 
     if args.command == "doctor":
         return cmd_doctor()
@@ -629,6 +722,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_summary(args)
     if args.command == "tags":
         return cmd_tags(args)
+    if args.command == "transcript-language":
+        return cmd_transcript_language(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 

@@ -63,7 +63,13 @@ def current_summary_prefetch(to_attr: str = "current_summary_rows") -> Prefetch:
         "summaries",
         queryset=Summary.objects.filter(
             is_active=True, transcript__is_active=True, section__ordinal=0
-        ).only(
+        )
+        # Multilingual: several variants can be active in scope. The
+        # list card shows a DETERMINISTIC row (lowest ordinal); the
+        # language-correct view lives in the recording detail/summary
+        # pages via the variant view-model.
+        .order_by("ordinal")
+        .only(
             "id",
             "recording",
             "transcript",
@@ -135,7 +141,10 @@ class RecordingCard:
 
     Constructed once per row; every attribute access below is served
     from memory. The queryset contract guarantees each list has the
-    expected cardinality (current summary ≤ 1, active routing ≤ 1).
+    expected cardinality (active routing ≤ 1; current summary rows are
+    ordered deterministically by ordinal — with multilingual variants
+    several rows can be active in scope, and the language-correct view
+    lives on the detail/summary pages via the variant view-model).
     """
 
     def __init__(self, recording: Recording) -> None:

@@ -2,7 +2,7 @@
 {% load workflow_extras %}
 {% block title %}Recording {{ card.recording.sha256|sha_short }} — Brain{% endblock %}
 {% block content %}
-<h1>{% if card.current_summary %}{{ card.current_summary.title }}{% else %}Recording {{ card.recording.sha256|sha_short }}{% endif %}</h1>
+<h1>{% if variant.summary %}{{ variant.summary.title }}{% elif variant.default_summary %}{{ variant.default_summary.title }}{% else %}Recording {{ card.recording.sha256|sha_short }}{% endif %}</h1>
 
 <p class="breadcrumb muted">
   {{ card.effective_at_label }} {{ card.effective_at|local_time }} ·
@@ -134,9 +134,9 @@
     <button type="submit">Add</button>
   </form>
 
-  {% if current_summary %}
-    <h3>Suggestions on the current summary</h3>
-    {% with suggestions=current_summary.tag_suggestions.all %}
+  {% if default_summary %}
+    <h3>Suggestions on the default summary</h3>
+    {% with suggestions=default_summary.tag_suggestions.all %}
       {% if suggestions %}
         <ul>
           {% for suggestion in suggestions %}
@@ -150,31 +150,63 @@
   {% endif %}
 </section>
 
-<section class="summary-section" aria-label="Current summary">
-  <h2>Current summary</h2>
-  {% if current_summary %}
-    <p class="copy-controls">
-      <button type="button" class="copy-button" data-copy-url="{% url 'summary-export' recording.pk %}?format=markdown">Copy Markdown</button>
-      <a href="{% url 'summary-export' recording.pk %}?format=markdown">Markdown</a> ·
-      <a href="{% url 'summary-export' recording.pk %}?format=text">Plain text</a> ·
-      <a href="{% url 'summary-export' recording.pk %}?format=json">JSON</a>
+<section class="summary-section" aria-label="Summary">
+  <h2>Summary</h2>
+
+  {% url 'recording-detail' recording.pk as variant_tab_base %}
+  {% include "workflow/_variant_tabs.html" with tab_base=variant_tab_base %}
+
+  {% if variant.unresolved_original %}
+    <p class="empty-state">
+      The summary in the original language has not been generated yet and the
+      transcript's source language is not known. Use the Generate action below:
+      the source language will be detected locally first, then the summary is
+      written in the original language.
     </p>
-    {% include "workflow/_summary_body.html" with summary=current_summary %}
+    {% include "workflow/_variant_action.html" %}
+  {% elif variant.summary %}
+    <p class="copy-controls">
+      <button type="button" class="copy-button" data-copy-url="{% url 'summary-export' recording.pk %}?format=markdown{{ variant.export_query }}">Copy Markdown</button>
+      <a href="{% url 'summary-export' recording.pk %}?format=markdown{{ variant.export_query }}">Markdown</a> ·
+      <a href="{% url 'summary-export' recording.pk %}?format=text{{ variant.export_query }}">Plain text</a> ·
+      <a href="{% url 'summary-export' recording.pk %}?format=json{{ variant.export_query }}">JSON</a>
+    </p>
+    <p class="variant-label muted">
+      Language: {{ variant.summary.output_language }}{% if variant.summary.output_language == variant.default_language %} (default){% endif %}
+      · Source language: {{ variant.summary.language|default:"unknown" }}
+      {% if variant.variant_state.regeneration_failed %}<span class="warn-text">(regeneration failed — this summary stays active)</span>{% endif %}
+    </p>
+    {% include "workflow/_summary_body.html" with summary=variant.summary %}
+    {% include "workflow/_variant_action.html" %}
     <details class="provenance">
       <summary>Provenance</summary>
       <dl>
-        <dt>Summary version</dt><dd>#{{ current_summary.ordinal }}</dd>
-        <dt>Model</dt><dd>{{ current_summary.model_id|default:"unknown" }}</dd>
-        <dt>Prompt / parser</dt><dd>v{{ current_summary.prompt_version }} / v{{ current_summary.parser_version }}</dd>
-        <dt>Generation</dt><dd>{{ current_summary.generation_mode }}</dd>
-        <dt>Chunks</dt><dd>{{ current_summary.chunk_count }} ({{ current_summary.input_characters }} characters input{% if current_summary.input_truncated %}, truncated{% else %}, not truncated{% endif %})</dd>
-        <dt>Created</dt><dd>{{ current_summary.created_at|local_time }}</dd>
+        <dt>Summary version</dt><dd>#{{ variant.summary.ordinal }}</dd>
+        <dt>Output language</dt><dd>{{ variant.summary.output_language }}</dd>
+        <dt>Source language</dt><dd>{{ variant.summary.language|default:"unknown" }}</dd>
+        <dt>Model</dt><dd>{{ variant.summary.model_id|default:"unknown" }}</dd>
+        <dt>Prompt / parser</dt><dd>v{{ variant.summary.prompt_version }} / v{{ variant.summary.parser_version }}</dd>
+        <dt>Generation</dt><dd>{{ variant.summary.generation_mode }}</dd>
+        <dt>Chunks</dt><dd>{{ variant.summary.chunk_count }} ({{ variant.summary.input_characters }} characters input{% if variant.summary.input_truncated %}, truncated{% else %}, not truncated{% endif %})</dd>
+        <dt>Created</dt><dd>{{ variant.summary.created_at|local_time }}</dd>
       </dl>
     </details>
   {% else %}
     <p class="empty-state">
-      {% if recording.summary_status == 'failed' %}The last summarization attempt failed. Retry it explicitly from the Actions panel.{% elif recording.summary_status == 'missing' %}No summary yet — use the Summarize action.{% else %}No active transcript to summarize.{% endif %}
+      {% if variant.variant_state and variant.variant_state.status == 'failed' %}
+        The last attempt to generate this language variant failed. Retry it explicitly below.
+      {% elif variant.action_mode == 'retry_summary' %}
+        The last summarization attempt failed. Retry it explicitly below.
+      {% elif variant.requested == 'default' and not variant.has_transcript %}
+        No active transcript to summarize.
+      {% elif not variant.action_selector %}
+        No summary in this language, and no approved generation target
+        produces it. It remains readable and exportable.
+      {% else %}
+        No summary in this language yet — generate it below.
+      {% endif %}
     </p>
+    {% include "workflow/_variant_action.html" %}
   {% endif %}
 </section>
 
@@ -188,7 +220,7 @@
       · <a href="{% url 'transcript-export' recording.pk %}?format=text">plain text</a> ·
       <a href="{% url 'transcript-export' recording.pk %}?format=timestamped">timestamped</a>
     </p>
-    <div class="transcript" lang="{{ card.current_summary.language|default:'' }}">
+    <div class="transcript" lang="{{ transcript.language_observed|default:'' }}">
       {% for segment in segments %}
         <p class="transcript-segment">
           {% if segment.start_ms %}<span class="timestamp muted">{{ segment.start_ms|mmss }}</span>{% endif %}

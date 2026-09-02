@@ -24,6 +24,7 @@ from workflow.services.rendering import render_markdown, render_text, summary_to
 
 def _summary_for(request, recording: Recording) -> tuple[Summary, bool]:
     version = request.GET.get("version")
+    language = (request.GET.get("language") or "").strip()
     if version:
         summary = get_object_or_404(
             Summary.objects.select_related("transcript", "section"),
@@ -31,6 +32,30 @@ def _summary_for(request, recording: Recording) -> tuple[Summary, bool]:
             recording_id=recording.pk,
         )
         return summary, True
+    if language:
+        # Same selector rules as the read pages: the four standard
+        # selectors plus concrete languages that already exist. Unknown
+        # selectors and unresolvable targets are friendly 404s — never
+        # a silent fallback to the default-language summary.
+        from workflow.services.variant_view import build_variant_view
+
+        variant = build_variant_view(recording, language)
+        if variant.error:
+            raise Http404(
+                f"No summary variant '{language}' exists for this recording."
+            )
+        if not variant.resolved:
+            raise Http404(
+                "The summary in the original language is not available yet: "
+                "the source language has not been determined. Generate it "
+                "from the recording page."
+            )
+        summary = variant.summary
+        if summary is None:
+            raise Http404(
+                f"No summary in '{variant.resolved}' exists for this recording yet."
+            )
+        return summary, False
     summary = recording.current_summary()
     if summary is None:
         raise Http404("No current summary for this recording")
