@@ -34,3 +34,6 @@ venv/
 .coverage
 .coverage.*
 htmlcov/
+
+# --- macOS ---
+.DS_Store

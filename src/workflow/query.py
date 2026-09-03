@@ -27,13 +27,18 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from django.db.models import (
+    CharField,
     Count,
     DateTimeField,
+    OuterRef,
     Prefetch,
     Q,
+    Subquery,
+    Value,
 )
 from django.db.models.functions import Coalesce
 from django.db.models.query import QuerySet
+from django.utils import timezone as dj_tz
 
 from brainlib.config import tag_name_key
 from workflow.models import (
@@ -46,12 +51,19 @@ from workflow.models import (
     SummaryState,
     Tag,
     TagAssignment,
+    Transcript,
 )
+from workflow.services.langresolve import default_output_language_expression
+from workflow.sqlite_unicode import ensure_registered, folded_title_expression
 
 MAX_TAG_FILTERS = 10
 
 VALID_PROCESSING_STATUSES = {value for value, _ in ProcessingStatus.choices}
 VALID_SUMMARY_STATUSES = {value for value, _ in SummaryState.choices}
+
+SORT_CHOICES = ("newest", "oldest", "title_az", "title_za")
+
+TITLE_PLACEHOLDER = "Untitled recording"
 
 
 def effective_at_annotation() -> Coalesce:
@@ -78,12 +90,73 @@ def current_summary_prefetch(to_attr: str = "current_summary_rows") -> Prefetch:
             "title",
             "overview",
             "language",
+            "output_language",
             "is_active",
             "created_at",
             "model_id",
             "generation_mode",
         ),
         to_attr=to_attr,
+    )
+
+
+def _default_output_language_subquery() -> Subquery:
+    """Default output language of a recording's ACTIVE transcript.
+
+    Uses the ORM expression from ``langresolve`` (the language-policy
+    layer) so the derived value always agrees with
+    ``resolve_default_language`` — no policy duplication here.
+    """
+    return Subquery(
+        Transcript.objects.filter(recording=OuterRef("pk"), is_active=True)
+        .annotate(_default_output=default_output_language_expression())
+        .values("_default_output")[:1],
+        output_field=CharField(max_length=32),
+    )
+
+
+def _summary_title_subquery(*, default_language: bool) -> Subquery:
+    """Deterministic whole-recording Summary title (active transcript,
+    ordinal-0 section). With ``default_language=True`` the row is
+    restricted to the recording's derived default output language."""
+    queryset = Summary.objects.filter(
+        transcript__recording=OuterRef("pk"),
+        transcript__is_active=True,
+        section__ordinal=0,
+        is_active=True,
+    )
+    if default_language:
+        queryset = queryset.filter(output_language=OuterRef("default_output_language"))
+    return Subquery(
+        queryset.order_by("ordinal").values("title")[:1],
+        output_field=CharField(max_length=200),
+    )
+
+
+def _source_filename_subquery() -> Subquery:
+    """Deterministic preferred AudioSource filename: canonical first,
+    then earliest ``first_seen_at``, then PK."""
+    return Subquery(
+        AudioSource.objects.filter(recording=OuterRef("pk"))
+        .order_by("-is_canonical", "first_seen_at", "pk")
+        .values("original_filename")[:1],
+        output_field=CharField(max_length=255),
+    )
+
+
+def _display_title_expression() -> Coalesce:
+    """The single Library title source, used for BOTH rendering and
+    Title A–Z/Z–A ordering.
+
+    Fallback chain: active default-language Summary title → any active
+    whole-recording Summary title (deterministic) → preferred AudioSource
+    filename → ``Untitled recording``.
+    """
+    return Coalesce(
+        _summary_title_subquery(default_language=True),
+        _summary_title_subquery(default_language=False),
+        _source_filename_subquery(),
+        Value(TITLE_PLACEHOLDER),
     )
 
 
@@ -97,7 +170,11 @@ def recording_list_queryset() -> QuerySet:
     per-row queries are allowed in the loop.
     """
     return (
-        Recording.objects.annotate(effective_at=effective_at_annotation())
+        Recording.objects.annotate(
+            effective_at=effective_at_annotation(),
+            default_output_language=_default_output_language_subquery(),
+        )
+        .annotate(display_title=_display_title_expression())
         .select_related("last_failed_attempt")
         .prefetch_related(
             current_summary_prefetch(),
@@ -156,8 +233,74 @@ class RecordingCard:
         return rows[0] if rows else None
 
     @property
+    def display_summary(self) -> Summary | None:
+        """The single Summary row driving all card Summary content.
+
+        Selects the prefetched row matching the annotated default output
+        language (the same language ``display_title`` uses), falling back
+        to the deterministic lowest-ordinal active whole-recording
+        Summary when that variant is absent. Never issues a query.
+        """
+        rows = getattr(self.recording, "current_summary_rows", [])
+        if not rows:
+            return None
+        default_lang = getattr(self.recording, "default_output_language", None)
+        if default_lang:
+            for row in rows:
+                if row.output_language == default_lang:
+                    return row
+        return rows[0]
+
+    @property
+    def title(self) -> str:
+        """The Library title: the exact annotated ``display_title`` value
+        used for rendering AND Title A–Z/Z–A ordering (fallback chain:
+        default-language Summary → any active Summary → preferred source
+        filename → placeholder)."""
+        value = getattr(self.recording, "display_title", None)
+        if value:
+            return value
+        # Single-object use without the annotation: mirror the same chain.
+        summary = self.display_summary
+        if summary is not None and summary.title:
+            return summary.title
+        source = self.display_source
+        if source is not None and source.original_filename:
+            return source.original_filename
+        return TITLE_PLACEHOLDER
+
+    @property
+    def available_languages(self) -> list[str]:
+        """Sorted unique output languages already available (active
+        whole-recording Summaries in scope). Read from the prefetch only —
+        no related-manager access, constant query count."""
+        return sorted(
+            {
+                summary.output_language
+                for summary in getattr(self.recording, "current_summary_rows", [])
+                if summary.output_language
+            }
+        )
+
+    @property
+    def month_label(self) -> str:
+        """Local "Month YYYY" group label for chronological sorts."""
+        dt = self.effective_at
+        if dt is None:
+            return ""
+        from brain import settings as django_settings
+
+        tz_name = getattr(django_settings.BRAIN_CONFIG_OBJ, "timezone", "UTC")
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        local = dt.astimezone(tz) if dj_tz.is_aware(dt) else dt
+        return local.strftime("%B %Y")
+
+    @property
     def overview_excerpt(self) -> str:
-        summary = self.current_summary
+        summary = self.display_summary
         if summary is None:
             return ""
         text = unicodedata.normalize("NFC", summary.overview).strip()
@@ -226,6 +369,7 @@ class ListFilters:
     review: bool = False
     audio: str | None = None
     has_summary: bool | None = None
+    sort: str = "newest"  # newest | oldest | title_az | title_za
 
     errors: list[str] = dc_field(default_factory=list)
 
@@ -259,6 +403,8 @@ class ListFilters:
             params["audio"] = [self.audio]
         if self.has_summary is not None:
             params["has_summary"] = ["1" if self.has_summary else "0"]
+        if self.sort != "newest":
+            params["sort"] = [self.sort]
         return urllib.parse.urlencode(params, doseq=True)
 
 
@@ -321,6 +467,14 @@ def list_filters(GET, timezone_name: str = "Europe/Helsinki") -> ListFilters:
             filters.errors.append("'audio' must be 'present' or 'missing'.")
         else:
             filters.audio = audio
+
+    sort = (GET.get("sort") or "newest").strip().lower()
+    if sort not in SORT_CHOICES:
+        filters.errors.append(
+            "'sort' must be one of 'newest', 'oldest', 'title_az', 'title_za'."
+        )
+        sort = "newest"
+    filters.sort = sort
 
     has_summary_raw = (GET.get("has_summary") or "").strip()
     if has_summary_raw in ("1", "true"):
@@ -410,7 +564,27 @@ def apply_filters(queryset, filters: ListFilters, timezone_name: str):
         )
         queryset = queryset.filter(current).distinct() if filters.has_summary else queryset.exclude(current).distinct()
 
-    return queryset.order_by("-effective_at", "pk")
+    return queryset.order_by(*_sort_order(filters.sort))
+
+
+def _sort_order(sort: str):
+    """Deterministic database-side ordering for the Library.
+
+    Title sorts use the exact annotated ``display_title`` under the
+    Unicode-aware ``unicode_fold`` SQLite collation (NFC + casefold,
+    registered on every connection by ``workflow.sqlite_unicode``) with
+    PK as the final tie-break; the Coalesce in ``display_title``
+    guarantees non-null values.
+    """
+    if sort == "oldest":
+        return ("effective_at", "pk")
+    if sort == "title_az":
+        ensure_registered()
+        return (folded_title_expression().asc(nulls_last=True), "pk")
+    if sort == "title_za":
+        ensure_registered()
+        return (folded_title_expression().desc(nulls_last=True), "pk")
+    return ("-effective_at", "pk")
 
 
 def recording_detail_queryset(recording_pk: str):

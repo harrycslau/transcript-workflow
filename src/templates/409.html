@@ -3,5 +3,5 @@
 {% block content %}
 <h1>Pipeline busy (409)</h1>
 <p>Another pipeline process is active{{ detail|default:"" }}. Wait for it to finish and try again.</p>
-<p><a href="{% url 'review' %}">Go to review</a> · <a href="/">Back to home</a></p>
+<p><a href="{% url 'review' %}">Go to review</a> · <a href="{% url 'recordings' %}">Back to the Library</a></p>
 {% endblock %}

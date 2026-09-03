@@ -1,73 +1,48 @@
 {% extends "base.html" %}
 {% load workflow_extras %}
-{% block title %}Recordings — Brain{% endblock %}
+{% block title %}Library — Brain{% endblock %}
 {% block content %}
-<h1>Recordings</h1>
 
-<section class="filters" aria-label="Filters">
-  <form method="get" action="{% url 'recordings' %}">
-    <fieldset>
-      <legend>Date</legend>
-      <label for="id_date">Day</label>
-      <input type="date" id="id_date" name="date" value="{{ filters.date|date:'Y-m-d'|default:'' }}">
-      <label for="id_from">From</label>
-      <input type="date" id="id_from" name="from" value="{{ filters.date_from|date:'Y-m-d'|default:'' }}">
-      <label for="id_to">To</label>
-      <input type="date" id="id_to" name="to" value="{{ filters.date_to|date:'Y-m-d'|default:'' }}">
-      <p class="hint">Use either a single day or a from/to range.</p>
-    </fieldset>
-    <fieldset>
-      <legend>Tags</legend>
+<section class="filter-area" aria-label="Library filters">
+  <form method="get" action="{% url 'recordings' %}" class="filter-form">
+    <input type="hidden" name="view" value="{{ effective_view }}">
+    <div class="filter-row-1">
+      <div class="filter-group">
+        <label class="filter-group-label" for="id_from">From</label>
+        <input type="date" id="id_from" name="from" value="{{ filters.date_from|date:'Y-m-d'|default:'' }}" class="filter-date-input">
+      </div>
+      <div class="filter-group">
+        <label class="filter-group-label" for="id_to">To</label>
+        <input type="date" id="id_to" name="to" value="{{ filters.date_to|date:'Y-m-d'|default:'' }}" class="filter-date-input">
+      </div>
+      <div class="filter-separator" aria-hidden="true"></div>
+      <div class="filter-group filter-sort">
+        <label class="filter-group-label" for="id_sort">Sort</label>
+        <select id="id_sort" name="sort">
+          <option value="newest" {% if filters.sort == 'newest' %}selected{% endif %}>Newest first</option>
+          <option value="oldest" {% if filters.sort == 'oldest' %}selected{% endif %}>Oldest first</option>
+          <option value="title_az" {% if filters.sort == 'title_az' %}selected{% endif %}>Title A–Z</option>
+          <option value="title_za" {% if filters.sort == 'title_za' %}selected{% endif %}>Title Z–A</option>
+        </select>
+      </div>
+      <div class="view-toggle" aria-label="View mode">
+        <a class="view-toggle-btn{% if effective_view == 'cards' %} active{% endif %}" href="{% url 'recordings' %}?view=cards{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}" aria-label="Card view" title="Card view"{% if effective_view == 'cards' %} aria-current="true"{% endif %}>Cards</a>
+        <a class="view-toggle-btn{% if effective_view == 'table' %} active{% endif %}" href="{% url 'recordings' %}?view=table{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}" aria-label="Table view" title="Table view"{% if effective_view == 'table' %} aria-current="true"{% endif %}>Table</a>
+      </div>
+      <button type="submit" class="apply-btn">Apply</button>
+    </div>
+    <div class="filter-row-2">
+      <span class="filter-group-label" id="tags-label">Tags</span>
       {% for tag in configured_tags %}
-        <label class="checkbox">
-          <input type="checkbox" name="tag" value="{{ tag.name }}"
-            {% if tag.name_key in filters.tags %}checked{% endif %}>
+        <label class="filter-chip-wrap">
+          <input type="checkbox" name="tag" value="{{ tag.name }}" {% if tag.name_key in filters.tags %}checked{% endif %}>
           {{ tag.name }}
         </label>
       {% empty %}
-        <p class="muted">No configured tags.</p>
+        <span class="muted">No configured tags.</span>
       {% endfor %}
-      <label for="id_tag_match">Match</label>
-      <select id="id_tag_match" name="tag_match">
-        <option value="all" {% if filters.tag_match == 'all' %}selected{% endif %}>all selected (AND)</option>
-        <option value="any" {% if filters.tag_match == 'any' %}selected{% endif %}>any selected (OR)</option>
-      </select>
-    </fieldset>
-    <fieldset>
-      <legend>Status</legend>
-      <label for="id_status">Processing</label>
-      <select id="id_status" name="status">
-        <option value="">Any</option>
-        {% for value, label in processing_statuses %}
-          <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ label }}</option>
-        {% endfor %}
-      </select>
-      <label for="id_summary">Summary</label>
-      <select id="id_summary" name="summary">
-        <option value="">Any</option>
-        {% for value, label in summary_statuses %}
-          <option value="{{ value }}" {% if filters.summary == value %}selected{% endif %}>{{ label }}</option>
-        {% endfor %}
-      </select>
-      <label for="id_audio">Audio</label>
-      <select id="id_audio" name="audio">
-        <option value="">Any</option>
-        <option value="present" {% if filters.audio == 'present' %}selected{% endif %}>Present</option>
-        <option value="missing" {% if filters.audio == 'missing' %}selected{% endif %}>Missing</option>
-      </select>
-      <label class="checkbox">
-        <input type="checkbox" name="has_summary" value="1" {% if filters.has_summary %}checked{% endif %}>
-        Has current summary
-      </label>
-      <label class="checkbox">
-        <input type="checkbox" name="review" value="1" {% if filters.review %}checked{% endif %}>
-        Needs attention
-      </label>
-    </fieldset>
-    <p class="filter-actions">
-      <button type="submit">Apply filters</button>
-      <a href="{% url 'recordings' %}">Clear</a>
-    </p>
+      {% if filters_qs %}<a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}">Clear all</a>{% endif %}
+    </div>
   </form>
 </section>
 
@@ -79,42 +54,72 @@
   </div>
 {% endif %}
 
-<p class="muted">{{ page.paginator.count }} recording{{ page.paginator.count|pluralize }}{% if filters.valid %} · filters applied{% endif %}</p>
+<div class="results-header">
+  <span class="results-count">{{ page.paginator.count }} recording{{ page.paginator.count|pluralize }}</span>
+</div>
 
 {% if cards %}
-  <ul class="recording-list">
-    {% for card in cards %}
-      <li class="recording-card {% if card.needs_attention %}attention{% endif %}">
-        <div class="recording-main">
-          <a class="recording-title-link" href="{% url 'recording-detail' card.recording.pk %}">
-            <strong>{{ card.current_summary.title|default:"(no summary)" }}</strong>
-          </a>
-          <span class="muted filename">{{ card.display_source.original_filename|default:"(no source)" }}</span>
-          <p class="excerpt">{{ card.overview_excerpt|default:"No overview available." }}</p>
-        </div>
-        <div class="recording-meta">
-          <span class="when">{{ card.effective_at_label }} {{ card.effective_at|local_time }}</span>
-          <span class="status status-{{ card.recording.processing_status }}">{{ card.recording.processing_status }}</span>
-          <span class="summary-status">summary: {{ card.recording.summary_status }}</span>
-          {% if card.active_route %}
-            <span class="route">{{ card.active_route.profile_name }}{% if not card.active_route.routing_verified %} (unverified){% endif %}</span>
-          {% else %}
-            <span class="route muted">no routing</span>
-          {% endif %}
-          <span class="audio {% if card.recording.audio_status == 'missing' %}warn-text{% endif %}">audio: {{ card.recording.audio_status }}</span>
-          {% if card.recording.retranscription_failed %}<span class="warn-text">retranscription failed</span>{% endif %}
-          {% if card.recording.resummarization_failed %}<span class="warn-text">re-summarization failed</span>{% endif %}
-          {% if card.active_tags %}
-            <span class="tags">
-              {% for assignment in card.active_tags %}<span class="tag-chip">{{ assignment.tag.name }}</span>{% endfor %}
-            </span>
-          {% endif %}
-        </div>
-      </li>
-    {% endfor %}
-  </ul>
+
+  {% if effective_view == 'table' %}
+    <div class="recording-table-wrap">
+      <table class="recording-table">
+        <caption class="visually-hidden">Recordings</caption>
+        <thead>
+          <tr>
+            <th scope="col">Date &amp; time</th>
+            <th scope="col">Title</th>
+            <th scope="col">Duration</th>
+            <th scope="col">Tags</th>
+            <th scope="col">Languages</th>
+            <th scope="col">Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for card in cards %}
+            {% if show_month_headings %}
+              {% ifchanged card.month_label %}<tr class="month-separator"><td colspan="6">{{ card.month_label }}</td></tr>{% endifchanged %}
+            {% endif %}
+            <tr class="{% if card.needs_attention %}needs-attention{% endif %}">
+              <td data-label="Date &amp; time">{{ card.effective_at_label }} {{ card.effective_at|local_time }}</td>
+              <td data-label="Title"><a class="col-title" href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a></td>
+              <td data-label="Duration">{{ card.recording.duration_seconds|duration }}</td>
+              <td data-label="Tags">{% for assignment in card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
+              <td data-label="Languages">{% for lang in card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
+              <td data-label="Status"><span class="status status-{{ card.recording.processing_status }}">{{ card.recording.get_processing_status_display }}</span></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <ul class="recording-list">
+      {% for card in cards %}
+        {% if show_month_headings %}
+          {% ifchanged card.month_label %}<li class="date-group-header">{{ card.month_label }}</li>{% endifchanged %}
+        {% endif %}
+        <li class="recording-card {% if card.needs_attention %}needs-attention{% endif %}">
+          <div class="recording-card-header">
+            <div class="recording-card-title"><a href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a></div>
+            <span class="status status-{{ card.recording.processing_status }}">{{ card.recording.get_processing_status_display }}</span>
+          </div>
+          <div class="recording-card-meta">
+            <span>{{ card.effective_at_label }} {{ card.effective_at|local_time }}</span>
+            <span>{{ card.recording.duration_seconds|duration }}</span>
+            {% if card.active_route %}<span>{{ card.active_route.profile_name }}</span>{% endif %}
+          </div>
+          {% if card.overview_excerpt %}<p class="recording-card-excerpt">{{ card.overview_excerpt }}</p>{% endif %}
+          <div class="recording-card-footer">
+            <div class="recording-card-tags">{% for assignment in card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">no tags</span>{% endfor %}</div>
+            <div class="recording-card-langs" aria-label="Available summary languages">{% for lang in card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">no summaries</span>{% endfor %}</div>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
   {% include "workflow/_pagination.html" with page=page %}
+
 {% else %}
-  <p class="empty-state">No recordings match these filters. Adjust the filters or run <code>brain run</code>.</p>
+  <p class="empty-state">No recordings match these filters.</p>
 {% endif %}
 {% endblock %}

@@ -112,7 +112,7 @@ def test_walkthrough():
     # 8. GET purity: no writes from any read page.
     before = (Recording.objects.count(), ProcessingAttempt.objects.count(),
               TagAssignment.objects.count(), Summary.objects.count())
-    for url in ("/", "/recordings/", "/tags/", "/review/",
+    for url in ("/status/", "/recordings/", "/tags/", "/review/",
                 f"/recordings/{recording.pk}/", f"/recordings/{recording.pk}/history/"):
         assert c.get(url).status_code == 200
     after = (Recording.objects.count(), ProcessingAttempt.objects.count(),

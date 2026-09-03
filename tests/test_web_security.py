@@ -41,6 +41,29 @@ class TestSecurityHeaders:
         assert response.headers.get("X-Content-Type-Options") == "nosniff"
         assert response.headers.get("Referrer-Policy") == "same-origin"
 
+    def test_csp_allows_only_external_local_scripts(self, client):
+        """Rendered pages may include the local app.js, but never inline
+        scripts, inline styles, or inline event handlers."""
+        import re
+
+        content = client.get("/recordings/").content.decode("utf-8")
+        scripts = re.findall(r"<script\b[^>]*>(.*?)</script>", content, re.DOTALL)
+        # The only script is the external local app.js with an empty body.
+        assert len(scripts) == 1
+        assert scripts[0].strip() == ""
+        for match in re.finditer(r"<script\b[^>]*>", content):
+            tag = match.group(0)
+            src = re.search(r'\bsrc=["\']([^"\']+)["\']', tag)
+            assert src, f"script without src: {tag}"
+            assert src.group(1).startswith("/static/"), f"non-local script src: {tag}"
+        # No inline styles anywhere.
+        assert "<style" not in content
+        assert "style=" not in content
+        # No inline event handlers (precise attribute match, not a bare
+        # substring scan of the whole page).
+        for handler in re.findall(r'\bon(?:click|change|submit|load|error)\s*=', content):
+            raise AssertionError(f"inline event handler found: {handler}")
+
     def test_message_cookie_security_flags(self, client):
         recording, _t, _s = make_transcribed_recording(["x"], sha="sec-1")
         # A POST/redirect/GET cycle sets the signed message cookie.
@@ -74,6 +97,7 @@ class TestSecretHygiene:
             f"/recordings/{recording.pk}/history/",
             "/tags/",
             "/review/",
+            "/status/",
             f"/recordings/{recording.pk}/summary/export/?format=json",
         ):
             content = client.get(url).content.decode("utf-8")
@@ -81,7 +105,7 @@ class TestSecretHygiene:
             assert "BRAIN_TEST_LLM_API_KEY" not in content, url
             assert "/Users/" not in content, url
             assert ".sqlite3" not in content, url
-        home = client.get("/").content.decode("utf-8")
+        home = client.get("/status/").content.decode("utf-8")
         assert "super-secret-value-42" not in home
         assert "BRAIN_TEST_LLM_API_KEY" not in home
 
@@ -164,7 +188,7 @@ class TestHomePagePathPrivacy:
         before_counts = self._no_mutation(client)
         monkeypatch.setattr(views, "load_config", lambda: sentinel_config)
         with CaptureQueriesContext(connection) as ctx:
-            response = client.get("/")
+            response = client.get("/status/")
         content = response.content.decode()
 
         # 1-3. The sentinel and any absolute-path fragment are absent.

@@ -23,6 +23,22 @@ from workflow.query import (
 from workflow.views.helpers import get_config
 from workflow.services.web_actions import attempt_summary_for_display
 
+VIEW_COOKIE = "brain_view_pref"
+VALID_VIEWS = ("cards", "table")
+VIEW_COOKIE_MAX_AGE = 31536000  # one year
+
+
+def _effective_view(request) -> str:
+    """Explicit valid ``view=`` wins; otherwise the validated cookie;
+    otherwise cards. Invalid values fall back safely, never an error."""
+    view = (request.GET.get("view") or "").strip().lower()
+    if view in VALID_VIEWS:
+        return view
+    cookie = (request.COOKIES.get(VIEW_COOKIE) or "").strip().lower()
+    if cookie in VALID_VIEWS:
+        return cookie
+    return "cards"
+
 
 def recording_list(request):
     config = get_config()
@@ -35,17 +51,35 @@ def recording_list(request):
     cards = [RecordingCard(recording) for recording in page.object_list]
     from workflow.models import Tag
 
+    view = _effective_view(request)
+    filters_qs = filters.as_querystring()
+    base_qs = filters_qs + (f"&view={view}" if filters_qs else f"view={view}")
+
     context = {
         "cards": cards,
         "page": page,
         "filters": filters,
         "filter_errors": filters.errors,
-        "base_qs": filters.as_querystring(),
+        "filters_qs": filters_qs,
+        "base_qs": base_qs,
+        "effective_view": view,
+        "show_month_headings": filters.sort in ("newest", "oldest"),
         "configured_tags": Tag.objects.filter(is_configured=True).order_by("name"),
-        "processing_statuses": ProcessingStatus.choices,
-        "summary_statuses": SummaryState.choices,
     }
-    return render(request, "workflow/recording_list.html", context)
+    response = render(request, "workflow/recording_list.html", context)
+    if request.GET.get("view") in VALID_VIEWS:
+        # Server-owned preference; explicit query param always wins over
+        # the cookie, and a valid explicit value refreshes it.
+        response.set_cookie(
+            VIEW_COOKIE,
+            view,
+            max_age=VIEW_COOKIE_MAX_AGE,
+            samesite="Lax",
+            path="/",
+            httponly=True,
+            secure=request.is_secure(),
+        )
+    return response
 
 
 def _detail_base(request, recording_id):

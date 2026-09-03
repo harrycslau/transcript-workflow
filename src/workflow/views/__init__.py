@@ -17,7 +17,7 @@ import shutil
 
 from django.db import connection
 from django.http import JsonResponse
-from django.shortcuts import render
+from django.shortcuts import redirect, render
 
 from brain import settings as django_settings
 from brainlib import APP_NAME
@@ -88,6 +88,11 @@ def _pipeline_counts() -> dict[str, int]:
         ).count(),
         "failed_resummarization": Recording.objects.filter(resummarization_failed=True).count(),
     }
+
+
+def redirect_to_recordings(request):
+    """``/`` is now the Library: the status page moved to ``/status/``."""
+    return redirect("recordings")
 
 
 def home(request):

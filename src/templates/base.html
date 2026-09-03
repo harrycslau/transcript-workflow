@@ -9,13 +9,19 @@
   <script src="{% static 'workflow/app.js' %}" defer></script>
 </head>
 <body>
-  <header class="site-header">
-    <nav aria-label="Main navigation">
-      <a href="/" class="brand">Brain</a>
-      <a href="{% url 'recordings' %}">Recordings</a>
-      <a href="{% url 'tags' %}">Tags</a>
-      <a href="{% url 'review' %}">Review</a>
-    </nav>
+  <header class="topbar" role="banner">
+    <a class="topbar-brand" href="{% url 'recordings' %}" title="Library">
+      <span class="topbar-brand-icon">B</span>
+      <span class="topbar-brand-name">Brain</span>
+    </a>
+    <div class="topbar-search" role="search">
+      <span class="search-icon" aria-hidden="true">&#128269;</span>
+      <input type="search" id="global-search" placeholder="Search coming soon" aria-label="Search (coming soon)" disabled>
+    </div>
+    <div class="topbar-right">
+      <a class="topbar-btn" href="{% url 'review' %}">Review{% if review_count %}<span class="badge" aria-label="{{ review_count }} recordings need review">{{ review_count }}</span>{% endif %}</a>
+      <a class="topbar-btn" href="{% url 'status' %}"><span class="btn-label">Status</span></a>
+    </div>
   </header>
   <div class="messages" aria-live="polite">
     {% for message in messages %}

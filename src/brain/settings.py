@@ -34,7 +34,7 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "django.contrib.messages",
-    "workflow",
+    "workflow.apps.WorkflowConfig",
 ]
 
 MIDDLEWARE = [
@@ -72,6 +72,7 @@ TEMPLATES = [
                 "django.template.context_processors.debug",
                 "django.template.context_processors.request",
                 "django.contrib.messages.context_processors.messages",
+                "workflow.context_processors.nav_context",
             ],
         },
     },

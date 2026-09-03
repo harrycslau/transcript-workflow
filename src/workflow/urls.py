@@ -11,7 +11,8 @@ from workflow.views import actions, exports, recordings, review, tags
 from workflow import views
 
 urlpatterns = [
-    path("", views.home, name="home"),
+    path("", views.redirect_to_recordings, name="home"),
+    path("status/", views.home, name="status"),
     path("health/", views.health, name="health"),
 
     path("recordings/", recordings.recording_list, name="recordings"),

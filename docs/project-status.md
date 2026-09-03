@@ -5,6 +5,44 @@ post-incident routing/transcription fixes and the multilingual summary
 corrective round. It is a snapshot, not a durable instruction file;
 `AGENTS.md` holds the standing rules.
 
+## Step 5A.1 — Production Library UI (delivered)
+
+- **Routing**: `/` redirects to the Library (`/recordings/`); the
+  diagnostics/status page moved to `/status/`; `/review/` and
+  `/health/` unchanged.
+- **Library**: server-rendered, no-JS Card and Table views. Only the
+  selected representation is rendered (one DOM; the same table stacks
+  into readable rows on small screens via CSS `data-label`). Two-row
+  filters (From/To/Sort in row 1, Tags in row 2; no FILTER caption, no
+  Day/status/audio/has-summary/review/tag-match controls). Sort by
+  Newest/Oldest/Title A–Z/Z–A with sort-aware month headings. Search is
+  a disabled "Search coming soon" placeholder — no FTS or real search
+  exists yet.
+- **Title contract**: one annotated `display_title` (active
+  default-language whole-recording Summary → deterministic active
+  Summary → canonical AudioSource filename → placeholder) drives both
+  rendering and Title ordering. Title sorting is Unicode-aware
+  (NFC + casefold) via a SQLite collation registered on every connection
+  (`workflow/sqlite_unicode.py`), database-side before pagination, PK
+  tie-break. The card adapter exposes a single `display_summary` (the
+  prefetched Summary matching the derived default output language) so
+  title and overview always share a language.
+- **View preference**: server-owned `brain_view_pref` cookie
+  (HttpOnly, SameSite=Lax, 1 year) with explicit validated `view=`
+  precedence; the filter form carries a hidden effective-view field so
+  Card/Table survives filtering without cookies; "Clear all" clears
+  filters/sort but preserves the effective view.
+- **Top bar**: Brain/Library, disabled search field, Review with a
+  distinct-recordings count badge (one guarded COUNT DISTINCT query in
+  `workflow/context_processors.py`), Status.
+- **Language policy**: `CHINESE_FAMILY_PRIMARIES` is the single source
+  in `languages.py`; `langresolve.default_output_language_expression()`
+  mirrors `resolve_default_language()` in SQL (parity-tested) and is
+  used by the Library without per-recording queries.
+- No migrations, no new dependencies, strict CSP preserved. **Step 4 is
+  complete; Step 5A.1 is complete after the corrective pass.** The next
+  planned unit is Step 5A.2 Search Index Foundation.
+
 ## Multilingual summary variants (corrective round — delivered)
 
 The multilingual-summary work was reassigned and corrected; the previous
@@ -188,7 +226,8 @@ required.)
 
 ### Web interface (server-rendered, local-first)
 
-- Pages: dashboard `/` (existing status page), `/recordings/`
+- Pages at the time: dashboard `/` (existing status page — since moved
+  to `/status/`, with `/` now redirecting to `/recordings/`), `/recordings/`
   (paginated, filterable), `/recordings/<id>/` (detail/working view),
   `/recordings/<id>/summary/` (current summary),
   `/recordings/<id>/summaries/<sid>/` (historical summary),
@@ -548,17 +587,25 @@ traceback, verified in fresh subprocesses), 2 usage, 3 lock contention.
   JSON output is `{"segments":[{start/end in ms, id, text, words[]}],
   "text"}`; fixture in `tests/fixtures/macwhisper/parakeet_json.json`.
 
-## Web behaviour (minimal)
+## Web behaviour (minimal) — historical snapshot (Step 1)
 
-`/` — status page (version, storage paths, MacWhisper presence without
-spawning, oMLX config without network calls, pipeline counts).
-`/health/` — sanitized JSON, 200 ok/degraded, 503 unhealthy. Full UI is
-Step 4.
+At that time `/` was the status page (version, storage paths, MacWhisper
+presence without spawning, oMLX config without network calls, pipeline
+counts) and `/health/` was sanitized JSON (200 ok/degraded, 503
+unhealthy), with "full UI = Step 4".
+
+**Current routing (see the top-of-file handoff):** `/` redirects to the
+Library `/recordings/`, the diagnostics/status page lives at
+`/status/`, and the full web interface (Step 4) plus the Step 5A.1
+Production Library UI are delivered.
 
 ## Tests and verification status
 
-- 495 tests passing (`pytest`); no real MacWhisper, oMLX, network,
-  ffmpeg, or user audio; "must not happen" mocks raise.
+- Current: **1059 tests passing** (Step 5A.1 final corrective pass);
+  earlier snapshots recorded 495 (Step 3), 985/992 (Step 4 +
+  multilingual corrective) and 1056 (Step 5A.1 first pass). No real
+  MacWhisper, oMLX, network, ffmpeg, or user audio; "must not happen"
+  mocks raise.
 - Verified: `manage.py check`, `makemigrations --check`, fresh-process
   CLI config errors (no traceback), stage-aware cross-stage recovery,
   error/secret hygiene, and `git diff --check`.
@@ -569,8 +616,7 @@ Step 4.
 - Cantonese↔Mandarin auto-routing accuracy unproven (needs labelled
   real recordings; zh-ambiguity defaults to Needs Review).
 - Router confidence is uncalibrated.
-- No per-chunk retry memoization (a retry re-runs the bounded map+reduce);
-  `confirmed` tag origin and tag editing UI are Step 4.
+- No per-chunk retry memoization (a retry re-runs the bounded map+reduce).
 - Summarization retry of oversized inputs requires a config change
   (`input_too_large` never auto-recovers); no partial summaries.
 - No retention deletion (never deletes audio); unverified-routing
@@ -578,13 +624,20 @@ Step 4.
 - `audioop` deprecation (Python 3.13 removal; revisit before upgrade).
 - Parked recordings (missing/out-of-inbox sources) wait for the next
   ingest/run; no proactive notification.
+- **No keyword or semantic search yet**: the Library search field is a
+  disabled "Search coming soon" placeholder; FTS5 indexing/querying,
+  embeddings and Ask-with-citations are planned (Step 5A.2+), not
+  implemented.
 
 ## Step 3–6 roadmap (agreed)
 
-- **Step 4 (next)**: full web interface, review queue, transcript/summary
-  views, tag editing/filtering, manual routing controls.
-- **Step 5**: FTS5 keyword search, local embeddings, semantic/hybrid
-  search, Ask-with-citations.
+- **Step 4 — delivered**: full web interface, review queue,
+  transcript/summary views, tag editing/filtering, manual routing
+  controls.
+- **Step 5 — in progress**: Step 5A.1 Production Library UI is
+  delivered; the next planned unit is **Step 5A.2 Search Index
+  Foundation**. FTS5 keyword search, local embeddings, semantic/hybrid
+  search and Ask-with-citations are planned but NOT yet implemented.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation

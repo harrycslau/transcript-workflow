@@ -309,10 +309,19 @@ uv run brain serve --host 127.0.0.1 --port 9000
 - Binds to localhost only by default; no browser is opened.
 - Missing configuration or runtime-directory setup failures print a
   concise error and exit with code 1 (no traceback, no Django startup).
-- `GET /` — minimal status page (app version, storage availability,
-  MacWhisper/oMLX configuration, selected models). Page loads run only
-  lightweight local checks; they never launch MacWhisper or query the
-  oMLX endpoint — use `brain doctor` for full diagnostics.
+- `GET /` — redirects to the Library (`/recordings/`).
+- `GET /recordings/` — the Library: browse recordings as cards or a
+  responsive table, with from/to date, tag and sort filters (Newest,
+  Oldest, Title A–Z, Title Z–A) and month headings for chronological
+  sorts. Card/Table preference is remembered via a server-owned
+  `view=`-overridable cookie; everything works without JavaScript.
+  Keyword search is coming in a later Step 5 substep (the search field
+  is a disabled placeholder for now).
+- `GET /status/` — the status page (app version, storage availability,
+  MacWhisper/oMLX configuration, selected models, pipeline counts).
+  Page loads run only lightweight local checks; they never launch
+  MacWhisper or query the oMLX endpoint — use `brain doctor` for full
+  diagnostics.
 - `GET /health/` — structured JSON with stable, sanitized statuses.
   Returns **200** (`ok`, or `degraded` when an optional dependency such
   as MacWhisper is absent) and **503** (`unhealthy`) for

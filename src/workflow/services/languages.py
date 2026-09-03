@@ -39,7 +39,9 @@ DEFAULT_OUTPUT_LANGUAGE = "en"
 # on the active transcript (see workflow.services.variant_view).
 GENERATION_SELECTORS = ("default", "original", "en", "zh-Hant")
 
-_CHINESE_FAMILY_PRIMARY = ("zh", "yue", "cmn")
+# Chinese-family primary subtags (single source of truth). The Chinese
+# family is exactly these primaries with any script/region subtags.
+CHINESE_FAMILY_PRIMARIES = ("zh", "yue", "cmn")
 
 _LANG_TAG_RE = re.compile(
     r"^(?P<language>[A-Za-z]{2,3})"
@@ -78,7 +80,7 @@ def is_chinese_family(code: str) -> bool:
     if not canonical:
         return False
     primary = canonical.split("-", 1)[0]
-    return primary in _CHINESE_FAMILY_PRIMARY
+    return primary in CHINESE_FAMILY_PRIMARIES
 
 
 def output_language_for_source(code: str) -> str:
