@@ -447,3 +447,94 @@ class TestGetPurityAndCrossRecording:
     def test_unknown_tag_id_is_404(self, client):
         recording, _t, _s, _sum = _tagged_recording()
         assert client.post(f"/recordings/{recording.pk}/tags/999999/remove/", {}).status_code == 404
+
+
+class TestSearchIndexSyncOnWebActions:
+    """Step 5A.3: tag POSTs keep the search index in sync after commit;
+    a sync failure never breaks the request; GET stays sync-free."""
+
+    def _meta(self, recording):
+        from workflow.models import SearchDocument
+
+        return SearchDocument.objects.get(document_key=f"recording:{recording.pk}")
+
+    def test_tag_add_post_fires_exactly_one_index_sync(
+        self, client, django_capture_on_commit_callbacks
+    ):
+        from workflow.services import search_index as si
+
+        recording, _t, _s, _sum = _tagged_recording()
+        tag = make_tag("Family")
+        si.rebuild_index()
+        assert self._meta(recording).aux_text == ""
+        with django_capture_on_commit_callbacks(execute=True) as captured:
+            response = _post_add(client, recording, tag.pk)
+        assert response.status_code == 302
+        assert len(captured) == 1  # exactly one scheduled sync per commit
+        assert self._meta(recording).aux_text == "Family"
+        assert si.build_status_report()["healthy"] is True
+
+    def test_tag_remove_post_updates_index(
+        self, client, django_capture_on_commit_callbacks
+    ):
+        from workflow.services import search_index as si
+
+        recording, _t, _s, _sum = _tagged_recording()
+        tag = make_tag("Family")
+        make_tag_assignment(recording, tag, origin="manual")
+        si.rebuild_index()
+        assert self._meta(recording).aux_text == "Family"
+        with django_capture_on_commit_callbacks(execute=True) as captured:
+            response = client.post(f"/recordings/{recording.pk}/tags/{tag.pk}/remove/", {})
+        assert response.status_code == 302
+        assert len(captured) == 1
+        assert self._meta(recording).aux_text == ""
+        assert si.build_status_report()["healthy"] is True
+
+    def test_sync_failure_never_breaks_the_tag_request(
+        self, client, monkeypatch, django_capture_on_commit_callbacks
+    ):
+        from workflow.services import search_index as si
+        from workflow.services import search_sync
+
+        recording, _t, _s, _sum = _tagged_recording()
+        tag = make_tag("Family")
+        si.rebuild_index()
+
+        def always_fail(recording_id, **kwargs):
+            raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(search_sync, "reconcile_recording", always_fail)
+        with django_capture_on_commit_callbacks(execute=True):
+            response = _post_add(client, recording, tag.pk)
+        # The authoritative tag edit stands; the index merely stays
+        # detectably stale (the failure was swallowed, never raised).
+        assert response.status_code == 302
+        assert TagAssignment.objects.get(recording=recording, tag=tag).is_active is True
+        assert self._meta(recording).aux_text == ""
+        report = si.build_status_report()
+        assert report["healthy"] is False
+        assert report["categories"]["stale_content"] == 1
+
+    def test_get_requests_never_schedule_index_sync(self, client, monkeypatch):
+        """GET purity (AGENTS.md): no module may schedule a sync while
+        serving a GET. The bound module attributes must exist — patching
+        them also guards the wiring against silent removal."""
+        from workflow.services import (
+            ingest,
+            pipeline,
+            summarize,
+            tags,
+            transcription,
+        )
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("GET must never schedule a search index sync")
+
+        for module in (tags, pipeline, summarize, transcription, ingest):
+            monkeypatch.setattr(module, "schedule_recording_sync", forbidden)
+        recording, _t, _s, _sum = _tagged_recording()
+        tag = make_tag("Family")
+        make_tag_assignment(recording, tag)
+        assert client.get("/tags/").status_code == 200
+        assert client.get(f"/recordings/{recording.pk}/").status_code == 200

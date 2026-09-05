@@ -32,7 +32,7 @@ Non-negotiable principles:
   - `src/workflow/` — Django app: `models.py`, `services/` (ingest,
     routing, transcription, summarize, chunking, rendering, tags,
     audiosamples, statemachine, pipeline, pipeline_lock, search_index,
-    library_metadata), `views.py`
+    search_sync, library_metadata), `views.py`
     (status page + `/health/`),
     `migrations/`.
   - `src/manage.py` — conventional entry point only; the CLI is
@@ -71,7 +71,39 @@ Non-negotiable principles:
 - DB constraints are the second concurrency layer: at most one
   unfinished `ProcessingAttempt` per (recording, stage), one active
   `Transcript` and one active `RoutingDecision` per recording, and one
-  active `Summary` per (transcript, section) scope.
+  active `Summary` per (transcript, section, output_language) scope.
+
+## Search index synchronization (Step 5A.3)
+
+- `workflow/services/search_sync.py` is the ONLY incremental index
+  writer: mutating services call `schedule_recording_sync([ids])`
+  INSIDE their transaction and the work runs via
+  `transaction.on_commit` — never on GET (web GETs stay strictly
+  read-only) and never inside `reconcile_recording` (no recursion).
+  The reconciler does not acquire the pipeline lock itself; callbacks
+  triggered by pipeline/web actions normally run while the caller still
+  holds that lock, while web tag edits run without it.
+  `reconcile_recording` is the single per-recording writer: it
+  recomputes the expected documents with the SHARED `search_index`
+  builders (never a forked mapping), derives truth from the database,
+  is idempotent (zero DML when converged) and reconciles registry + FTS
+  in ONE transaction.
+- Skipping requires FULL-field equality of every registry field AND
+  the exact FTS text; `content_hash` alone is never trusted. FTS row
+  states are explicit: correct ⇒ skip, text differs ⇒ UPDATE the
+  existing rowid, FTS row missing ⇒ INSERT with the existing registry
+  pk (never UPDATE alone), registry row missing ⇒ create + INSERT.
+- An index failure NEVER fails or rolls back the authoritative
+  operation. Reconciles run independently per recording; the ONLY log
+  is one fixed aggregate warning per callback carrying the failure
+  COUNT and nothing else (no ids, exception text, paths, SQL or
+  indexed content). `search-index status` remains the detection
+  mechanism and `rebuild` the authoritative repair; FTS rows orphaned
+  by registry deletion/CASCADE are never removable per recording.
+- Hooks fire only after COMMIT (a rolled-back transaction schedules
+  nothing). Sync failures are nonfatal and non-automatic: the index
+  stays detectably stale and converges via the next successful sync
+  or a rebuild — never add automatic retries or background daemons.
 
 ## Content identity, versioning, active-record invariants
 
@@ -335,8 +367,9 @@ Non-negotiable principles:
   search, Ask-with-citations. **5A.2 (delivered)**: persistent
   `SearchDocument` registry + FTS5 trigram table, reversible migration
   0008, atomic `search-index rebuild`, read-only `search-index status`.
-  **5A.3 (not implemented)**: incremental synchronization from the
-  authoritative source after pipeline changes. **5A.4+ (not
+  **5A.3 (delivered)**: incremental per-recording synchronization from
+  the authoritative source after committing changes
+  (`workflow/services/search_sync.py`). **5A.4+ (not
   implemented)**: query parsing, ranking, highlighting, `brain search`,
   web search — do not implement them as part of index maintenance.
 - **Step 6**: user-initiated topic splitting, section-level

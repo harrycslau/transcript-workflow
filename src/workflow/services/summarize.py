@@ -71,6 +71,7 @@ from workflow.services.langresolve import (  # noqa: F401 (re-exported)
     resolve_default_language,
     resolve_output_language,
 )
+from workflow.services.search_sync import schedule_recording_sync
 from workflow.services.transcription import next_ordinal, sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -1032,6 +1033,9 @@ def persist_summary(
         attempt.error_message = ""
         attempt.finished_at = now
         attempt.save()
+        # Step 5A.3: the new variant (+ materialized default-variant tags
+        # and possible title/default-language changes) syncs after commit.
+        schedule_recording_sync([rec.pk])
     return summary
 
 
@@ -1163,6 +1167,11 @@ def summarize_one(
             "language_observed", "language_observed_verified_by",
             "language_observed_verified_at",
         ])
+        # Step 5A.3: the detected source language changes the derived
+        # default output language (metadata title chain). Sync now — even
+        # if the later generation fails, this committed fact must reach
+        # the index.
+        schedule_recording_sync([recording.pk])
         # Re-resolve now that source is known
         output_language = resolve_output_language(transcript, target_language)
         if not output_language:
@@ -1304,6 +1313,9 @@ def summarize_one(
                 "language_observed", "language_observed_verified_by",
                 "language_observed_verified_at",
             ])
+            # Step 5A.3: this late committed write also changes the
+            # derived default; its own (cheap, idempotent) sync covers it.
+            schedule_recording_sync([recording.pk])
 
     return {
         "recording_id": recording.pk,
@@ -1423,6 +1435,11 @@ def set_transcript_language(
             output_language=new_default,
         )
         rec.refresh_from_db()
+
+        # Step 5A.3: the corrected source language changes the derived
+        # default output language (metadata title chain) for this
+        # recording's index documents.
+        schedule_recording_sync([rec.pk])
 
         return {
             "recording_id": rec.pk,

@@ -39,6 +39,7 @@ from workflow.models import (
     Transcript,
     TranscriptSegment,
 )
+from workflow.services.search_sync import schedule_recording_sync
 
 logger = logging.getLogger(__name__)
 
@@ -574,3 +575,6 @@ def _persist_transcript(
         attempt.outcome = AttemptOutcome.SUCCESS
         attempt.finished_at = now
         attempt.save()
+        # Step 5A.3: activate the new segment/summary/recording document
+        # set after this transaction commits (never on rollback).
+        schedule_recording_sync([recording.pk])

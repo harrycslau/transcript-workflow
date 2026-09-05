@@ -1,11 +1,15 @@
 """Keyword-search index foundation (Step 5A.2).
 
-Owns the relational ``SearchDocument`` registry and the unified
-contentful FTS5 table ``workflow_search_fts`` (rowid = SearchDocument.pk,
-tokenize='trigram'). NO query parsing, ranking, highlighting, web
-search, incremental synchronization (Step 5A.3) or embeddings (later)
-live here — only deterministic document construction, atomic rebuild,
-and complete read-only status/integrity comparison.
+ Owns the relational ``SearchDocument`` registry and the unified
+ contentful FTS5 table ``workflow_search_fts`` (rowid = SearchDocument.pk,
+ tokenize='trigram'). NO query parsing, ranking, highlighting, web
+ search or embeddings (later) live here — only deterministic document
+ construction, atomic rebuild, and complete read-only status/integrity
+ comparison. The Step 5A.3 post-commit per-recording synchronization
+ (``reconcile_recording`` / ``schedule_recording_sync``) lives in
+ ``workflow.services.search_sync`` and REUSES the canonical builders,
+ canonical-row validation and FTS DML helpers defined here; it never
+ re-implements the mapping.
 
 Canonical document set:
 
@@ -108,6 +112,13 @@ _FTS_UNAVAILABLE_ERROR = (
     "this Python SQLite build does not provide it"
 )
 _VERIFY_ERROR = "search index rebuild verification failed; the previous index was preserved"
+# Step 5A.3 synchronization DML errors (fixed, sanitized; the sync
+# callback never surfaces these — they exist so failures propagate as
+# stable exceptions the per-id isolation wrapper can swallow).
+_SYNC_INSERT_ERROR = "search index synchronization could not write the FTS table"
+_SYNC_UPDATE_ERROR = "search index synchronization could not update the FTS table"
+_SYNC_DELETE_ERROR = "search index synchronization could not delete stale FTS rows"
+_SYNC_READ_ERROR = "search index synchronization could not read the FTS table"
 _REGISTRY_SCHEMA_ERROR = (
     "search index registry schema is missing; apply pending migrations with: "
     "uv run python src/manage.py migrate"
@@ -284,6 +295,148 @@ def summary_aux_text(summary) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _expected_documents_for_rows(
+    recordings: Sequence[Recording],
+    *,
+    using: str = "default",
+    chunk_size: int = INSERT_CHUNK_SIZE,
+) -> Iterator[DocumentSpec]:
+    """Yield every expected ``DocumentSpec`` for the given Recording rows
+    in canonical order: segments by (transcript, ordinal), then the
+    Recording metadata docs, then Summary variants.
+
+    Bounded queries per call (transcripts, segments, summaries, sources,
+    tags — one query each), never per row; segments stream through an
+    iterator so a single recording with millions of segments never
+    materializes an unbounded list. This is THE single canonical mapping
+    used by the global sweep, per-recording synchronization (Step 5A.3)
+    and, byte-identically mirrored, migration 0008's backfill.
+    """
+    rec_ids = [rec.pk for rec in recordings]
+    if not rec_ids:
+        return
+
+    transcripts = list(
+        Transcript.objects.using(using)
+        .filter(recording__in=rec_ids, is_active=True)
+        .annotate(default_output=default_output_language_expression())
+        .values("id", "recording_id", "default_output")
+    )
+    transcript_id_by_rec: dict[str, str] = {}
+    default_language_by_rec: dict[str, str | None] = {}
+    for row in transcripts:
+        transcript_id_by_rec[row["recording_id"]] = row["id"]
+        default_language_by_rec[row["recording_id"]] = row["default_output"] or None
+
+    summaries_by_rec: dict[str, list[Summary]] = {}
+    for summary in (
+        Summary.objects.using(using)
+        .filter(
+            recording__in=rec_ids,
+            is_active=True,
+            transcript__is_active=True,
+            section__ordinal=0,
+        )
+        .order_by("recording_id", "ordinal")
+    ):
+        summaries_by_rec.setdefault(summary.recording_id, []).append(summary)
+
+    sources_by_rec: dict[str, list[AudioSource]] = {}
+    for source in AudioSource.objects.using(using).filter(recording__in=rec_ids):
+        sources_by_rec.setdefault(source.recording_id, []).append(source)
+
+    tags_by_rec: dict[str, list[TagAssignment]] = {}
+    assignments = (
+        TagAssignment.objects.using(using)
+        .filter(recording__in=rec_ids, is_active=True)
+        .select_related("tag")
+    )
+    for assignment in assignments:
+        tags_by_rec.setdefault(assignment.recording_id, []).append(assignment)
+
+    transcript_ids = list(transcript_id_by_rec.values())
+    rec_id_by_transcript = {tid: rid for rid, tid in transcript_id_by_rec.items()}
+    segments = (
+        TranscriptSegment.objects.using(using)
+        .filter(transcript__in=transcript_ids)
+        .order_by("transcript_id", "ordinal")
+        .iterator(chunk_size=chunk_size)
+    )
+    for segment in segments:
+        if not segment.text or not segment.text.strip():
+            continue  # eligibility uses strip(); stored text is NOT stripped
+        yield make_spec(
+            doc_type=SearchDocType.SEGMENT,
+            document_key=f"segment:{segment.transcript_id}:{segment.ordinal}",
+            recording_id=rec_id_by_transcript[segment.transcript_id],
+            transcript_id=segment.transcript_id,
+            segment_ordinal=segment.ordinal,
+            start_ms=segment.start_ms,
+            end_ms=segment.end_ms,
+            body_text=nfc(segment.text),
+            aux_text=nfc(segment.speaker),
+        )
+
+    for recording in recordings:
+        rec_sources = sources_by_rec.get(recording.pk, [])
+        default_title, any_title = summary_title_parts(
+            summaries_by_rec.get(recording.pk, []),
+            default_language_by_rec.get(recording.pk),
+        )
+        title = display_title_from_parts(
+            default_summary_title=default_title,
+            fallback_summary_title=any_title,
+            preferred_filename=preferred_source_filename(rec_sources),
+        )
+        yield make_spec(
+            doc_type=SearchDocType.RECORDING,
+            document_key=f"recording:{recording.pk}",
+            recording_id=recording.pk,
+            title_text=title,
+            body_text="\n".join(deterministic_source_filenames(rec_sources)),
+            aux_text="\n".join(active_tag_names(tags_by_rec.get(recording.pk, []))),
+        )
+
+    for summary in (s for rows in summaries_by_rec.values() for s in rows):
+        yield make_spec(
+            doc_type=SearchDocType.SUMMARY,
+            document_key=f"summary:{summary.pk}",
+            recording_id=summary.recording_id,
+            transcript_id=summary.transcript_id,
+            summary_id=summary.pk,
+            output_language=summary.output_language,
+            title_text=nfc(summary.title),
+            body_text=summary_body_text(summary),
+            aux_text=summary_aux_text(summary),
+        )
+
+
+def iter_expected_documents_for_recording_ids(
+    recording_ids: Sequence[str],
+    *,
+    using: str = "default",
+    chunk_size: int = INSERT_CHUNK_SIZE,
+) -> Iterator[list[DocumentSpec]]:
+    """Yield LISTS of at most ``chunk_size`` expected ``DocumentSpec``
+    rows for the given Recording pks (the Step 5A.3 per-recording
+    synchronization input). Deterministic order identical to the global
+    rebuild order restricted to these recordings; genuinely streaming.
+    """
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive")
+    rows = list(
+        Recording.objects.using(using).filter(pk__in=list(recording_ids)).order_by("pk")
+    )
+    buffer: list[DocumentSpec] = []
+    for spec in _expected_documents_for_rows(rows, using=using, chunk_size=chunk_size):
+        buffer.append(spec)
+        if len(buffer) >= chunk_size:
+            yield buffer
+            buffer = []
+    if buffer:
+        yield buffer
+
+
 def iter_expected_document_batches(
     *,
     using: str = "default",
@@ -317,115 +470,10 @@ def iter_expected_document_batches(
         if not recordings:
             break  # flush the final partial buffer below (never drop docs)
         last_pk = recordings[-1].pk
-        rec_ids = [rec.pk for rec in recordings]
-
-        transcripts = list(
-            Transcript.objects.using(using)
-            .filter(recording__in=rec_ids, is_active=True)
-            .annotate(default_output=default_output_language_expression())
-            .values("id", "recording_id", "default_output")
-        )
-        transcript_id_by_rec: dict[str, str] = {}
-        default_language_by_rec: dict[str, str | None] = {}
-        for row in transcripts:
-            transcript_id_by_rec[row["recording_id"]] = row["id"]
-            default_language_by_rec[row["recording_id"]] = row["default_output"] or None
-
-        summaries_by_rec: dict[str, list[Summary]] = {}
-        for summary in (
-            Summary.objects.using(using)
-            .filter(
-                recording__in=rec_ids,
-                is_active=True,
-                transcript__is_active=True,
-                section__ordinal=0,
-            )
-            .order_by("recording_id", "ordinal")
+        for spec in _expected_documents_for_rows(
+            recordings, using=using, chunk_size=chunk_size
         ):
-            summaries_by_rec.setdefault(summary.recording_id, []).append(summary)
-
-        sources_by_rec: dict[str, list[AudioSource]] = {}
-        for source in AudioSource.objects.using(using).filter(recording__in=rec_ids):
-            sources_by_rec.setdefault(source.recording_id, []).append(source)
-
-        tags_by_rec: dict[str, list[TagAssignment]] = {}
-        assignments = (
-            TagAssignment.objects.using(using)
-            .filter(recording__in=rec_ids, is_active=True)
-            .select_related("tag")
-        )
-        for assignment in assignments:
-            tags_by_rec.setdefault(assignment.recording_id, []).append(assignment)
-
-        transcript_ids = list(transcript_id_by_rec.values())
-        rec_id_by_transcript = {tid: rid for rid, tid in transcript_id_by_rec.items()}
-        segments = (
-            TranscriptSegment.objects.using(using)
-            .filter(transcript__in=transcript_ids)
-            .order_by("transcript_id", "ordinal")
-            .iterator(chunk_size=chunk_size)
-        )
-        for segment in segments:
-            if not segment.text or not segment.text.strip():
-                continue  # eligibility uses strip(); stored text is NOT stripped
-            buffer.append(
-                make_spec(
-                    doc_type=SearchDocType.SEGMENT,
-                    document_key=f"segment:{segment.transcript_id}:{segment.ordinal}",
-                    recording_id=rec_id_by_transcript[segment.transcript_id],
-                    transcript_id=segment.transcript_id,
-                    segment_ordinal=segment.ordinal,
-                    start_ms=segment.start_ms,
-                    end_ms=segment.end_ms,
-                    body_text=nfc(segment.text),
-                    aux_text=nfc(segment.speaker),
-                )
-            )
-            if len(buffer) >= chunk_size:
-                yield buffer
-                buffer = []
-
-        for recording in recordings:
-            rec_sources = sources_by_rec.get(recording.pk, [])
-            default_title, any_title = summary_title_parts(
-                summaries_by_rec.get(recording.pk, []),
-                default_language_by_rec.get(recording.pk),
-            )
-            title = display_title_from_parts(
-                default_summary_title=default_title,
-                fallback_summary_title=any_title,
-                preferred_filename=preferred_source_filename(rec_sources),
-            )
-            buffer.append(
-                make_spec(
-                    doc_type=SearchDocType.RECORDING,
-                    document_key=f"recording:{recording.pk}",
-                    recording_id=recording.pk,
-                    title_text=title,
-                    body_text="\n".join(deterministic_source_filenames(rec_sources)),
-                    aux_text="\n".join(
-                        active_tag_names(tags_by_rec.get(recording.pk, []))
-                    ),
-                )
-            )
-            if len(buffer) >= chunk_size:
-                yield buffer
-                buffer = []
-
-        for summary in (s for rows in summaries_by_rec.values() for s in rows):
-            buffer.append(
-                make_spec(
-                    doc_type=SearchDocType.SUMMARY,
-                    document_key=f"summary:{summary.pk}",
-                    recording_id=summary.recording_id,
-                    transcript_id=summary.transcript_id,
-                    summary_id=summary.pk,
-                    output_language=summary.output_language,
-                    title_text=nfc(summary.title),
-                    body_text=summary_body_text(summary),
-                    aux_text=summary_aux_text(summary),
-                )
-            )
+            buffer.append(spec)
             if len(buffer) >= chunk_size:
                 yield buffer
                 buffer = []
@@ -535,7 +583,7 @@ def _create_fts(cursor) -> None:
         raise SearchIndexError(_FTS_DDL_ERROR) from None
 
 
-def _insert_fts_batch(cursor, rows: list[tuple]) -> None:
+def _insert_fts_batch(cursor, rows: list[tuple], *, error: str = _VERIFY_ERROR) -> None:
     try:
         cursor.executemany(
             f"INSERT INTO {FTS_TABLE} (rowid, title_text, body_text, aux_text) "
@@ -543,7 +591,130 @@ def _insert_fts_batch(cursor, rows: list[tuple]) -> None:
             rows,
         )
     except Exception:
-        raise SearchIndexError(_VERIFY_ERROR) from None
+        raise SearchIndexError(error) from None
+
+
+def _update_fts_batch(cursor, rows: list[tuple], *, error: str = _SYNC_UPDATE_ERROR) -> None:
+    """UPDATE existing FTS rows by rowid. NEVER use for a missing row —
+    callers must INSERT when the FTS row does not exist."""
+    try:
+        cursor.executemany(
+            f"UPDATE {FTS_TABLE} SET title_text = %s, body_text = %s, aux_text = %s "
+            "WHERE rowid = %s",
+            [(title, body, aux, rowid) for rowid, title, body, aux in rows],
+        )
+    except Exception:
+        raise SearchIndexError(error) from None
+
+
+def _delete_fts_rows(cursor, rowids: list[int], *, error: str = _SYNC_DELETE_ERROR) -> None:
+    try:
+        placeholders = ", ".join(["%s"] * len(rowids))
+        cursor.execute(
+            f"DELETE FROM {FTS_TABLE} WHERE rowid IN ({placeholders})", list(rowids)
+        )
+    except Exception:
+        raise SearchIndexError(error) from None
+
+
+def _read_fts_rows(cursor, rowids: list[int], *, error: str = _SYNC_READ_ERROR) -> dict:
+    try:
+        placeholders = ", ".join(["%s"] * len(rowids))
+        cursor.execute(
+            f"SELECT rowid, title_text, body_text, aux_text FROM {FTS_TABLE} "
+            f"WHERE rowid IN ({placeholders})",
+            list(rowids),
+        )
+        return {row[0]: (row[1], row[2], row[3]) for row in cursor.fetchall()}
+    except Exception:
+        raise SearchIndexError(error) from None
+
+
+def document_from_spec(spec: DocumentSpec) -> SearchDocument:
+    """Build (unsaved) registry model fields from an expected spec —
+    the single construction contract shared by rebuild and the Step 5A.3
+    synchronization."""
+    return SearchDocument(
+        document_key=spec.document_key,
+        doc_type=spec.doc_type,
+        recording_id=spec.recording_id,
+        transcript_id=spec.transcript_id,
+        summary_id=spec.summary_id,
+        segment_ordinal=spec.segment_ordinal,
+        start_ms=spec.start_ms,
+        end_ms=spec.end_ms,
+        output_language=spec.output_language,
+        title_text=spec.title_text,
+        body_text=spec.body_text,
+        aux_text=spec.aux_text,
+        content_hash=spec.content_hash,
+        index_version=spec.index_version,
+    )
+
+
+# Mutable registry columns (everything except ``document_key`` — the
+# lookup identity — and ``created_at``, which records first insertion).
+REGISTRY_MUTABLE_FIELDS = (
+    "doc_type",
+    "recording",
+    "transcript",
+    "summary",
+    "segment_ordinal",
+    "start_ms",
+    "end_ms",
+    "output_language",
+    "title_text",
+    "body_text",
+    "aux_text",
+    "content_hash",
+    "index_version",
+)
+
+
+def registry_row_matches_spec(row: SearchDocument, spec: DocumentSpec) -> bool:
+    """FULL-field equality between a registry row and the expected spec.
+
+    The Step 5A.3 reconciler must NEVER trust ``content_hash`` alone: a
+    directly tampered field can still carry the old hash, so every
+    indexed/provenance field — type, key, provenance IDs, ordinal,
+    timestamps, output language, exact texts, hash and index version —
+    is compared."""
+    return (
+        str(row.doc_type) == str(spec.doc_type)
+        and row.document_key == spec.document_key
+        and row.recording_id == spec.recording_id
+        and row.transcript_id == spec.transcript_id
+        and row.summary_id == spec.summary_id
+        and row.segment_ordinal == spec.segment_ordinal
+        and row.start_ms == spec.start_ms
+        and row.end_ms == spec.end_ms
+        and row.output_language == spec.output_language
+        and row.title_text == spec.title_text
+        and row.body_text == spec.body_text
+        and row.aux_text == spec.aux_text
+        and row.content_hash == spec.content_hash
+        and row.index_version == spec.index_version
+    )
+
+
+def apply_spec_to_registry_row(row: SearchDocument, spec: DocumentSpec) -> None:
+    """Overwrite every mutable registry field from the expected spec and
+    save only those columns (``document_key`` matched by lookup and never
+    changes; ``created_at`` stays as first-inserted)."""
+    row.doc_type = spec.doc_type
+    row.recording_id = spec.recording_id
+    row.transcript_id = spec.transcript_id
+    row.summary_id = spec.summary_id
+    row.segment_ordinal = spec.segment_ordinal
+    row.start_ms = spec.start_ms
+    row.end_ms = spec.end_ms
+    row.output_language = spec.output_language
+    row.title_text = spec.title_text
+    row.body_text = spec.body_text
+    row.aux_text = spec.aux_text
+    row.content_hash = spec.content_hash
+    row.index_version = spec.index_version
+    row.save(update_fields=list(REGISTRY_MUTABLE_FIELDS))
 
 
 def _verify_rebuild(using: str, total: int) -> None:
@@ -653,25 +824,7 @@ def rebuild_index(*, using: str = "default", batch_size: int = DEFAULT_BATCH_SIZ
             cursor.execute(f"DELETE FROM {_registry_table()}")
         for specs in iter_expected_document_batches(using=using, batch_size=batch_size):
             for chunk in _chunks(specs, INSERT_CHUNK_SIZE):
-                documents = [
-                    SearchDocument(
-                        document_key=spec.document_key,
-                        doc_type=spec.doc_type,
-                        recording_id=spec.recording_id,
-                        transcript_id=spec.transcript_id,
-                        summary_id=spec.summary_id,
-                        segment_ordinal=spec.segment_ordinal,
-                        start_ms=spec.start_ms,
-                        end_ms=spec.end_ms,
-                        output_language=spec.output_language,
-                        title_text=spec.title_text,
-                        body_text=spec.body_text,
-                        aux_text=spec.aux_text,
-                        content_hash=spec.content_hash,
-                        index_version=spec.index_version,
-                    )
-                    for spec in chunk
-                ]
+                documents = [document_from_spec(spec) for spec in chunk]
                 created = SearchDocument.objects.using(using).bulk_create(documents)
                 with connection.cursor() as cursor:
                     _insert_fts_batch(
@@ -721,19 +874,27 @@ class _Tally:
 def _expected_registry_page_is_canonical(using: str, rows: list[SearchDocument]) -> set[int]:
     """Row ids (pks) of the registry page that map to an EXPECTED
     document, decided from the authoritative source with bounded queries
-    (one per provenance family per page — never per row):
+    (one per provenance family per page — never per row). SHARED by the
+    status orphan sweep and the Step 5A.3 reconcile delete phase: a row
+    only counts as canonical when its provenance AGREES with the live
+    data at every level — foreign/mismatched provenance is never kept:
 
     - ``recording``: key matches ``recording:<own recording id>`` (the
       metadata doc is always generated for every Recording);
+    - ``segment``: the segment exists on an ACTIVE Transcript, its text
+      is non-empty (``strip()`` eligibility), AND that transcript
+      belongs to the DOCUMENT's recording (cross-recording forgeries are
+      orphans, not expected rows);
     - ``summary``: the Summary is active, on the active Transcript, in
-      the ordinal-0 section;
-    - ``segment``: the segment exists on an ACTIVE Transcript and its
-      text is non-empty (``strip()`` eligibility).
+      the ordinal-0 section, AND its recording, transcript and
+      output_language all equal the document's own values.
     """
     expected_ids: set[int] = set()
+    rows_by_pk: dict[int, SearchDocument] = {}
     segment_candidates: dict[int, tuple[int, int]] = {}  # pk -> (transcript, ordinal)
     summary_candidates: dict[int, int] = {}  # pk -> summary_id
     for row in rows:
+        rows_by_pk[row.pk] = row
         if row.doc_type == SearchDocType.SEGMENT:
             if (
                 row.transcript_id is not None
@@ -755,20 +916,22 @@ def _expected_registry_page_is_canonical(using: str, rows: list[SearchDocument])
         pair_query = Q()
         for transcript_id, ordinal in sorted(set(segment_candidates.values())):
             pair_query |= Q(transcript_id=transcript_id, ordinal=ordinal)
-        live_pairs = set()
-        for transcript_id, ordinal, text in (
+        # pair -> the recording its (active) transcript belongs to
+        live_pair_recording: dict[tuple[int, int], str] = {}
+        for transcript_id, ordinal, text, transcript_recording_id in (
             TranscriptSegment.objects.using(using)
             .filter(pair_query, transcript__is_active=True)
-            .values_list("transcript_id", "ordinal", "text")
+            .values_list("transcript_id", "ordinal", "text", "transcript__recording_id")
         ):
             if text and text.strip():
-                live_pairs.add((transcript_id, ordinal))
+                live_pair_recording[(transcript_id, ordinal)] = transcript_recording_id
         for pk, pair in segment_candidates.items():
-            if pair in live_pairs:
+            if live_pair_recording.get(pair) == rows_by_pk[pk].recording_id:
                 expected_ids.add(pk)
 
     if summary_candidates:
-        expected_summary_ids = set(
+        eligible: dict[int, tuple] = {}
+        for pk, recording_id, transcript_id, output_language in (
             Summary.objects.using(using)
             .filter(
                 pk__in=list(set(summary_candidates.values())),
@@ -776,10 +939,18 @@ def _expected_registry_page_is_canonical(using: str, rows: list[SearchDocument])
                 transcript__is_active=True,
                 section__ordinal=0,
             )
-            .values_list("pk", flat=True)
-        )
+            .values_list("pk", "recording_id", "transcript_id", "output_language")
+        ):
+            eligible[pk] = (recording_id, transcript_id, output_language)
         for pk, summary_id in summary_candidates.items():
-            if summary_id in expected_summary_ids:
+            match = eligible.get(summary_id)
+            row = rows_by_pk[pk]
+            if (
+                match is not None
+                and match[0] == row.recording_id
+                and match[1] == row.transcript_id
+                and match[2] == row.output_language
+            ):
                 expected_ids.add(pk)
     return expected_ids
 

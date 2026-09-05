@@ -21,6 +21,7 @@ from django.utils import timezone
 
 from brainlib.config import AppConfig, tag_name_key
 from workflow.models import Tag, TagAssignment, TagDeactivatedBy, TagOrigin
+from workflow.services.search_sync import schedule_recording_sync
 
 
 def sync_tags(config: AppConfig) -> dict[str, int]:
@@ -167,6 +168,8 @@ def add_manual_tag(recording, tag: Tag, *, include_retired: bool = False) -> dic
         assignment.save()
         promoted = True
     # else: already manual or confirmed and active -> idempotent no-op.
+    # Step 5A.3: effective tag names are indexed aux text (metadata doc).
+    schedule_recording_sync([recording.pk])
     return {
         "assignment": assignment,
         "created": created,
@@ -214,4 +217,7 @@ def remove_tag(recording, tag: Tag) -> dict:
     assignment.deactivated_at = timezone.now()
     assignment.deactivated_by = TagDeactivatedBy.USER
     assignment.save()
+    # Step 5A.3: deactivation drops the tag name from the metadata doc's
+    # indexed aux text.
+    schedule_recording_sync([recording.pk])
     return {"removed": True, "assignment": assignment}

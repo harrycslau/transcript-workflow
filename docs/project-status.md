@@ -1,10 +1,100 @@
-# Project status — implementation handoff (Step 5A.2 delivered)
+# Project status — implementation handoff (Step 5A.3 delivered)
 
-This file reflects the repository through Step 5A.2: Step 4, the
+This file reflects the repository through Step 5A.3: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
-corrective round, the production Library UI (Step 5A.1) and the search
-index foundation (Step 5A.2). It is a snapshot, not a durable
-instruction file; `AGENTS.md` holds the standing rules.
+corrective round, the production Library UI (Step 5A.1), the search
+index foundation (Step 5A.2) and incremental index synchronization
+(Step 5A.3). It is a snapshot, not a durable instruction file;
+`AGENTS.md` holds the standing rules.
+
+## Step 5A.3 — Incremental Search Index Synchronization (delivered)
+
+- **Service** `workflow/services/search_sync.py` — the ONLY incremental
+  writer, with exactly two entry points:
+  `schedule_recording_sync(ids)` (the only trigger; called INSIDE
+  mutating services' transactions, runs via `transaction.on_commit` —
+  immediate under autocommit, NEVER on GET; ids deduplicated per call)
+  and `reconcile_recording(recording_id)` (the one per-recording
+  writer; idempotent; returns counts only: inserted / updated /
+  fts_repaired / deleted / skipped / recording_missing).
+- `reconcile_recording` derives truth FROM THE DATABASE inside ONE
+  transaction using the SHARED 5A.2 builders
+  (`iter_expected_documents_for_recording_ids` — the same
+  `_expected_documents_for_rows` mapping as the global sweep, never a
+  forked mapping) — never trusting caller declarations. Phase 1 deletes
+  every non-canonical registry row of that recording (and its FTS row,
+  FTS-first) using the SHARED canonical-row validation, which this
+  round strengthened: segment rows must match the ACTIVE transcript's
+  OWN recording, summary rows must agree on recording, transcript AND
+  output_language — cross-recording / mismatched-provenance forgeries
+  are rejected (and reported `orphan_document`) by status and the
+  reconciler alike. Phase 2 upserts expected docs with a FULL-field
+  comparison (all registry fields + the exact FTS text read back;
+  `content_hash` alone is NEVER trusted — a tampered field carrying the
+  old hash is still repaired, proven for `index_version`, provenance
+  and title tampering).
+- **Explicit FTS row states** (never ambiguous): registry+FTS correct
+  ⇒ skip; text differs ⇒ UPDATE the existing rowid; FTS row MISSING ⇒
+  INSERT with the EXISTING registry pk as rowid (proven by spying that
+  the missing row goes through INSERT statements only, never UPDATE);
+  registry row missing ⇒ create it, then INSERT its FTS row.
+- **Self-healing boundary (proven by two distinct tests)**: reconcile
+  repairs everything attributable to the recording, but an FTS row
+  whose registry row is gone (direct registry deletion, or an
+  authoritative `Summary` delete whose FK CASCADE removed the registry
+  row) has NO attribution from FTS alone — it is NEVER removed per
+  recording; both scenarios converge to healthy only via
+  `brain search-index rebuild` (the authoritative repair), with
+  `orphan_fts_row` detecting them meanwhile.
+- **Hook coverage** (`schedule_recording_sync` at every authoritative
+  commit that changes indexed content): `transcription._persist_transcript`;
+  `summarize.persist_summary`, the Explicit-Original DETECTION save, the
+  late post-persistence source-language save, and
+  `set_transcript_language`; `pipeline._apply_outcome`, `manual_route`,
+  `confirm_routing`, `_mark_source_missing`,
+  `_recalculate_recording_sources` and the DIRECT canonical-promotion
+  branch of `validate_source_for_processing`; `tags.add_manual_tag` and
+  `remove_tag` (NOT `confirm_suggestion` — an origin-only change does
+  not affect indexed content); `ingest._attach_hashed_source`,
+  `_detach_for_rehash` and the reappear branch of `ingest()`.
+  Rolled-back transactions produce no sync (proven with
+  `set_rollback(True)`). Rollback contract proven end-to-end: the
+  early detection save syncs the metadata title chain even when the
+  later generation attempt fails (seeded en + zh-Hant variants;
+  detection `yue` flips the derived default; generation failure leaves
+  the index healthy).
+- **Failure contract (proven)**: reconcile failures roll back their own
+  transaction completely (no half-written registry/FTS pair); a sync
+  failure NEVER escapes into the CLI or web request flow (proven via
+  CLI exit code 0 with sync failing, and web tag POST 302 with sync
+  failing); recordings inside one callback fail INDEPENDENTLY; the ONLY
+  log is one fixed aggregate warning per callback:
+  `search index post-commit sync failed category=search_index_sync_failed count=%d`
+  — a count and nothing else (no ids, exception text, paths, SQL or
+  indexed content; proven by matching the exact captured log line).
+  `search-index status` remains the detection mechanism and `rebuild`
+  the repair; the index stays detectably stale and converges on the
+  next successful sync (proven; no automatic-retry pretending — each
+  commit gets its own sync, deliberately never coalesced across
+  commits).
+- **Concurrency truth, no magic**: pipeline/web-action commits happen
+  under the flock so their hooks run locked; web tag edits have NO
+  flock and rely on SQLite writer serialization — a concurrent unlocked
+  tag race is proven to converge (final reconcile after logged,
+  swallowed busy failures). `reconcile_recording` never registers a
+  sync (no recursion) and never takes the pipeline lock.
+- **Bounded**: per-recording streaming reuses the 5A.2 chunk bound (one
+  recording with 1200 segments syncs in ≤ 100-row pages, proven by
+  spying INSERT batch sizes); per-recording spec sets equal the rebuild
+  sweep's (parity test).
+- **Verification**: full suite **1169 passed** (+37 over the 1132
+  baseline: 33 in `tests/test_search_index_sync.py`, 4 web tests in
+  `tests/test_web_tags.py` — including GET-purity guards that patch the
+  bound `schedule_recording_sync` in every hooked service),
+  `manage.py check`, `makemigrations --check` clean (NO new migration —
+  5A.3 changes no schema), `git diff --check` clean. No real audio,
+  network, MacWhisper or oMLX; `config/config.yaml` and the real
+  `data/` untouched.
 
 ## Step 5A.2 — Search Index Foundation (delivered, review-corrected)
 
@@ -137,10 +227,11 @@ instruction file; `AGENTS.md` holds the standing rules.
   healthy report; proven with forged pks/rowids at `-1`/`0` and
   forced multi-page traversal); this section rewritten against the
   actual code.
-- **Deliberately NOT implemented**: incremental synchronization
-  (Step 5A.3), query parsing/ranking/highlighting/`brain search <query>`
-  (Step 5A.4), web search UI, embeddings. The Library search field
-  remains the disabled placeholder.
+- **Deliberately NOT implemented** (as of 5A.2): query
+  parsing/ranking/highlighting/`brain search <query>` (Step 5A.4), web
+  search UI, embeddings. The Library search field remains the disabled
+  placeholder. Incremental synchronization arrived with Step 5A.3 (see
+  the section above).
 
 ## Step 5A.1 — Production Library UI (delivered)
 
@@ -739,11 +830,10 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current: **1132 tests passing** (Step 5A.2 Search Index Foundation
-  incl. the review corrections: +72 over the 1060 baseline); earlier
-  snapshots recorded 495 (Step 3), 985/992 (Step 4 + multilingual
-  corrective), 1056 (Step 5A.1 first pass) and 1059 (Step 5A.1 final
-  corrective pass). No real MacWhisper,
+- Current: **1169 tests passing** (Step 5A.3 incremental index
+  synchronization: +37 over the 1132 baseline); earlier snapshots
+  recorded 495 (Step 3), 985/992 (Step 4 + multilingual corrective),
+  1056/1059 (Step 5A.1), 1132 (Step 5A.2 incl. review corrections). No real MacWhisper,
   oMLX, network, ffmpeg, or user audio; "must not happen" mocks raise.
 - Verified: `manage.py check`, `makemigrations --check`, fresh-process
   CLI config errors (no traceback), stage-aware cross-stage recovery,
@@ -763,25 +853,30 @@ Production Library UI are delivered.
 - `audioop` deprecation (Python 3.13 removal; revisit before upgrade).
 - Parked recordings (missing/out-of-inbox sources) wait for the next
   ingest/run; no proactive notification.
-- **No search interface yet**: the FTS5 **index foundation** exists
-  (Step 5A.2: registry, trigram table, migration, rebuild/status CLI)
-  but querying is not implemented — the Library search field remains a
-  disabled placeholder; incremental sync is 5A.3, ranking/query 5A.4,
-  embeddings and Ask-with-citations later.
+- **No search interface yet**: the FTS5 index exists AND is kept fresh
+  incrementally (Steps 5A.2 + 5A.3: registry, trigram table, migration,
+  rebuild/status CLI, per-recording after-commit synchronization) but
+  querying is not implemented — the Library search field remains a
+  disabled placeholder; ranking/query is 5A.4, embeddings and
+  Ask-with-citations later. Index staleness after abnormal process
+  death between commit and callback is only repaired by
+  `search-index status` detection + rebuild (the sync contract never
+  promises an out-of-band watchdog).
 
 ## Step 3–6 roadmap (agreed)
 
 - **Step 4 — delivered**: full web interface, review queue,
   transcript/summary views, tag editing/filtering, manual routing
   controls.
-- **Step 5 — in progress**: Step 5A.1 Production Library UI and
-  **Step 5A.2 Search Index Foundation are delivered** (registry +
-  FTS5 trigram table, reversible migration 0008, atomic
-  `brain search-index rebuild`, read-only `brain search-index status`).
-  The next planned unit is **Step 5A.3 incremental index
-  synchronization**; then 5A.4 keyword querying (`brain search`,
-  Library/web search). Local embeddings, semantic/hybrid search and
-  Ask-with-citations remain later Step 5 work.
+- **Step 5 — in progress**: Step 5A.1 Production Library UI, Step 5A.2
+  Search Index Foundation and **Step 5A.3 Incremental Index
+  Synchronization are delivered** (registry + FTS5 trigram table,
+  reversible migration 0008, atomic `brain search-index rebuild`,
+  read-only `brain search-index status`, per-recording after-commit
+  sync via `workflow/services/search_sync.py` hooks). The next planned
+  unit is **Step 5A.4 keyword querying** (`brain search`, Library/web
+  search, ranking, highlighting). Local embeddings, semantic/hybrid
+  search and Ask-with-citations remain later Step 5 work.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation

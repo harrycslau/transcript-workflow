@@ -31,6 +31,7 @@ from workflow.models import (
     ProcessingStatus,
     Recording,
 )
+from workflow.services.search_sync import schedule_recording_sync
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +209,9 @@ def _detach_for_rehash(source: AudioSource, note: str) -> None:
             _record_audio_status(recording)
             _ensure_canonical(recording)
             recording.save()
+            # Step 5A.3: the detached filename leaves the old Recording's
+            # metadata document (body and fallback title).
+            schedule_recording_sync([recording.pk])
 
 
 def source_content_matches(recording: Recording, source: AudioSource) -> bool:
@@ -263,6 +267,9 @@ def _attach_hashed_source(source: AudioSource, sha256: str, config: AppConfig, r
         _ensure_canonical(recording)
         _record_audio_status(recording)
         recording.save()
+        # Step 5A.3: new Recording document (first attach) or added
+        # filename/duplicate source on an existing Recording.
+        schedule_recording_sync([recording.pk])
     if duplicate:
         report.duplicates.append(source.path)
     else:
@@ -353,6 +360,9 @@ def ingest(config: AppConfig, now=None) -> IngestReport:
                     _record_audio_status(recording)
                     _ensure_canonical(recording)
                     recording.save()
+                    # Step 5A.3: a reappeared source can be promoted to
+                    # canonical — the metadata document must follow.
+                    schedule_recording_sync([recording.pk])
             report.reconciled_present.append(source.path)
 
     for identity in discover_audio_files(inbox):

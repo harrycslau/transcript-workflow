@@ -32,6 +32,7 @@ from workflow.services import ingest as ingest_service
 from workflow.services import routing as routing_service
 from workflow.services import transcription as transcription_service
 from workflow.services.pipeline_lock import PipelineBusy, pipeline_lock
+from workflow.services.search_sync import schedule_recording_sync
 from workflow.services.statemachine import record_failure, transition
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,9 @@ def _apply_outcome(config: AppConfig, recording: Recording, outcome: routing_ser
         else:
             transition(recording, ProcessingStatus.NEEDS_REVIEW)
         recording.save()
+        # Step 5A.3: the new active decision can change the derived
+        # default output language (metadata title chain).
+        schedule_recording_sync([recording.pk])
     return {"decision_id": decision.pk, "status": recording.processing_status}
 
 
@@ -296,6 +300,9 @@ def _mark_source_missing(source: AudioSource) -> None:
         _record_audio_status(recording)
         _ensure_canonical(recording)
         recording.save()
+        # Step 5A.3: canonical/source recalculation can change the
+        # metadata document (filename fallback title + body).
+        schedule_recording_sync([recording.pk])
 
 
 def _recalculate_recording_sources(recording: Recording) -> None:
@@ -306,6 +313,8 @@ def _recalculate_recording_sources(recording: Recording) -> None:
         _record_audio_status(recording)
         _ensure_canonical(recording)
         recording.save()
+        # Step 5A.3: recanonicalization can change the metadata document.
+        schedule_recording_sync([recording.pk])
 
 
 def validate_source_for_processing(config: AppConfig, recording: Recording) -> tuple[AudioSource | None, str]:
@@ -378,6 +387,11 @@ def validate_source_for_processing(config: AppConfig, recording: Recording) -> t
                     other.save(update_fields=["is_canonical"])
                 source.is_canonical = True
                 source.save(update_fields=["is_canonical"])
+                # Step 5A.3: DIRECT canonical promotion (this path does
+                # not always go through _ensure_canonical): the
+                # filename-fallback metadata title/body must follow after
+                # this transaction commits.
+                schedule_recording_sync([recording.pk])
         return source, SOURCE_VALID
 
     _recalculate_recording_sources(recording)
@@ -519,6 +533,10 @@ def manual_route(recording: Recording, profile_name: str, confirmed_by: str = "c
                 f"cannot route a recording in status '{recording.processing_status}'"
             )
         active_decision = RoutingDecision.objects.filter(recording=recording, is_active=True).first()
+        # Step 5A.3: every successful path here may change the active
+        # decision (default-language resolution → metadata title); a
+        # rollback discards the callback.
+        schedule_recording_sync([recording.pk])
 
         if active_decision is not None and active_decision.profile_name == profile_name:
             # Same profile: idempotent — verify the active decision in
@@ -583,6 +601,9 @@ def confirm_routing(recording: Recording, confirmed_by: str = "cli") -> dict:
         decision.verified_at = timezone.now()
         decision.verified_by = confirmed_by
         decision.save()
+        # Step 5A.3: verification alone can flip the resolved default
+        # language (metadata title chain).
+        schedule_recording_sync([recording.pk])
     return {"recording_id": recording.pk, "decision_id": decision.pk, "verified": True}
 
 
