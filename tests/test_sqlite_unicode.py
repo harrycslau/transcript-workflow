@@ -237,3 +237,132 @@ def test_collation_orders_database_side():
 
     _adjacent_pk_ordered("row-2", "row-3")
     _adjacent_pk_ordered("row-4", "row-5")
+
+# ---------------------------------------------------------------------------
+# brain_fold (Step 5A.4.1): fold contract, isolation, failure semantics
+# ---------------------------------------------------------------------------
+
+
+def test_fold_text_contract():
+    assert sqlite_unicode.fold_text("Äiti") == "äiti"
+    assert sqlite_unicode.fold_text("A\u0308iti") == "äiti"  # NFC composes
+    assert sqlite_unicode.fold_text(None) == ""
+    assert sqlite_unicode.fold_text("") == ""
+    # position-preserving for the practical scripts (no case expansion)
+    assert len(sqlite_unicode.fold_text("KÄYTTÖ 中文")) == len("KÄYTTÖ 中文")
+
+
+def test_brain_fold_available_in_sql_and_matches_python_contract():
+    ensure_registered()  # opens the connection; the signal registers both
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT brain_fold(%s) = brain_fold(%s), brain_fold(%s)",
+            ("Äiti", "äiti", "ÄITI"),
+        )
+        equal, folded = cursor.fetchone()
+    assert equal == 1
+    assert folded == sqlite_unicode.fold_text("ÄITI") == "äiti"
+
+
+def test_fold_registration_failure_cannot_break_the_collation():
+    """_register swallows a brain_fold failure: the collation still
+    registers, unrelated ORM/page work is unaffected, nothing raises."""
+    import sqlite3
+
+    raw = sqlite3.connect(":memory:")
+
+    class Inner:
+        def create_collation(self, name, func):
+            raw.create_collation(name, func)
+
+        def create_function(self, *args, **kwargs):
+            raise RuntimeError("boom-secret-sentinel create_function")
+
+    class FakeConn:
+        vendor = "sqlite"
+        connection = Inner()
+
+    sqlite_unicode._register(FakeConn())  # must NOT raise
+
+    with raw:
+        cursor = raw.execute("SELECT 'B' = 'b' COLLATE unicode_fold")
+        assert cursor.fetchone()[0] == 1
+        try:
+            raw.execute("SELECT brain_fold('X')")
+        except sqlite3.OperationalError:
+            pass  # the function is simply absent; surfaced only at use
+        else:
+            raise AssertionError("brain_fold must not exist after failed registration")
+    raw.close()
+
+
+def test_ensure_fold_function_fails_stably_and_sanitize(monkeypatch):
+    class Inner:
+        def create_collation(self, name, func):
+            return None
+
+        def create_function(self, *args, **kwargs):
+            raise RuntimeError("secret /Users/x/path boom")
+
+    class FakeConn:
+        vendor = "sqlite"
+        connection = Inner()
+
+        def ensure_connection(self):
+            return None
+
+    class FakeHandler:
+        def __getitem__(self, using):
+            assert using == "default"
+            return FakeConn()
+
+    monkeypatch.setattr(sqlite_unicode, "connections", FakeHandler())
+    with pytest.raises(RuntimeError) as exc_info:
+        sqlite_unicode.ensure_fold_function()
+    assert str(exc_info.value) == sqlite_unicode._FOLD_UNAVAILABLE_MESSAGE
+    assert "secret" not in str(exc_info.value)
+
+
+def test_ensure_fold_function_keeps_collation_failure_message(monkeypatch):
+    """A collation failure surfaced through ``ensure_connection`` (the
+    signal path) keeps its OWN stable message — never relabeled as a
+    fold failure."""
+    from django.db.backends.signals import connection_created
+
+    class Inner:
+        def create_collation(self, name, func):
+            raise RuntimeError("collation secret boom")
+
+        def create_function(self, *args, **kwargs):
+            return None
+
+    class FakeConn:
+        vendor = "sqlite"
+        connection = Inner()
+
+        def ensure_connection(self):
+            connection_created.send(sender=type(self), connection=self)
+
+    class FakeHandler:
+        def __getitem__(self, using):
+            return FakeConn()
+
+    monkeypatch.setattr(sqlite_unicode, "connections", FakeHandler())
+    with pytest.raises(RuntimeError) as exc_info:
+        sqlite_unicode.ensure_fold_function()
+    assert str(exc_info.value) == sqlite_unicode._UNAVAILABLE_MESSAGE
+
+
+def test_fold_function_idempotent_and_survives_reconnect():
+    from django.db import connection
+
+    connection.close()
+    sqlite_unicode.ensure_fold_function()  # first connection in the process
+    sqlite_unicode.ensure_fold_function()  # idempotent
+    connection.close()
+    sqlite_unicode.ensure_fold_function()  # new raw connection re-registers
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT brain_fold('ÄITI')")
+        assert cursor.fetchone()[0] == "äiti"

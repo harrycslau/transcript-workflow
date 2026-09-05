@@ -24,7 +24,8 @@ Steps 1–4 are implemented. The app can:
 - browse recordings, transcripts, summaries, history, tags, and the
   review queue in a local web interface
 
-Keyword/semantic search is planned for Step 5. Manual topic splitting,
+Keyword search is available on the CLI (`brain search`); a search UI and
+semantic search are planned for the rest of Step 5. Manual topic splitting,
 scheduling, and retention deletion are planned for Step 6. **The app does
 not currently delete, move, or modify audio files.**
 
@@ -177,9 +178,52 @@ source filenames, active tags — never paths or secrets).
   complete verification → commit). Any failure rolls back and leaves
   the previous index byte-identical; a missing / wrong-schema /
   wrong-tokenizer FTS table is repaired by a rebuild.
-- Keeping the index current after data changes is Step 5A.3; query
-  parsing/ranking (`brain search <query>`) is Step 5A.4. The Library
-  search field stays disabled until then.
+- The index is kept current automatically (Step 5A.3 post-commit
+  per-recording synchronization) and is queried read-only by
+  `brain search` (Step 5A.4.1, below). The Library search field stays
+  disabled until the Step 5A.4.2 web search.
+
+### Keyword search (Step 5A.4.1)
+
+```sh
+uv run brain search "budget meeting"              # AND-combined keywords
+uv run brain search "budget" --limit 20 --json
+```
+
+- Plain-text queries only: the input is NFC-normalized and split into
+  whitespace-separated terms combined with AND. Quotes, `%`, `_`, `\`
+  and FTS operator syntax are literal user text, never executed as
+  raw FTS MATCH syntax. Matching is case-insensitive via Unicode
+  folding; diacritics are NOT folded (`a` is not `ä`). Terms of 1–2
+  codepoints (which the trigram tokenizer cannot match at all — short
+  CJK included) use an escaped Unicode-aware `LIKE` fallback; longer
+  terms use safely quoted FTS phrases.
+- Strictly read-only: searching never locks and never rebuilds,
+  repairs or synchronizes anything. It first runs the full read-only
+  integrity check EXACTLY once; a missing, broken or stale index is a
+  clean exit 1 pointing at `brain search-index rebuild` — never
+  partially-served stale results. The reusable query engine itself is
+  separate from that gate, so the Step 5A.4.2 web search can later
+  apply a safe cached-health policy without touching the engine.
+- Results are deduplicated to ONE entry per Recording with
+  deterministic, rebuild-stable ranking. Candidate selection is
+  bounded globally and per Recording; the per-Recording bound keeps
+  Summary/metadata candidates before segment floods, and ANY overflow
+  of either bound sets `truncated` (your ranking is then a best-of-
+  bounded-prefix approximation for the affected Recording, never a
+  silent lie). `more_recordings_matched` is exact unless the global
+  bound actually cut the fetch, in which case it is null. Snippets
+  are plain text with structured highlight offsets (no HTML): the
+  window is hard-capped around the FIRST individual match — repeated
+  or tiling matches can never blow it past the cap; a match crossing
+  the window edge is clipped but stays highlighted, and highlights
+  cover whole source characters even when a match ends partway
+  through a casefold expansion like `ﬃ` or `ß`.
+  Each result records WHERE the best match came from: Recording
+  metadata, a Summary language variant (`--json` shows
+  `output_language`) or a transcript segment (with timestamp).
+- Exit codes: **0** searched (also with zero results), **1** config or
+  missing/broken/stale index, **2** malformed query or bad `--limit`.
 
 ### Routing profiles and the routing policy
 
@@ -346,9 +390,9 @@ uv run brain serve --host 127.0.0.1 --port 9000
   Oldest, Title A–Z, Title Z–A) and month headings for chronological
   sorts. Card/Table preference is remembered via a server-owned
   `view=`-overridable cookie; everything works without JavaScript.
-  Keyword search is coming in a later Step 5 substep (the FTS5 index
-  foundation and `brain search-index` exist; the search field stays a
-  disabled placeholder until queries are wired).
+  Keyword search exists on the CLI (`brain search`, Step 5A.4.1); the
+  Library search field stays a disabled placeholder until the Step
+  5A.4.2 web search wires it.
 - `GET /status/` — the status page (app version, storage availability,
   MacWhisper/oMLX configuration, selected models, pipeline counts).
   Page loads run only lightweight local checks; they never launch
@@ -375,9 +419,12 @@ network access, or real audio.
 
 ## Current limitations
 
-- No keyword or semantic search UI yet (Step 5A.2 delivered only the
-  persistent FTS5 index foundation; querying and incremental
-  synchronization are later Step 5 substeps).
+- No search UI yet: `brain search` (Step 5A.4.1) is CLI-only, and the
+  Library search field is still a disabled placeholder (the web UI is
+  Step 5A.4.2). Semantic search/hybrid ranking and Ask-with-citations
+  remain later Step 5 work. Keyword matching is substring-style (FTS5
+  trigrams + a Unicode-folded LIKE fallback for 1–2-codepoint terms),
+  not stemmed or word-tokenized.
 - No manual topic splitting, scheduling, or retention deletion yet
   (Step 6).
 - Automatic Cantonese-vs-Mandarin routing is heuristic and unverified —

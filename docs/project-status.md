@@ -1,11 +1,160 @@
-# Project status — implementation handoff (Step 5A.3 delivered)
+# Project status — implementation handoff (Step 5A.4.1 delivered)
 
-This file reflects the repository through Step 5A.3: Step 4, the
+This file reflects the repository through Step 5A.4.1: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
-index foundation (Step 5A.2) and incremental index synchronization
-(Step 5A.3). It is a snapshot, not a durable instruction file;
+index foundation (Step 5A.2), incremental index synchronization
+(Step 5A.3) and the read-only keyword search backend + CLI
+(Step 5A.4.1). It is a snapshot, not a durable instruction file;
 `AGENTS.md` holds the standing rules.
+
+## Step 5A.4.1 — Keyword Search Backend + CLI (delivered)
+
+- **Service** `workflow/services/search_query.py` — a strictly
+  READ-ONLY query engine over the 5A.2/5A.3 index: SELECTs only, never
+  takes the pipeline lock, never rebuilds, repairs, synchronizes or
+  writes (proven: forbidden lock/rebuild/sync patches, a
+  CaptureQueriesContext that only ever sees SELECT/PRAGMA, and an
+  unchanged `build_status_report` after searches). No schema change —
+  all queries read the existing registry + `workflow_search_fts`.
+- **Two explicit health layers** (so 5A.4.2 can later plug a safe
+  cached-health policy into interactive web search without touching
+  the engine):
+  - `preflight_full_health()` runs the FULL read-only
+    `build_status_report()` EXACTLY once; ANY unhealthy category
+    hard-fails (no results) with a stable message naming the stable
+    categories (registry / `fts_missing` / `fts_broken:<sub>` /
+    stale list) plus `search-index status` / `rebuild` — never query
+    text, indexed content, keys, paths or SQL. `brain search` calls it
+    once; test-proven call-count 1.
+  - `search_recordings()` NEVER runs the sweep (test patches
+    `build_status_report` to raise and the engine still answers); it
+    only STRUCTURALLY checks queryability (registry table, FTS
+    schema/tokenizer via the 5A.2 inspector, SQLite window-function
+    support) and maps query-time SQL failures to fixed sanitized
+    errors. It therefore serves stale indexes by design — honesty is
+    the caller-policy layer's job.
+- **Plain-text query contract** (raw MATCH syntax is never reachable):
+  NFC + outer strip, split into whitespace-separated LITERAL terms
+  combined with AND at document level; `"`, `%`, `_`, `\`, `*`, `AND`,
+  `NEAR(...)` are user text (3+ codepoints → ONE quoted FTS phrase per
+  term with `"` doubled; 1–2 codepoints — impossible for the trigram
+  tokenizer, short CJK included — → escaped Unicode-aware LIKE with
+  `ESCAPE '\'` after `\`/`%`/`_` escaping; mixed short/long queries
+  AND both predicate kinds). Unicode folding is ONE contract:
+  `sqlite_unicode.fold_text` (NFC + per-codepoint casefold) is both
+  the Python ranking/snippet fold and the `brain_fold` SQL function,
+  so selection and highlight offsets can never disagree on Unicode
+  semantics. Documented asymmetry: the trigram tokenizer is
+  case-insensitive but does not fold diacritics
+  (`kaytossa` ≠ `käytössä`), and its case folding differs from
+  `fold_text` only on rare case-expansion pairs.
+- **Deterministic bounded selection** (never FTS rowid, never natural
+  order): a registry JOIN ranks candidates with `ROW_NUMBER() OVER
+  (PARTITION BY recording_id ORDER BY <doc-type priority
+  summary<recording<segment>, document_key)` — the per-recording bound
+  therefore can NEVER evict the higher-priority Summary/metadata
+  candidate a segment flood would otherwise push out by document-key
+  order (regression-proven), and a global + PER-RECORDING bound keeps
+  floods from starving other recordings (both proven against corpora
+  larger than the caps). `truncated` is TRUE for ANY overflow of
+  EITHER bound — detected from exact `COUNT(*) OVER ()` /
+  `COUNT(*) OVER (PARTITION BY recording_id)` window counts, never
+  inferred from kept-row counts. Guarantee under `truncated=true`: the
+  matched-Recording set and per-Recording ranking stay exact while the
+  global fetch was not cut; a per-recording-trimmed Recording's best
+  document is the best of its bounded priority prefix, and if the
+  global fetch WAS cut whole Recordings may be missing.
+  `more_recordings_matched` is EXACT while the fetch was not cut and
+  `null` (unknown) when the global bound cut rows — never guessed.
+  `document_key` is rebuild-stable; identical payloads across rebuilds
+  are test-proven.
+- **Dedup + ranking**: best document per Recording; comparator
+  (worst satisfied field rank title<body<aux, doc-type rank
+  summary<recording<segment, fold-occurrences desc, first offset,
+  document_key). A row selected by SQLite but not locatable by the
+  Python fold (pathological divergence) is kept, ranked last and never
+  highlighted wrongly (unit-proven).
+- **Snippets**: plain text + offset ranges (never HTML). The window
+  is anchored on the FIRST INDIVIDUAL mapped match — never on a
+  globally merged range (repeated text and tiling multi-term matches
+  chain into unbounded merges, which once produced over-cap
+  snippets); displayed ranges are clipped to the window and merged
+  ONLY among themselves, so every returned range is non-empty,
+  ordered, non-overlapping and inside the returned text, and `…`
+  ellipsis markers are included in the returned text with offsets
+  relative to it. The content window is HARD-capped at
+  `SNIPPET_MAX_CODEPOINTS` UNCONDITIONALLY (returned text ≤ cap + 2
+  ellipsis characters; no oversized defensive fallback exists): the
+  anchor is fully visible whenever it fits the cap, and a
+  pathological anchor that does not fit is shown CLIPPED from its
+  start — the bound wins. The window clamps at both text ends and
+  shifts left near the end of the text. Proven: 256-codepoint term
+  mid-text and at the tail, 1000 repeated characters, two tiling
+  terms chained past the cap, a match clipped at the window boundary
+  (stays non-empty and highlighted), a synthetic over-cap anchor (cap
+  beats full-match visibility), plus the exact inclusive
+  start/end source-character fold→NFC mapping for casefold
+  EXPANSIONS (`ﬃ`→`ffi`, `ß`→`ss` yield whole-source-character ranges,
+  never zero-length slices — the old `spans[end]` endpoint mapping
+  produced zero-length ranges there), Latin diacritics, CJK and
+  astral emoji.
+- **Provenance** per result: `metadata` | `summary` (+`output_language`
+  — language variants are separate documents; the best variant wins
+  the dedup) | `segment` (+ordinal/start/end), plus the matched fields
+  and occurrence counts. The Library display title (canonical
+  recording metadata document) rides along; `brain search` reads it,
+  the 5A.4.2 web layer can link with the recording id.
+- **brain_fold registration is search-specific and failure-isolated**
+  (`workflow/sqlite_unicode.py`): the connection signal registers the
+  collation FIRST (unchanged contract) and the fold function only
+  best-effort — a fold failure can never break pages, ORM access or
+  the Title collation; it resurfaces ONLY at search use-time as the
+  separate `ensure_fold_function` error (idempotent retry, sanitized,
+  collation-failure messages never relabeled). MATCH-only searches
+  never require it at all. Test-proven for first connection,
+  reconnect, idempotency and isolation.
+- **CLI**: `brain search "QUERY" [--limit N] [--json]` — read-only
+  (schema preflight, no lock). Order: cheap input validation
+  (`validate_query`: empty/256-codepoint/8-term/limit 1–200 bounds —
+  exit 2, BEFORE the sweep) → full health gate EXACTLY once (exit 1
+  clean stderr for missing/broken/stale) → engine (exit 0 even with
+  zero results). Human output: numbered results, provenance labels
+  (`[summary · en]`, `[segment 3 @ 1:15]`, `[metadata]`),
+  `«highlight»`-decorated bounded snippets, truthful truncation/more
+  notes; `--json` = the structured payload (query echo is the
+  normalized query only — no raw text in errors).
+- **Review round 1 corrections** (three findings, all regression-
+  proven): hidden per-recording truncation (priority-aware window
+  ordering + exact COUNT-based overflow detection), zero-length
+  highlight ranges at casefold-expansion endpoints (exact inclusive
+  start/end source-character spans), and the unstretched snippet
+  window (hard cap with left-shift instead of extension).
+- **Review round 2 correction** (regression-proven): the snippet
+  window must anchor on the FIRST INDIVIDUAL mapped match, not on a
+  globally merged range — repeated text (1000×`a` under `a`) and
+  tiling terms chain adjacent matches into one over-cap merge that
+  the defensive branch then emitted whole; displayed ranges are now
+  clipped into the window and merged only among themselves, and the
+  defensive over-cap fallback now caps the window (clip) instead of
+  bypassing it.
+- **Verification**: full suite **1261 passed** (+92 over the 1169
+  baseline: 86 in the two new search files, 6 in
+  `test_sqlite_unicode.py` for fold registration isolation),
+  `manage.py check`, `makemigrations --check` clean (NO new
+  migration), `git diff --check` clean. No real audio, network,
+  MacWhisper or oMLX; `config/config.yaml` and the real `data/`
+  untouched.
+- **Known pre-existing flake** (not introduced here, reproduced
+  ~1-in-6 on the pristine baseline):
+  `tests/test_search_index_sync.py::TestConvergence::test_unlocked_tag_service_race_converges`
+  is a genuine thread race against SQLite write serialization and may
+  fail sporadically in any run.
+- **Deliberately NOT implemented**: web search (Step 5A.4.2),
+  ranking beyond the deterministic comparator, stemming/word
+  tokenization, embeddings/semantic/hybrid search,
+  Ask-with-citations. The Library search field remains the disabled
+  placeholder.
 
 ## Step 5A.3 — Incremental Search Index Synchronization (delivered)
 
@@ -830,11 +979,15 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current: **1169 tests passing** (Step 5A.3 incremental index
-  synchronization: +37 over the 1132 baseline); earlier snapshots
+- Current: **1261 tests passing** (Step 5A.4.1 keyword search backend +
+  CLI + snippet-bound review rounds: +92 over the 1169 baseline); earlier snapshots
   recorded 495 (Step 3), 985/992 (Step 4 + multilingual corrective),
-  1056/1059 (Step 5A.1), 1132 (Step 5A.2 incl. review corrections). No real MacWhisper,
+  1056/1059 (Step 5A.1), 1132 (Step 5A.2 incl. review corrections),
+  1169 (Step 5A.3). No real MacWhisper,
   oMLX, network, ffmpeg, or user audio; "must not happen" mocks raise.
+  One pre-existing, baseline-reproducible flake (~1-in-6):
+  `test_search_index_sync.py::TestConvergence::test_unlocked_tag_service_race_converges`
+  (genuine thread race against SQLite write serialization).
 - Verified: `manage.py check`, `makemigrations --check`, fresh-process
   CLI config errors (no traceback), stage-aware cross-stage recovery,
   error/secret hygiene, and `git diff --check`.
@@ -853,15 +1006,16 @@ Production Library UI are delivered.
 - `audioop` deprecation (Python 3.13 removal; revisit before upgrade).
 - Parked recordings (missing/out-of-inbox sources) wait for the next
   ingest/run; no proactive notification.
-- **No search interface yet**: the FTS5 index exists AND is kept fresh
-  incrementally (Steps 5A.2 + 5A.3: registry, trigram table, migration,
-  rebuild/status CLI, per-recording after-commit synchronization) but
-  querying is not implemented — the Library search field remains a
-  disabled placeholder; ranking/query is 5A.4, embeddings and
-  Ask-with-citations later. Index staleness after abnormal process
-  death between commit and callback is only repaired by
-  `search-index status` detection + rebuild (the sync contract never
-  promises an out-of-band watchdog).
+- **No search UI yet**: `brain search` (Step 5A.4.1) is the CLI
+  keyword search over the FTS5 index; the Library search field is
+  still a disabled placeholder until the Step 5A.4.2 web search, and
+  embeddings/semantic/hybrid search plus Ask-with-citations remain
+  later Step 5 work. Keyword matching is substring-style (trigrams +
+  Unicode-folded LIKE fallback), not stemmed. Index staleness after
+  abnormal process death between commit and callback is repaired by
+  `brain search`'s full health gate REFUSING to serve (exit 1), with
+  `search-index status` as the detailed detector and `rebuild` the
+  repair (the sync contract never promises an out-of-band watchdog).
 
 ## Step 3–6 roadmap (agreed)
 
@@ -870,13 +1024,17 @@ Production Library UI are delivered.
   controls.
 - **Step 5 — in progress**: Step 5A.1 Production Library UI, Step 5A.2
   Search Index Foundation and **Step 5A.3 Incremental Index
-  Synchronization are delivered** (registry + FTS5 trigram table,
+  Synchronization are delivered**, and **Step 5A.4.1 keyword search
+  backend + CLI is delivered** (registry + FTS5 trigram table,
   reversible migration 0008, atomic `brain search-index rebuild`,
   read-only `brain search-index status`, per-recording after-commit
-  sync via `workflow/services/search_sync.py` hooks). The next planned
-  unit is **Step 5A.4 keyword querying** (`brain search`, Library/web
-  search, ranking, highlighting). Local embeddings, semantic/hybrid
-  search and Ask-with-citations remain later Step 5 work.
+  sync via `workflow/services/search_sync.py` hooks, literal
+  plain-text `brain search` with deterministic ranking, per-Recording
+  dedup, bounded snippets and the separated full-health gate). The
+  next planned unit is **Step 5A.4.2 web search** (query form,
+  cached-health policy, rendered highlights). Local embeddings,
+  semantic/hybrid search and Ask-with-citations remain later Step 5
+  work.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation

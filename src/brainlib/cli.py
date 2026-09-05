@@ -10,6 +10,11 @@ Commands:
   brain summarize [ID] [--regenerate]
   brain summaries ID | brain summary ID [--format markdown|text|json]
   brain tags [--sync]        Summarization, rendering, and tag commands (Step 3).
+  brain search "QUERY" [--limit N]
+                             Read-only keyword search (no lock, never
+                             rebuilds; exit 1 when the index is missing,
+                             broken or stale; 2 on malformed query; --json;
+                             --limit up to 200, default 50).
   brain search-index status  Read-only search index health (no lock; exit 1
                              when the index is not built, stale, inconsistent
                              or the FTS table is missing/broken).
@@ -630,6 +635,108 @@ def cmd_search_index(args) -> int:
     return 0 if payload.get("healthy") else 1
 
 
+def _format_ms(ms) -> str:
+    if ms is None:
+        return "?"
+    total = int(ms) // 1000
+    hours, rest = divmod(total, 3600)
+    minutes, seconds = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def _decorate_snippet(snippet: dict) -> str:
+    text = snippet["text"]
+    parts: list[str] = []
+    position = 0
+    for match in snippet["matches"]:
+        parts.append(text[position : match["start"]])
+        parts.append(f"\u00ab{text[match['start'] : match['end']]}\u00bb")
+        position = match["end"]
+    parts.append(text[position:])
+    return "".join(parts)
+
+
+def _search_source_label(match: dict) -> str:
+    source = match["source"]
+    if source == "summary":
+        return f"summary \u00b7 {match.get('output_language') or '?'}"
+    if source == "segment":
+        return (
+            f"segment {match.get('segment_ordinal')} @ "
+            f"{_format_ms(match.get('start_ms'))}"
+        )
+    return "metadata"
+
+
+def _print_search_human(payload: dict) -> None:
+    query = payload["query"]
+    results = payload["results"]
+    if not results:
+        print(f'no results for "{query}"')
+        return
+    print(f'{payload["result_count"]} result(s) for "{query}"')
+    for item in results:
+        title = item["title"] or "(untitled)"
+        label = _search_source_label(item["match"])
+        print(f'{item["rank"]}. {title}  [{label}]')
+        snippet = item["snippet"]
+        if snippet is not None:
+            print(f"   {_decorate_snippet(snippet)}")
+    if payload["truncated"]:
+        print("note: the candidate scan reached its bound; refine the query.")
+    more = payload["more_recordings_matched"]
+    if more:
+        print(f"note: {more} more matching recording(s) beyond --limit.")
+
+
+def cmd_search(args) -> int:
+    """``brain search QUERY`` (Step 5A.4.1) — strictly read-only.
+
+    Order: config/Django/schema preflight -> input validation (exit 2)
+    -> the FULL read-only health preflight EXACTLY once (exit 1: missing,
+    broken or stale index; never rebuilds) -> the query engine. Never
+    takes the pipeline lock, never synchronizes or writes.
+    """
+    from brainlib.config import ConfigError, load_config
+
+    try:
+        config = load_config()
+        _setup_django()
+        # Schema preflight: search reads ORM models too.
+        _require_applied_migrations()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ImproperlyConfigured as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    from workflow.services import search_query
+
+    # ALL user-input validation BEFORE the health gate: usage errors
+    # exit 2 without paying (or depending on) the integrity sweep.
+    try:
+        query = search_query.validate_query(args.query, args.limit)
+    except search_query.SearchQueryInputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        search_query.preflight_full_health()
+        payload = search_query.search_recordings(query, limit=args.limit)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(payload, indent=2, default=str))
+    else:
+        _print_search_human(payload)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="brain",
@@ -727,6 +834,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Synchronize tags with the YAML configuration (mutating; takes the pipeline lock)",
     )
 
+    search_cmd = subparsers.add_parser(
+        "search",
+        help="Keyword-search transcripts, summaries and metadata (read-only)",
+    )
+    search_cmd.add_argument("query", help="Plain-text keywords (words combine with AND)")
+    search_cmd.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum matching recordings to show (1-200, default 50)",
+    )
+    search_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+
     search_index_cmd = subparsers.add_parser(
         "search-index", help="Inspect or rebuild the keyword-search index (Step 5A.2)"
     )
@@ -777,6 +897,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_tags(args)
     if args.command == "transcript-language":
         return cmd_transcript_language(args)
+    if args.command == "search":
+        return cmd_search(args)
     if args.command == "search-index":
         return cmd_search_index(args)
     parser.error(f"unknown command: {args.command}")

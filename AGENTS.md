@@ -369,9 +369,19 @@ Non-negotiable principles:
   0008, atomic `search-index rebuild`, read-only `search-index status`.
   **5A.3 (delivered)**: incremental per-recording synchronization from
   the authoritative source after committing changes
-  (`workflow/services/search_sync.py`). **5A.4+ (not
-  implemented)**: query parsing, ranking, highlighting, `brain search`,
-  web search — do not implement them as part of index maintenance.
+  (`workflow/services/search_sync.py`). **5A.4.1 (delivered)**:
+  read-only keyword query engine `workflow/services/search_query.py`
+  + `brain search` — literal plain-text terms (AND), quoted-phrase
+  FTS matching with a Unicode-folded LIKE fallback for 1–2-codepoint
+  terms, deterministic rebuild-stable bounded selection (document-key
+  order, global + per-recording candidate bounds), per-Recording
+  dedup, plain-text snippets with offset ranges, and a health split:
+  the CLI runs the full `search-index status` sweep EXACTLY ONCE as a
+  hard gate (missing/broken/stale ⇒ exit 1, never rebuild), while the
+  engine itself only checks structural queryability. **5A.4.2+ (not
+  implemented)**: web search (its cached-health policy, form,
+  rendering), semantic/hybrid search — do not implement them as part
+  of index maintenance.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (deletion only after successful
   processing + retention delay), launchd scheduling.
