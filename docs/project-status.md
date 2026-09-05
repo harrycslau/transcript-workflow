@@ -1,9 +1,146 @@
-# Project status — implementation handoff (end of Step 4)
+# Project status — implementation handoff (Step 5A.2 delivered)
 
-This file reflects the repository as of the end of Step 4 plus the
-post-incident routing/transcription fixes and the multilingual summary
-corrective round. It is a snapshot, not a durable instruction file;
-`AGENTS.md` holds the standing rules.
+This file reflects the repository through Step 5A.2: Step 4, the
+post-incident routing/transcription fixes, the multilingual summary
+corrective round, the production Library UI (Step 5A.1) and the search
+index foundation (Step 5A.2). It is a snapshot, not a durable
+instruction file; `AGENTS.md` holds the standing rules.
+
+## Step 5A.2 — Search Index Foundation (delivered, review-corrected)
+
+- **Schema (migration 0008, fully reversible)**: relational registry
+  `workflow_search_document` (`SearchDocument` model: `document_key`
+  globally unique — `recording:<id>`, `segment:<transcript_id>:<ordinal>`,
+  `summary:<id>`; `content_hash` + `index_version`; exact searchable
+  title/body/aux text columns; provenance FKs `recording` (CASCADE) /
+  `transcript` (nullable, CASCADE) / `summary` (nullable, CASCADE) —
+  **no section FK**; DB CheckConstraints: `doc_type` limited to
+  `segment|summary|recording` (`chk_search_doc_type_allowed`), summary
+  documents require a non-empty `output_language`
+  (`chk_search_doc_summary_output_language`), per-type column-shape
+  checks, hash-field presence; per-type partial uniques; db_table pinned
+  to `workflow_search_document`) + one **contentful** FTS5 table
+  `workflow_search_fts` (`rowid` = registry pk — a plain integer pk,
+  `title_text`/`body_text`/`aux_text`, `tokenize='trigram'`; the table
+  stores its own text; no `content=''`, no external content). PK/rowid
+  are internal and may change between rebuilds; only `document_key` is
+  stable.
+- **Migration 0008** (`0008_search_index.py`): separate-connection
+  in-memory FTS5+trigram probe FIRST (failure → fixed
+  `RuntimeError(PROBE_ERROR)`: "keyword search indexing requires SQLite
+  FTS5 with the trigram tokenizer; this Python SQLite build does not
+  provide it", original exception never shown); `CreateModel`
+  (Django-managed, reversible, constraints byte-identical to the model —
+  enforced by `makemigrations --check`); raw DDL create/drop of the FTS
+  table (conversion with `raise ... from None`, fixed `DDL_ERROR`, no
+  path/SQL echo); `RunPython` backfill/unbackfill. Backfill STREAMS:
+  documents are buffered to `INSERT_CHUNK_SIZE` (500) and flushed
+  immediately — bounded memory even for one recording with millions of
+  segments — in exactly the service's global order, mirroring the
+  service **byte-identically** (NFC, framing hash, body/aux composition,
+  display title, filenames, tags, default-language policy) —
+  parity-tested against `rebuild_index()` (same corpus, same hashes).
+  Forward and reverse run under the default `MigrationExecutor`
+  atomicity; reverse leaves zero `workflow_search*` tables and no
+  source-table changes.
+- **Service** `workflow/services/search_index.py` (`SearchIndexError`
+  subclasses `brainlib.config.ConfigError` → safe stderr/exit 1):
+  `INDEX_VERSION="1"`; content hash over length-prefixed UTF-8 framing
+  of index version, doc type, key, provenance IDs,
+  ordinal/start/end/output-language/exact texts (IDs stringified only in
+  framing — stored FK columns keep their raw values); NFC before hashing
+  and FTS insertion.
+  `iter_expected_document_batches()` streams **fixed-size document
+  chunks** (`chunk_size` = `INSERT_CHUNK_SIZE` = 500; `batch_size` = 100
+  Recordings per deterministic PK sweep; bounded queries per sweep, no
+  N+1, no unbounded accumulation). Canonical mappings:
+  - `segment` (every non-empty-by-`strip()` segment of the ACTIVE
+    Transcript; stored text NOT stripped): title = EMPTY (the Recording
+    metadata doc owns the searchable title), body = the COMPLETE segment
+    text (NFC, internal whitespace/line boundaries preserved), aux = the
+    speaker or empty; ordinal/start/end are registry+hash provenance
+    only, never FTS text;
+  - `summary` (current whole-recording variants: `Summary.is_active` ∧
+    `transcript.is_active` ∧ `section__ordinal=0` — a query eligibility
+    filter, not a SearchDocument FK): title = the Summary title, body =
+    overview + key-point texts + action-item texts (model order,
+    newline-joined), aux = people/organizations/topics values; legacy
+    `output_language="und"` variants stay as stored and are counted as
+    `legacy_und_variants`;
+  - `recording` (one per Recording): title = the Library display-title
+    chain, body = deterministic source FILENAMES only (never paths),
+    aux = sorted active tag names; never secrets, diagnostics or
+    rejected model suggestions.
+- **`rebuild_index()`**: ONE atomic transaction — registry-schema
+  validation → DROP/CREATE derived FTS table → streamed bounded-batch
+  inserts (bulk_create + `executemany`, each ≤ 500) → complete
+  in-transaction verification (exact registry/FTS counts, bidirectional
+  rowid↔registry join with zero gaps, per-row content-hash recomputation
+  and byte-exact FTS↔registry text comparison, streamed in 500-row
+  pages) → commit. Any failure rolls back; the previous index stays
+  byte-identical (proven by injected mid-backfill and post-DDL failures
+  with snapshot comparison). Missing / wrong-schema / wrong-tokenizer
+  FTS tables are repaired by a rebuild (proven by direct-table surgery).
+- **`build_status_report()`**: strictly read-only (guarded at the
+  connection level; never creates/repairs); bounded memory (per-chunk
+  `document_key__in` registry lookups; keyset-paged registry-orphan and
+  FTS-orphan sweeps whose first page is unbounded so zero/negative
+  explicit ids and rowids are never skipped). Compares authoritative source data, registry AND
+  actual FTS rows (not hashes alone). Stable categories:
+  `registry_schema_missing`, `fts_missing`, `fts_broken` (with
+  `fts_columns`/`fts_tokenizer` sub-diagnostics in the report's
+  `fts.category`), `missing_from_registry`, `orphan_document`,
+  `missing_from_fts`, `orphan_fts_row`, `content_mismatch`,
+  `stale_content`, `version_mismatch`; identifier lists capped at
+  `STATUS_KEY_LIMIT`=20 with `keys_truncated` reporting the TRUE omitted
+  count (orphan FTS counts themselves are exact, proven with 25
+  orphans), never indexed text; health recomputed from categories.
+- **CLI**: `brain search-index status [--json]` (read-only, NEVER locks;
+  exit 0 only when fully healthy, else 1) and `brain search-index
+  rebuild [--json]` (`_pipeline_command`: schema preflight → lock →
+  recover → rebuild; exit 3 on lock contention; 2 on usage). JSON
+  reports categories/counts/keys only. `brain doctor`'s FTS check now
+  probes trigram (`PASS` detail "available (trigram)"; WARN semantics
+  unchanged — 5A.2 needs no embedding-model gate).
+- **Shared Library metadata helpers**: new pure `workflow/services/library_metadata.py`
+  (`display_title_from_recording`, `display_title_from_parts`,
+  `summary_title_parts`, `preferred_source_filename`,
+  `deterministic_source_filenames`, `active_tag_names`,
+  `source_sort_key`, `TITLE_PLACEHOLDER`); `workflow/query.py`
+  `RecordingCard.title` fallback and the migration backfill share this
+  semantic contract; `workflow/query.py`'s SQL annotations stay
+  authoritative for the Library page.
+- **Query bounds**: rebuild and status issue identical READ patterns for
+  small and 15× corpora (proven 2 vs 32 recordings in one sweep); writes
+  are always bounded batches (test proves ≤ 1 INSERT statement per 20
+  documents). The streaming bound is proven both ways: the generator
+  never yields more than 500 docs and the migration never flushes more
+  than 500 per INSERT batch, each for ONE recording with 1200 segments,
+  with complete coverage and deterministic order asserted.
+- **Verification**: full suite **1132 passed** (72 new: 47 service, 12
+  migration-executor forward/reverse/atomicity/probe/streaming, 13 CLI;
+  plus the migration-readiness incident-mirror list extended to the new
+  leaf), `manage.py check` clean, `makemigrations --check` clean, no
+  whitespace errors. Real `data/database/brain.sqlite3` untouched
+  (verified read-only again after this round; still at 0007, migration
+  0008 never applied to it); no real audio, network, MacWhisper or oMLX
+  use; `config/config.yaml` never modified.
+- **Review corrections applied in place** (this round): genuine
+  chunk-streaming in generator + migration backfill (previously
+  accumulated all docs per sweep before chunking inserts); exact
+  `orphan_fts_row` totals beyond the key cap (previously capped by the
+  probe query's `LIMIT`); `doc_type` and summary-`output_language` DB
+  CheckConstraints (model + migration 0008 mirror); both keyset sweeps
+  now start with an UNBOUNDED first page and continue with
+  `> last_seen` (SQLite/FTS5 accept zero and negative explicit
+  ids/rowids — a `> 0` start could have hidden corrupted rows behind a
+  healthy report; proven with forged pks/rowids at `-1`/`0` and
+  forced multi-page traversal); this section rewritten against the
+  actual code.
+- **Deliberately NOT implemented**: incremental synchronization
+  (Step 5A.3), query parsing/ranking/highlighting/`brain search <query>`
+  (Step 5A.4), web search UI, embeddings. The Library search field
+  remains the disabled placeholder.
 
 ## Step 5A.1 — Production Library UI (delivered)
 
@@ -40,8 +177,9 @@ corrective round. It is a snapshot, not a durable instruction file;
   mirrors `resolve_default_language()` in SQL (parity-tested) and is
   used by the Library without per-recording queries.
 - No migrations, no new dependencies, strict CSP preserved. **Step 4 is
-  complete; Step 5A.1 is complete after the corrective pass.** The next
-  planned unit is Step 5A.2 Search Index Foundation.
+  complete; Step 5A.1 is complete after the corrective pass.** Step
+  5A.2 Search Index Foundation has since been delivered (see the
+  section at the top).
 
 ## Multilingual summary variants (corrective round — delivered)
 
@@ -601,11 +739,12 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current: **1059 tests passing** (Step 5A.1 final corrective pass);
-  earlier snapshots recorded 495 (Step 3), 985/992 (Step 4 +
-  multilingual corrective) and 1056 (Step 5A.1 first pass). No real
-  MacWhisper, oMLX, network, ffmpeg, or user audio; "must not happen"
-  mocks raise.
+- Current: **1132 tests passing** (Step 5A.2 Search Index Foundation
+  incl. the review corrections: +72 over the 1060 baseline); earlier
+  snapshots recorded 495 (Step 3), 985/992 (Step 4 + multilingual
+  corrective), 1056 (Step 5A.1 first pass) and 1059 (Step 5A.1 final
+  corrective pass). No real MacWhisper,
+  oMLX, network, ffmpeg, or user audio; "must not happen" mocks raise.
 - Verified: `manage.py check`, `makemigrations --check`, fresh-process
   CLI config errors (no traceback), stage-aware cross-stage recovery,
   error/secret hygiene, and `git diff --check`.
@@ -624,20 +763,25 @@ Production Library UI are delivered.
 - `audioop` deprecation (Python 3.13 removal; revisit before upgrade).
 - Parked recordings (missing/out-of-inbox sources) wait for the next
   ingest/run; no proactive notification.
-- **No keyword or semantic search yet**: the Library search field is a
-  disabled "Search coming soon" placeholder; FTS5 indexing/querying,
-  embeddings and Ask-with-citations are planned (Step 5A.2+), not
-  implemented.
+- **No search interface yet**: the FTS5 **index foundation** exists
+  (Step 5A.2: registry, trigram table, migration, rebuild/status CLI)
+  but querying is not implemented — the Library search field remains a
+  disabled placeholder; incremental sync is 5A.3, ranking/query 5A.4,
+  embeddings and Ask-with-citations later.
 
 ## Step 3–6 roadmap (agreed)
 
 - **Step 4 — delivered**: full web interface, review queue,
   transcript/summary views, tag editing/filtering, manual routing
   controls.
-- **Step 5 — in progress**: Step 5A.1 Production Library UI is
-  delivered; the next planned unit is **Step 5A.2 Search Index
-  Foundation**. FTS5 keyword search, local embeddings, semantic/hybrid
-  search and Ask-with-citations are planned but NOT yet implemented.
+- **Step 5 — in progress**: Step 5A.1 Production Library UI and
+  **Step 5A.2 Search Index Foundation are delivered** (registry +
+  FTS5 trigram table, reversible migration 0008, atomic
+  `brain search-index rebuild`, read-only `brain search-index status`).
+  The next planned unit is **Step 5A.3 incremental index
+  synchronization**; then 5A.4 keyword querying (`brain search`,
+  Library/web search). Local embeddings, semantic/hybrid search and
+  Ask-with-citations remain later Step 5 work.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation

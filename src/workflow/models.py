@@ -132,6 +132,12 @@ class RoutingMethod(models.TextChoices):
     MANUAL = "manual", "Manual"
 
 
+class SearchDocType(models.TextChoices):
+    SEGMENT = "segment", "Transcript Segment"
+    SUMMARY = "summary", "Current Summary Variant"
+    RECORDING = "recording", "Recording Metadata"
+
+
 def _uuid() -> str:
     return str(uuid.uuid4())
 
@@ -599,3 +605,140 @@ class TagAssignment(models.Model):
 
     def __str__(self) -> str:
         return f"TagAssignment({self.tag.name}, {self.origin}, active={self.is_active})"
+
+
+class SearchDocument(models.Model):
+    """Relational registry row behind the keyword-search FTS index (Step 5A.2).
+
+    DERIVED, REBUILDABLE data — never a source of truth:
+
+    - the stable logical identity is ``document_key`` (type-scoped,
+      rebuild-stable); the integer ``pk`` doubles as the ``workflow_search_fts``
+      rowid but is INTERNAL and may change after a full rebuild;
+    - provenance FKs are CASCADE so index rows can never block deletion of
+      the authoritative source data (``brain search-index status`` detects
+      any resulting drift until Step 5A.3's post-commit synchronization);
+    - ``content_hash`` binds the exact stored text plus all provenance
+      (see ``workflow.services.search_index`` for the framing rules);
+    - the FTS5 table mirrors title/body/aux text with rowid = pk and is
+      created by migration 0008 (not a Django-managed table).
+
+    Document set (see ``search_index`` for the canonical mappings):
+    every non-empty segment of the ACTIVE Transcript, every current
+    whole-recording Summary variant (active Transcript, ordinal-0
+    section), and one deterministic metadata document per Recording.
+    """
+
+    document_key = models.TextField(
+        unique=True,
+        db_index=True,
+        help_text="Stable identity: recording:<id> | segment:<transcript_id>:<ordinal> | summary:<id>",
+    )
+    doc_type = models.CharField(max_length=16, choices=SearchDocType.choices)
+    recording = models.ForeignKey(
+        Recording, on_delete=models.CASCADE, related_name="search_documents"
+    )
+    transcript = models.ForeignKey(
+        Transcript, on_delete=models.CASCADE, null=True, blank=True, related_name="search_documents"
+    )
+    summary = models.ForeignKey(
+        Summary, on_delete=models.CASCADE, null=True, blank=True, related_name="search_documents"
+    )
+    segment_ordinal = models.PositiveIntegerField(null=True, blank=True)
+    # Timestamps are segment-only provenance (never searchable text).
+    start_ms = models.BigIntegerField(null=True, blank=True)
+    end_ms = models.BigIntegerField(null=True, blank=True)
+    # Summary-variant identity only; "" for segment/recording documents.
+    # Legacy "und" values within the current transcript stay as stored
+    # and are reported as legacy by the status command.
+    output_language = models.CharField(max_length=32, blank=True, default="")
+
+    title_text = models.TextField(blank=True, default="")
+    body_text = models.TextField()
+    aux_text = models.TextField(blank=True, default="")
+    content_hash = models.CharField(max_length=64, help_text="sha256 over the length-prefixed canonical frame")
+    index_version = models.CharField(max_length=16, help_text="Indexer/schema version that produced content_hash")
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["document_key"]
+        db_table = "workflow_search_document"
+        constraints = [
+            # Per-document-type identity mirrors the global
+            # document_key uniqueness; each is a DB-enforced invariant.
+            models.UniqueConstraint(
+                fields=["transcript", "segment_ordinal"],
+                condition=Q(doc_type="segment"),
+                name="uniq_search_doc_segment",
+            ),
+            models.UniqueConstraint(
+                fields=["summary"], condition=Q(doc_type="summary"), name="uniq_search_doc_summary"
+            ),
+            models.UniqueConstraint(
+                fields=["recording"], condition=Q(doc_type="recording"), name="uniq_search_doc_recording"
+            ),
+            # Shape: which columns may/must be populated per type.
+            models.CheckConstraint(
+                condition=(
+                    ~Q(doc_type="segment")
+                    | Q(
+                        doc_type="segment",
+                        transcript__isnull=False,
+                        segment_ordinal__isnull=False,
+                        summary__isnull=True,
+                        output_language="",
+                    )
+                ),
+                name="chk_search_doc_shape_segment",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~Q(doc_type="summary")
+                    | Q(
+                        doc_type="summary",
+                        transcript__isnull=False,
+                        summary__isnull=False,
+                        segment_ordinal__isnull=True,
+                        start_ms__isnull=True,
+                        end_ms__isnull=True,
+                    )
+                ),
+                name="chk_search_doc_shape_summary",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~Q(doc_type="recording")
+                    | Q(
+                        doc_type="recording",
+                        transcript__isnull=True,
+                        summary__isnull=True,
+                        segment_ordinal__isnull=True,
+                        start_ms__isnull=True,
+                        end_ms__isnull=True,
+                        output_language="",
+                    )
+                ),
+                name="chk_search_doc_shape_recording",
+            ),
+            # DB-enforced document type (Django choices alone are not a
+            # database constraint).
+            models.CheckConstraint(
+                condition=(
+                    Q(doc_type="segment") | Q(doc_type="summary") | Q(doc_type="recording")
+                ),
+                name="chk_search_doc_type_allowed",
+            ),
+            # Summary variant identity requires a concrete output language
+            # (legacy unknown is the explicit "und" marker, never empty).
+            models.CheckConstraint(
+                condition=~Q(doc_type="summary") | ~Q(output_language=""),
+                name="chk_search_doc_summary_output_language",
+            ),
+            models.CheckConstraint(
+                condition=~Q(content_hash="") & ~Q(index_version=""),
+                name="chk_search_doc_hash_fields_present",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"SearchDocument({self.document_key})"

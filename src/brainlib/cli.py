@@ -10,6 +10,11 @@ Commands:
   brain summarize [ID] [--regenerate]
   brain summaries ID | brain summary ID [--format markdown|text|json]
   brain tags [--sync]        Summarization, rendering, and tag commands (Step 3).
+  brain search-index status  Read-only search index health (no lock; exit 1
+                             when the index is not built, stale, inconsistent
+                             or the FTS table is missing/broken).
+  brain search-index rebuild Atomically rebuild registry + FTS (mutating;
+                             takes the pipeline lock).
 
 Exit codes: 0 success/warnings; 1 config or setup error; 2 usage error;
 3 another pipeline process holds the lock. Django is initialized through
@@ -590,6 +595,41 @@ def cmd_tags(args) -> int:
     return _read_only_command(args, work)
 
 
+def cmd_search_index(args) -> int:
+    """``brain search-index status|rebuild`` (Step 5A.2).
+
+    status: strictly read-only, never takes the pipeline lock; exit 0
+    only when the index is fully healthy, 1 for not-built/stale/
+    inconsistent/missing-or-broken FTS. rebuild: mutating — takes the
+    pipeline lock via the shared runner (contention exits 3).
+    """
+    if args.action == "rebuild":
+        def work(config):
+            from workflow.services.search_index import rebuild_index
+
+            return rebuild_index()
+
+        return _pipeline_command(args, work)
+
+    from brainlib.config import ConfigError, load_config
+
+    try:
+        config = load_config()
+        _setup_django()
+        _require_applied_migrations()
+        from workflow.services.search_index import build_status_report
+
+        payload = build_status_report()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ImproperlyConfigured as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    _emit(payload, getattr(args, "json", False))
+    return 0 if payload.get("healthy") else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="brain",
@@ -687,6 +727,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Synchronize tags with the YAML configuration (mutating; takes the pipeline lock)",
     )
 
+    search_index_cmd = subparsers.add_parser(
+        "search-index", help="Inspect or rebuild the keyword-search index (Step 5A.2)"
+    )
+    search_index_sub = search_index_cmd.add_subparsers(dest="action", required=True)
+    status_cmd = search_index_sub.add_parser(
+        "status", help="Read-only index health (no lock; exit 1 unless fully healthy)"
+    )
+    status_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    rebuild_cmd = search_index_sub.add_parser(
+        "rebuild", help="Atomically rebuild the index (mutating; takes the pipeline lock)"
+    )
+    rebuild_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+
     args = parser.parse_args(argv)
 
     if args.command == "summarize" and args.regenerate and not args.recording_id:
@@ -724,6 +777,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_tags(args)
     if args.command == "transcript-language":
         return cmd_transcript_language(args)
+    if args.command == "search-index":
+        return cmd_search_index(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 

@@ -136,6 +136,8 @@ class TestMigrationInspection:
             "workflow.0005_tagassignment_deactivated_by_and_more",
             "workflow.0006_attempt_context_json",
             "workflow.0007_summary_multilingual",
+            # the plan always runs to the current leaf
+            "workflow.0008_search_index",
         ]
 
     def test_unavailable_migration_table_category(self, monkeypatch):

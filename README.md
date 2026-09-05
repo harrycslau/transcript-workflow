@@ -106,7 +106,7 @@ Checks and their outcomes:
 | Config missing/malformed/invalid               | FAIL              | 1         |
 | Database parent not writable                   | FAIL              | 1         |
 | SQLite connection failure                      | FAIL              | 1         |
-| SQLite FTS5 missing                            | WARN              | 0         |
+| SQLite FTS5 + trigram missing                  | WARN              | 0         |
 | MacWhisper missing / `mw version` fails        | WARN              | 0         |
 | oMLX endpoint unreachable                      | WARN              | 0         |
 | oMLX invalid/invalid-shape /v1/models response | WARN              | 0         |
@@ -149,6 +149,37 @@ uv run brain review --json   # recordings needing human attention
 uv run brain retry <id>      # explicitly retry a failed recording
 uv run brain transcripts <id>
 ```
+
+### Search index (Step 5A.2 foundation)
+
+```sh
+uv run brain search-index status    # read-only health check (no lock)
+uv run brain search-index rebuild   # atomic rebuild (takes the pipeline lock)
+```
+
+The keyword-search foundation is a relational `SearchDocument` registry
+plus one contentful SQLite FTS5 table (`workflow_search_fts`,
+`tokenize='trigram'`, rowid = registry pk). Indexed documents: every
+non-empty segment of the active Transcript, every current
+whole-recording Summary language variant (active Transcript only;
+legacy `und` variants are indexed and reported as legacy), and one
+deterministic metadata document per Recording (Library display title,
+source filenames, active tags — never paths or secrets).
+
+- `status` is strictly read-only and never locks. It compares the
+  authoritative source data, the registry AND the actual FTS rows
+  (IDs and content), never hashes alone. Exit **0** only when fully
+  healthy; **1** for not built / stale / inconsistent /
+  missing-or-broken FTS. `--json` reports stable categories, counts and
+  document keys — never indexed text.
+- `rebuild` runs in ONE transaction (validate schema → drop/recreate
+  the derived FTS table → rebuild registry + FTS in bounded batches →
+  complete verification → commit). Any failure rolls back and leaves
+  the previous index byte-identical; a missing / wrong-schema /
+  wrong-tokenizer FTS table is repaired by a rebuild.
+- Keeping the index current after data changes is Step 5A.3; query
+  parsing/ranking (`brain search <query>`) is Step 5A.4. The Library
+  search field stays disabled until then.
 
 ### Routing profiles and the routing policy
 
@@ -315,8 +346,9 @@ uv run brain serve --host 127.0.0.1 --port 9000
   Oldest, Title A–Z, Title Z–A) and month headings for chronological
   sorts. Card/Table preference is remembered via a server-owned
   `view=`-overridable cookie; everything works without JavaScript.
-  Keyword search is coming in a later Step 5 substep (the search field
-  is a disabled placeholder for now).
+  Keyword search is coming in a later Step 5 substep (the FTS5 index
+  foundation and `brain search-index` exist; the search field stays a
+  disabled placeholder until queries are wired).
 - `GET /status/` — the status page (app version, storage availability,
   MacWhisper/oMLX configuration, selected models, pipeline counts).
   Page loads run only lightweight local checks; they never launch
@@ -343,7 +375,9 @@ network access, or real audio.
 
 ## Current limitations
 
-- No keyword or semantic search yet (Step 5).
+- No keyword or semantic search UI yet (Step 5A.2 delivered only the
+  persistent FTS5 index foundation; querying and incremental
+  synchronization are later Step 5 substeps).
 - No manual topic splitting, scheduling, or retention deletion yet
   (Step 6).
 - Automatic Cantonese-vs-Mandarin routing is heuristic and unverified —

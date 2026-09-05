@@ -31,7 +31,8 @@ Non-negotiable principles:
     config loader; localhost-only; `DEBUG=True` local dev).
   - `src/workflow/` — Django app: `models.py`, `services/` (ingest,
     routing, transcription, summarize, chunking, rendering, tags,
-    audiosamples, statemachine, pipeline, pipeline_lock), `views.py`
+    audiosamples, statemachine, pipeline, pipeline_lock, search_index,
+    library_metadata), `views.py`
     (status page + `/health/`),
     `migrations/`.
   - `src/manage.py` — conventional entry point only; the CLI is
@@ -59,11 +60,12 @@ Non-negotiable principles:
 
 - SQLite has no advisory locks. All mutating pipeline commands
   (`ingest`, `route`, `transcribe`, `summarize`, `tags --sync`, `run`,
-  `retry`) must hold the
+  `retry`, `search-index rebuild`) must hold the
   exclusive `flock` at `data/temp/locks/pipeline.lock`
   (`workflow/services/pipeline_lock.py`); second process exits with
   code 3. Read-only commands (`status`, `review`, `transcripts`,
-  `summaries`, `summary`, `tags`, `doctor`, `serve`) never lock.
+  `summaries`, `summary`, `tags`, `search-index status`, `doctor`,
+  `serve`) never lock.
 - Run `recover_interruptions()` while holding the lock before new work
   in mutating commands; it is idempotent.
 - DB constraints are the second concurrency layer: at most one
@@ -270,12 +272,15 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- Migrations `0001`–`0007` define the current schema (0007 is the
+- Migrations `0001`–`0008` define the current schema (0007 is the
   multilingual-summary migration: `Summary.output_language`,
   `SummaryVariantState`, transcript language-verification fields;
   intentionally irreversible — repair it in place, never add an 0008
-  on top of an unapproved 0007). Add NEW migrations, never edit
-  existing/applied ones. Enforce invariants with DB constraints
+  on top of an unapproved 0007; 0008 is the approved search-index
+  migration: `SearchDocument` registry + `workflow_search_fts` FTS5
+  trigram table, fully reversible with a separate-connection FTS5
+  capability probe, under an approved plan). Add NEW migrations, never
+  edit existing/applied ones. Enforce invariants with DB constraints
   (partial uniques, check constraints), not just application logic.
   Run `makemigrations --check` in verification. 0007's data migration
   validates the pre-migration invariant first (corrupted legacy data
@@ -327,7 +332,13 @@ Non-negotiable principles:
 - **Step 4**: full web interface, review queue, transcript/summary
   views, tag editing, manual routing controls.
 - **Step 5**: FTS5 keyword search, local embeddings, semantic/hybrid
-  search, Ask-with-citations.
+  search, Ask-with-citations. **5A.2 (delivered)**: persistent
+  `SearchDocument` registry + FTS5 trigram table, reversible migration
+  0008, atomic `search-index rebuild`, read-only `search-index status`.
+  **5A.3 (not implemented)**: incremental synchronization from the
+  authoritative source after pipeline changes. **5A.4+ (not
+  implemented)**: query parsing, ranking, highlighting, `brain search`,
+  web search — do not implement them as part of index maintenance.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (deletion only after successful
   processing + retention delay), launchd scheduling.

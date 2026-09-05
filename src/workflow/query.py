@@ -54,6 +54,10 @@ from workflow.models import (
     Transcript,
 )
 from workflow.services.langresolve import default_output_language_expression
+from workflow.services.library_metadata import (
+    TITLE_PLACEHOLDER,
+    display_title_from_recording,
+)
 from workflow.sqlite_unicode import ensure_registered, folded_title_expression
 
 MAX_TAG_FILTERS = 10
@@ -62,8 +66,6 @@ VALID_PROCESSING_STATUSES = {value for value, _ in ProcessingStatus.choices}
 VALID_SUMMARY_STATUSES = {value for value, _ in SummaryState.choices}
 
 SORT_CHOICES = ("newest", "oldest", "title_az", "title_za")
-
-TITLE_PLACEHOLDER = "Untitled recording"
 
 
 def effective_at_annotation() -> Coalesce:
@@ -260,14 +262,9 @@ class RecordingCard:
         value = getattr(self.recording, "display_title", None)
         if value:
             return value
-        # Single-object use without the annotation: mirror the same chain.
-        summary = self.display_summary
-        if summary is not None and summary.title:
-            return summary.title
-        source = self.display_source
-        if source is not None and source.original_filename:
-            return source.original_filename
-        return TITLE_PLACEHOLDER
+        # Single-object use without the annotation: the shared Python
+        # reference implementation of the same chain (prefetch-only).
+        return display_title_from_recording(self.recording)
 
     @property
     def available_languages(self) -> list[str]:

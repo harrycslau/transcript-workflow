@@ -172,15 +172,18 @@ def check_migrations() -> CheckResult:
 
 
 def check_fts5() -> CheckResult:
+    # Probes FTS5 WITH the trigram tokenizer the search index requires
+    # (SQLite >= 3.34), on a separate in-memory connection closed in
+    # finally — never on the live database.
     try:
         conn = sqlite3.connect(":memory:")
         try:
-            conn.execute("CREATE VIRTUAL TABLE fts5_probe USING fts5(text)")
+            conn.execute("CREATE VIRTUAL TABLE fts5_probe USING fts5(text, tokenize='trigram')")
         finally:
             conn.close()
     except sqlite3.Error as exc:
         return CheckResult("SQLite FTS5", WARN, f"unavailable: {exc}")
-    return CheckResult("SQLite FTS5", PASS, "available")
+    return CheckResult("SQLite FTS5", PASS, "available (trigram)")
 
 
 def check_macwhisper(
