@@ -834,3 +834,281 @@ class TestFoldAvailability:
         with pytest.raises(si.SearchIndexError) as excinfo:
             sq.search_recordings("z")
         assert "fold" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Recording scope (Step 5A.4.2a): filters inside the candidate set,
+# before ranking, bounds and truncation — proven against ground truth.
+# ---------------------------------------------------------------------------
+
+
+def _scope(tags=(), *, date_from=None, timezone="Europe/Helsinki"):
+    from workflow.query import ListFilters, search_scope_queryset
+
+    filters = ListFilters(tags=list(tags), tag_match="all", date_from=date_from)
+    return search_scope_queryset(filters, timezone)
+
+
+def _rid(pk):
+    """The raw storage-format id string the engine SELECT returns."""
+    return str(pk)
+
+
+class TestRecordingScope:
+    def test_scope_none_is_identical_to_unscoped(self):
+        from workflow.models import Recording
+
+        _built(["the quarterly budget review"], "scope-parity")
+        plain = sq.search_recordings("budget")
+        explicit = sq.search_recordings("budget", scope=None)
+        assert plain == explicit
+        explicit2 = sq.search_recordings("budget", scope=Recording.objects.all())
+        # A scope covering EVERYTHING matches the unscoped semantics.
+        assert [r["recording_id"] for r in explicit2["results"]] == [
+            r["recording_id"] for r in plain["results"]
+        ]
+
+    def test_scope_only_accepts_recording_querysets(self):
+        from workflow.models import Recording, Transcript
+
+        _built(["anything at all"], "scope-type")
+        for bad in (
+            Transcript.objects.all(),            # wrong model
+            "SELECT id FROM workflow_recording",  # never SQL text
+            {"ids": ["x"]},                      # never a mapping
+            Recording.objects.all()[:1],         # never sliced
+        ):
+            with pytest.raises(sq.SearchQueryInputError) as excinfo:
+                sq.search_recordings("anything", scope=bad)
+            assert "scope" in str(excinfo.value)
+            assert "SELECT" not in str(excinfo.value)
+
+    def test_scope_clears_caller_order_selection_and_annotations(self):
+        from workflow.models import Recording
+        from workflow.query import recording_list_queryset
+
+        made = _seed(["a scoped deterministic marker"], "scope-shape")
+        si.rebuild_index()
+        plain = sq.search_recordings(
+            "deterministic", scope=Recording.objects.filter(pk=made[0].pk)
+        )
+        noisy = sq.search_recordings(
+            "deterministic",
+            scope=recording_list_queryset()
+            .order_by("-discovered_at")
+            .values("duration_seconds"),
+        )
+        assert plain == noisy
+
+    def test_scope_matches_brute_force_ground_truth(self):
+        from workflow.models import Recording
+
+        keep1 = _seed(["budget marker for scope truth"], "scope-truth-1")[0]
+        keep2 = _seed(["another budget marker scope truth run"], "scope-truth-2")[0]
+        drop = _seed(["a budget marker excluded from scope truth"], "scope-truth-3")[0]
+        tag = make_tag("Family")
+        make_tag_assignment(keep1, tag)
+        make_tag_assignment(keep2, tag)
+        si.rebuild_index()
+
+        kwargs = dict(max_scored_documents=100000, per_recording_candidates=500)
+        unscoped = sq.search_recordings("budget", limit=200, **kwargs)
+        scoped = sq.search_recordings(
+            "budget", limit=200, scope=_scope(tags=["family"]), **kwargs
+        )
+        truth = [
+            r for r in unscoped["results"] if r["recording_id"] in
+            (_rid(keep1.pk), _rid(keep2.pk))
+        ]
+        assert [r["recording_id"] for r in scoped["results"]] == [
+            r["recording_id"] for r in truth
+        ]
+        assert str(drop.pk) not in {r["recording_id"] for r in scoped["results"]}
+        assert scoped["more_recordings_matched"] == 0
+        assert scoped["truncated"] is False
+
+    def test_flooded_corpus_never_starves_the_lower_ranked_in_scope_match(self):
+        """The v2 review regression (corrected expectations):
+
+        240 out-of-scope recordings rank HIGHER (more fold occurrences)
+        than the single in-scope match. With default bounds the
+        UNSCOPED run legitimately answers with the top 200, truncated=
+        FALSE and an EXACT more_recordings_matched = 41 — the target
+        simply falls outside that window. The scoped run sees only the
+        target: rank 1, not truncated, zero more matches.
+        """
+        target = _seed(["alphaomega appears exactly once here"], "flood-target")[0]
+        tag = make_tag("Family")
+        make_tag_assignment(target, tag)
+        for index in range(240):
+            _seed(["alphaomega alphaomega alphaomega floods the corpus"], f"flood-{index}")
+        si.rebuild_index()
+
+        unscoped = sq.search_recordings("alphaomega", limit=sq.MAX_RESULT_LIMIT)
+        ids = {r["recording_id"] for r in unscoped["results"]}
+        assert unscoped["result_count"] == sq.MAX_RESULT_LIMIT
+        assert unscoped["truncated"] is False
+        assert unscoped["more_recordings_matched"] == 41
+        assert str(target.pk) not in ids
+
+        scoped = sq.search_recordings(
+            "alphaomega", limit=sq.MAX_RESULT_LIMIT, scope=_scope(tags=["family"])
+        )
+        assert scoped["result_count"] == 1
+        assert scoped["results"][0]["recording_id"] == _rid(target.pk)
+        assert scoped["results"][0]["rank"] == 1
+        assert scoped["truncated"] is False
+        assert scoped["more_recordings_matched"] == 0
+
+    def test_scope_excludes_out_of_scope_truncation_entirely(self):
+        """With an explicit low global bound, the SAME flooded corpus is
+        honestly truncated unscoped but NOT truncated in scope —
+        out-of-scope candidates cannot inflate in-scope counts."""
+        target = _seed(["gammaomega appears once in scope"], "trunc-target")[0]
+        tag = make_tag("Family")
+        make_tag_assignment(target, tag)
+        for index in range(240):
+            _seed(["gammaomega gammaomega gammaomega outside scope"], f"trunc-{index}")
+        si.rebuild_index()
+
+        kwargs = dict(limit=sq.MAX_RESULT_LIMIT, max_scored_documents=200)
+        assert sq.search_recordings("gammaomega", **kwargs)["truncated"] is True
+
+        scoped = sq.search_recordings(
+            "gammaomega", scope=_scope(tags=["family"]), **kwargs
+        )
+        assert scoped["result_count"] == 1
+        assert scoped["truncated"] is False
+        assert scoped["more_recordings_matched"] == 0
+
+    def test_scope_date_filter_uses_effective_at_semantics(self):
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        from workflow.models import Recording
+
+        fresh = _seed(["scoped by effective date marker"], "scope-date-1")[0]
+        old = _seed(["scoped by effective date marker"], "scope-date-2")[0]
+        base = datetime(2026, 1, 10, 12, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        Recording.objects.filter(pk=fresh.pk).update(recorded_at=base)
+        Recording.objects.filter(pk=old.pk).update(recorded_at=base - timedelta(days=9))
+        si.rebuild_index()
+
+        payload = sq.search_recordings(
+            "effective",
+            limit=50,
+            scope=_scope(date_from=(base - timedelta(days=2)).date()),
+        )
+        ids = {r["recording_id"] for r in payload["results"]}
+        assert ids == {_rid(fresh.pk)}
+
+    def test_scope_params_bind_after_term_params_in_mixed_queries(self):
+        """Short-term LIKE params + scope params: a tag name containing
+        LIKE metacharacters must bind as data, never as a pattern."""
+        from brainlib.config import tag_name_key
+
+        target = _seed(["quarterly zeta marker with odd tag"], "scope-params-1")[0]
+        decoy = _seed(["quarterly zeta marker elsewhere"], "scope-params-2")[0]
+        tag = make_tag("100%_Møter")
+        make_tag_assignment(target, tag)
+        si.rebuild_index()
+        del decoy
+
+        payload = sq.search_recordings(
+            "z zeta",  # 1-codepoint term (LIKE) AND 4-codepoint term (MATCH)
+            limit=50,
+            scope=_scope(tags=[tag_name_key(tag.name)]),
+        )
+        assert payload["result_count"] == 1
+        assert payload["results"][0]["recording_id"] == _rid(target.pk)
+
+    def test_scoped_engine_never_runs_the_full_sweep(self, monkeypatch):
+        from workflow.models import Recording
+
+        made = _seed(["sweep independence under scope"], "scope-sweep")
+        si.rebuild_index()
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("the engine must never run build_status_report")
+
+        monkeypatch.setattr(sq, "build_status_report", forbidden)
+        payload = sq.search_recordings(
+            "independence", scope=Recording.objects.filter(pk=made[0].pk)
+        )
+        assert payload["result_count"] == 1
+
+
+class TestScopeCompilationFailures:
+    """5A.4.2a review round 2: empty scopes answer zero results, every
+    other compilation failure is the same sanitized index failure, and
+    nothing internal (SQL, params, paths, the query, the underlying
+    exception text) ever escapes."""
+
+    def test_empty_scope_is_valid_and_answers_zero_results(self):
+        from workflow.models import Recording
+
+        _built(["anything at all remains outside an empty scope"], "scope-empty")
+        payload = sq.search_recordings("anything", scope=Recording.objects.none())
+        assert payload["result_count"] == 0
+        assert payload["truncated"] is False
+        assert payload["more_recordings_matched"] == 0
+        assert payload["results"] == []
+
+    def test_compiler_discovered_empty_scope_is_also_a_valid_zero_answer(self):
+        """``filter(pk__in=[])`` carries NO internal empty flag; only the
+        compiler (EmptyResultSet) proves it empty. It must answer the
+        same normal zero result — never the sanitized index error."""
+        from workflow.models import Recording
+
+        _built(["anything at all remains outside an empty in scope"], "scope-empty-in")
+        payload = sq.search_recordings(
+            "anything", scope=Recording.objects.filter(pk__in=[])
+        )
+        assert payload["result_count"] == 0
+        assert payload["truncated"] is False
+        assert payload["more_recordings_matched"] == 0
+        assert payload["results"] == []
+
+    def test_filter_scope_matching_nothing_also_answers_zero(self):
+        _built(["anything at all remains outside an empty filter"], "scope-empty2")
+        # The approved builder path: a tag nobody carries compiles
+        # normally but selects nobody — same zero answer, normal route.
+        payload = sq.search_recordings("anything", scope=_scope(tags=["tag-nobody"]))
+        assert payload["result_count"] == 0
+
+    def test_scope_compiler_failure_is_sanitized(self, monkeypatch):
+        import traceback as traceback_module
+
+        from django.db.models.sql.compiler import SQLCompiler
+
+        from workflow.models import Recording
+
+        _built(["scope compilation sentinel budget"], "scope-boom")
+        sentinel = "SENTINEL-SECRET /Users/owner/private/path SELECT secret_sql"
+        real_as_sql = SQLCompiler.as_sql
+
+        def guarded(self, *args, **kwargs):
+            query = self.query
+            if (
+                getattr(query, "model", None) is Recording
+                and tuple(getattr(query, "values_select", ())) == ("pk",)
+                and not query.is_sliced
+            ):
+                raise ValueError(sentinel)
+            return real_as_sql(self, *args, **kwargs)
+
+        monkeypatch.setattr(SQLCompiler, "as_sql", guarded)
+        with pytest.raises(sq.SearchIndexError) as excinfo:
+            sq.search_recordings("budgetcanary", scope=Recording.objects.all())
+        error = excinfo.value
+        assert str(error) == sq._QUERY_FAILED_ERROR
+        assert "SENTINEL" not in str(error)
+        assert "budgetcanary" not in str(error)  # the query never rides along
+        rendered = "".join(
+            traceback_module.format_exception(type(error), error, error.__traceback__)
+        )
+        # The underlying failure text is gone: not in the message, not in
+        # any rendered frame, and no chained exception is shown.
+        assert "SENTINEL" not in rendered
+        assert error.__cause__ is None
+        assert error.__suppress_context__ is True

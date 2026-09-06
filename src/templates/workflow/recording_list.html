@@ -6,6 +6,7 @@
 <section class="filter-area" aria-label="Library filters">
   <form method="get" action="{% url 'recordings' %}" class="filter-form">
     <input type="hidden" name="view" value="{{ effective_view }}">
+    {% if search_qs %}<input type="hidden" name="q" value="{{ search_query }}">{% endif %}
     <div class="filter-row-1">
       <div class="filter-group">
         <label class="filter-group-label" for="id_from">From</label>
@@ -19,6 +20,7 @@
       <div class="filter-group filter-sort">
         <label class="filter-group-label" for="id_sort">Sort</label>
         <select id="id_sort" name="sort">
+          {% if searching %}<option value="relevance" {% if filters.sort == 'relevance' %}selected{% endif %}>Relevance</option>{% endif %}
           <option value="newest" {% if filters.sort == 'newest' %}selected{% endif %}>Newest first</option>
           <option value="oldest" {% if filters.sort == 'oldest' %}selected{% endif %}>Oldest first</option>
           <option value="title_az" {% if filters.sort == 'title_az' %}selected{% endif %}>Title A–Z</option>
@@ -26,8 +28,8 @@
         </select>
       </div>
       <div class="view-toggle" aria-label="View mode">
-        <a class="view-toggle-btn{% if effective_view == 'cards' %} active{% endif %}" href="{% url 'recordings' %}?view=cards{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}" aria-label="Card view" title="Card view"{% if effective_view == 'cards' %} aria-current="true"{% endif %}>Cards</a>
-        <a class="view-toggle-btn{% if effective_view == 'table' %} active{% endif %}" href="{% url 'recordings' %}?view=table{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}" aria-label="Table view" title="Table view"{% if effective_view == 'table' %} aria-current="true"{% endif %}>Table</a>
+        <a class="view-toggle-btn{% if effective_view == 'cards' %} active{% endif %}" href="{% url 'recordings' %}?view=cards{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}{% if search_qs %}&amp;{{ search_qs }}{% endif %}" aria-label="Card view" title="Card view"{% if effective_view == 'cards' %} aria-current="true"{% endif %}>Cards</a>
+        <a class="view-toggle-btn{% if effective_view == 'table' %} active{% endif %}" href="{% url 'recordings' %}?view=table{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}{% if search_qs %}&amp;{{ search_qs }}{% endif %}" aria-label="Table view" title="Table view"{% if effective_view == 'table' %} aria-current="true"{% endif %}>Table</a>
       </div>
       <button type="submit" class="apply-btn">Apply</button>
     </div>
@@ -41,7 +43,7 @@
       {% empty %}
         <span class="muted">No configured tags.</span>
       {% endfor %}
-      {% if filters_qs %}<a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}">Clear all</a>{% endif %}
+      {% if filters_qs or search_qs %}<a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}">Clear all</a>{% endif %}
     </div>
   </form>
 </section>
@@ -53,6 +55,90 @@
     {% endfor %}
   </div>
 {% endif %}
+
+{% if searching %}
+
+  {% if search.state == 'invalid' or search.state == 'index' %}
+    <div class="messages" aria-live="polite">
+      <div class="message message-error" role="status">{{ search.message }}</div>
+    </div>
+    {% if note_unscoped %}<p class="search-note muted">{{ note_unscoped }}</p>{% endif %}
+    <p class="empty-state"><a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}">Clear search</a></p>
+
+  {% elif search.rows %}
+    <div class="results-header">
+      <span class="results-count">{{ search.result_count }} search result{{ search.result_count|pluralize }} for &ldquo;{{ search.echo_query }}&rdquo;</span>
+      <a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}">Clear search</a>
+    </div>
+    {% if note_unscoped %}<p class="search-note muted">{{ note_unscoped }}</p>{% endif %}
+    {% for note in search.notes %}<p class="search-note muted">{{ note }}</p>{% endfor %}
+
+    {% if effective_view == 'table' %}
+      <div class="recording-table-wrap">
+        <table class="recording-table">
+          <caption class="visually-hidden">Search results</caption>
+          <thead>
+            <tr>
+              <th scope="col">Date &amp; time</th>
+              <th scope="col">Title</th>
+              <th scope="col">Duration</th>
+              <th scope="col">Tags</th>
+              <th scope="col">Languages</th>
+              <th scope="col">Match</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in search.rows %}
+              <tr class="{% if row.card.needs_attention %}needs-attention{% endif %}">
+                <td data-label="Date &amp; time">{{ row.card.effective_at_label }} {{ row.card.effective_at|local_time }}</td>
+                <td data-label="Title">
+                  <a class="col-title" href="{% url 'recording-detail' row.card.recording.pk %}">{{ row.card.title }}</a>
+                  {% if row.snippet_text %}<div class="search-snippet">{{ row.snippet_text }}</div>{% endif %}
+                </td>
+                <td data-label="Duration">{{ row.card.recording.duration_seconds|duration }}</td>
+                <td data-label="Tags">{% for assignment in row.card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
+                <td data-label="Languages">{% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
+                <td data-label="Match"><span class="match-chip match-{{ row.match_source }}">{{ row.match_label }}</span></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <ul class="recording-list">
+        {% for row in search.rows %}
+          <li class="recording-card {% if row.card.needs_attention %}needs-attention{% endif %}">
+            <div class="recording-card-header">
+              <div class="recording-card-title"><a href="{% url 'recording-detail' row.card.recording.pk %}">{{ row.card.title }}</a></div>
+              <span class="status status-{{ row.card.recording.processing_status }}">{{ row.card.recording.get_processing_status_display }}</span>
+            </div>
+            <div class="recording-card-meta">
+              <span>{{ row.card.effective_at_label }} {{ row.card.effective_at|local_time }}</span>
+              <span>{{ row.card.recording.duration_seconds|duration }}</span>
+              <span class="match-chip match-{{ row.match_source }}">{{ row.match_label }}</span>
+            </div>
+            {% if row.snippet_text %}<p class="search-snippet">{{ row.snippet_text }}</p>{% endif %}
+            <div class="recording-card-footer">
+              <div class="recording-card-tags">{% for assignment in row.card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">no tags</span>{% endfor %}</div>
+              <div class="recording-card-langs" aria-label="Available summary languages">{% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">no summaries</span>{% endfor %}</div>
+            </div>
+          </li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+
+    {% include "workflow/_pagination.html" with page=search.page %}
+
+  {% else %}
+    <div class="results-header">
+      <span class="results-count">No search results for &ldquo;{{ search.echo_query }}&rdquo;</span>
+      <a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}">Clear search</a>
+    </div>
+    {% if note_unscoped %}<p class="search-note muted">{{ note_unscoped }}</p>{% endif %}
+    {% for note in search.notes %}<p class="search-note muted">{{ note }}</p>{% endfor %}
+  {% endif %}
+
+{% else %}
 
 <div class="results-header">
   <span class="results-count">{{ page.paginator.count }} recording{{ page.paginator.count|pluralize }}</span>
@@ -121,5 +207,7 @@
 
 {% else %}
   <p class="empty-state">No recordings match these filters.</p>
+{% endif %}
+
 {% endif %}
 {% endblock %}

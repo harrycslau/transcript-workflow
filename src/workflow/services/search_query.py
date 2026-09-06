@@ -69,10 +69,24 @@ Query contract (plain-text users only, never raw FTS MATCH syntax):
   window and merged only among displayed ranges, so every returned
   range is non-empty, ordered, non-overlapping and inside the text.
 
+Recording scope (Step 5A.4.2a, ``scope=`` parameter): an OPTIONAL
+constrained ``Recording`` eligibility QuerySet (built by
+``workflow.query.search_scope_queryset`` — never a SQL string) restricts
+the candidate population BEFORE ranking: the engine validates the model,
+clears ordering, forces a single-column PK selection and compiles it on
+the SAME database alias; the predicate lands in the innermost matched-set
+WHERE, which SQL evaluates before the window functions, so
+``ROW_NUMBER``, both ``COUNT(*) OVER`` bounds, ``truncated`` and
+``more_recordings_matched`` are all in-scope truths — out-of-scope
+documents can neither evict in-scope candidates at the bounds nor trigger
+truncation, and a lower-ranked in-scope match can never be starved by an
+out-of-scope flood.
+
 Index/SQLite failures, malformed input and over-cap queries raise
 ``ConfigError`` subclasses with fixed sanitized messages: category and
 command names only, never query text, indexed content, keys, paths or
-SQL.
+SQL — including scope-related errors (the compiled scope SQL is never
+echoed anywhere).
 """
 
 from __future__ import annotations
@@ -146,6 +160,9 @@ _FTS_BROKEN_ERROR = (
 _WINDOW_UNSUPPORTED_ERROR = (
     "keyword search requires SQLite window functions (SQLite 3.25+); "
     "this Python SQLite build does not provide them"
+)
+_SCOPE_TYPE_ERROR = (
+    "the search scope must be an unsliced queryset of Recordings"
 )
 _QUERY_FAILED_ERROR = (
     "the keyword-search index could not be queried; inspect with: "
@@ -296,6 +313,54 @@ def _registry_table() -> str:
     return SearchDocument._meta.db_table
 
 
+def _compile_scope(scope, *, using: str) -> tuple[str, list]:
+    """Validate and compile the constrained recording-scope QuerySet.
+
+    The public contract (Step 5A.4.2a) is a QuerySet, never SQL text:
+    callers pass a plain ``Recording`` eligibility queryset (see
+    ``workflow.query.search_scope_queryset``). This is the ONLY place
+    scope SQL is ever produced:
+
+    - accepts ONLY an UNSLICED ``QuerySet`` whose model is EXACTLY
+      ``Recording`` (anything else is a stable, content-free error);
+    - clears any caller ordering and forces a single-column PK
+      selection — never trusting the caller's shape;
+    - compiles on the SAME database alias used for the search, so the
+      subquery always agrees with the outer query dialectically.
+
+    An EMPTY scope is VALID for EVERY empty-query form —
+    ``Recording.objects.none()``, ``filter(pk__in=[])`` or any other
+    range the compiler proves empty: Django refuses to emit SQL for
+    such queries (``EmptyResultSet`` from ``as_sql``), which is caught
+    and answered with the same provably-empty subquery, going through
+    the normal zero-result path — never an error. The compiler is the
+    single source of truth for emptiness (no reliance on internal
+    query flags, which only cover some forms).
+
+    Every OTHER compilation failure is the same sanitized index failure
+    as any other query execution failure (``from None`` severs the
+    context chain): compiled SQL, parameters, paths, indexed content,
+    the query and the underlying exception text NEVER escape.
+    """
+    from django.core.exceptions import EmptyResultSet
+    from django.db.models import QuerySet
+
+    from workflow.models import Recording
+
+    if not isinstance(scope, QuerySet) or scope.model is not Recording:
+        raise SearchQueryInputError(_SCOPE_TYPE_ERROR)
+    if scope.query.is_sliced:
+        raise SearchQueryInputError(_SCOPE_TYPE_ERROR)
+    scoped = scope.order_by().values_list("pk", flat=True)
+    try:
+        sql, params = scoped.query.get_compiler(using=using).as_sql()
+    except EmptyResultSet:
+        return "SELECT NULL WHERE 1 = 0", []
+    except Exception:
+        raise SearchIndexError(_QUERY_FAILED_ERROR) from None
+    return sql, list(params)
+
+
 # Mirrors _DOC_TYPE_RANKS: within one Recording the per-recording
 # candidate bound keeps Summary first, then Recording metadata, then
 # Segments (document_key order inside each class) — a flood of matching
@@ -339,10 +404,24 @@ _LIKE_GROUP = (
 )
 
 
-def _build_selection(terms: list[str]) -> tuple[str, list]:
+def _build_selection(
+    terms: list[str],
+    scope_sql: str | None = None,
+    scope_params: list | None = None,
+) -> tuple[str, list]:
     """Deterministic AND-combined selection SQL over the registry JOIN
     (never raw FTS order/rowid): long terms become one quoted MATCH
-    phrase each; short terms become escaped Unicode-aware LIKE groups."""
+    phrase each; short terms become escaped Unicode-aware LIKE groups;
+    an optional engine-compiled scope restricts ``d.recording_id`` to
+    the eligibility subquery.
+
+    Placement is load-bearing (Step 5A.4.2a): every predicate —
+    including the scope — lands in the INNERMOST matched-set WHERE.
+    SQL evaluates WHERE before the window functions of the same SELECT,
+    so ``ROW_NUMBER``, both ``COUNT(*) OVER`` bounds, ``truncated`` and
+    ``more_recordings_matched`` are computed over the in-scope
+    population only. Param order: terms → scope → window bounds.
+    """
     where: list[str] = []
     params: list = []
     needs_fold = False
@@ -355,6 +434,9 @@ def _build_selection(terms: list[str]) -> tuple[str, list]:
             where.append(_LIKE_GROUP)
             pattern = _short_term_pattern(term)
             params.extend([pattern, pattern, pattern])
+    if scope_sql is not None:
+        where.append(f"d.recording_id IN ({scope_sql})")
+        params.extend(scope_params or [])
     sql = _selection_sql(" AND ".join(where))
     return sql, params, needs_fold
 
@@ -382,6 +464,8 @@ def _select_candidates(
     using: str,
     max_scored_documents: int,
     per_recording_candidates: int,
+    scope_sql: str | None = None,
+    scope_params: list | None = None,
 ) -> tuple[list[dict], bool, bool]:
     """Returns ``(candidates, truncated, recordings_complete)``.
 
@@ -400,7 +484,9 @@ def _select_candidates(
     Recording) so the Recording set stays complete while that one
     Recording's best document stays approximate.
     """
-    sql, params, needs_fold = _build_selection(terms)
+    sql, params, needs_fold = _build_selection(
+        terms, scope_sql=scope_sql, scope_params=scope_params
+    )
     if needs_fold:
         try:
             ensure_fold_function(using)
@@ -635,6 +721,7 @@ def search_recordings(
     using: str = "default",
     max_scored_documents: int = MAX_SCORED_DOCUMENTS,
     per_recording_candidates: int = PER_RECORDING_CANDIDATES,
+    scope=None,
 ) -> dict:
     """Run one read-only keyword search against the existing index.
 
@@ -642,6 +729,16 @@ def search_recordings(
     the caller's policy), NEVER rebuilds, repairs, synchronizes, locks
     or writes. Returns one deduplicated result per Recording with plain
     text snippets, structured highlight offsets and match provenance.
+
+    ``scope`` (Step 5A.4.2a) is an optional constrained ``Recording``
+    eligibility QuerySet (``workflow.query.search_scope_queryset``) —
+    never SQL text. It restricts the candidate population INSIDE the
+    innermost matched-set WHERE, i.e. BEFORE the window functions, so
+    ranking, both candidate bounds, ``truncated`` and
+    ``more_recordings_matched`` are in-scope truths and a lower-ranked
+    in-scope Recording can never be evicted by out-of-scope matches.
+    With ``scope=None`` the SQL and results are byte-identical to the
+    unscoped engine (parity-tested).
     """
     normalized = normalize_query(query)
     _validate_limit(limit)
@@ -652,11 +749,18 @@ def search_recordings(
 
     _require_queryable_index(using=using)
 
+    if scope is not None:
+        scope_sql, scope_params = _compile_scope(scope, using=using)
+    else:
+        scope_sql = scope_params = None
+
     candidates, truncated, recordings_complete = _select_candidates(
         terms,
         using=using,
         max_scored_documents=max_scored_documents,
         per_recording_candidates=per_recording_candidates,
+        scope_sql=scope_sql,
+        scope_params=scope_params,
     )
 
     best: dict[str, tuple[tuple, dict, dict]] = {}

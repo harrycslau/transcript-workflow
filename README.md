@@ -180,8 +180,8 @@ source filenames, active tags — never paths or secrets).
   wrong-tokenizer FTS table is repaired by a rebuild.
 - The index is kept current automatically (Step 5A.3 post-commit
   per-recording synchronization) and is queried read-only by
-  `brain search` (Step 5A.4.1, below). The Library search field stays
-  disabled until the Step 5A.4.2 web search.
+  `brain search` (Step 5A.4.1, below) and by the Library's top-bar
+  keyword search (Step 5A.4.2a, below).
 
 ### Keyword search (Step 5A.4.1)
 
@@ -203,8 +203,9 @@ uv run brain search "budget" --limit 20 --json
   integrity check EXACTLY once; a missing, broken or stale index is a
   clean exit 1 pointing at `brain search-index rebuild` — never
   partially-served stale results. The reusable query engine itself is
-  separate from that gate, so the Step 5A.4.2 web search can later
-  apply a safe cached-health policy without touching the engine.
+  separate from that gate; the web search (Step 5A.4.2a, below) chose
+  the strictest policy instead of any health cache: the same full
+  sweep runs exactly once per submitted search.
 - Results are deduplicated to ONE entry per Recording with
   deterministic, rebuild-stable ranking. Candidate selection is
   bounded globally and per Recording; the per-Recording bound keeps
@@ -224,6 +225,34 @@ uv run brain search "budget" --limit 20 --json
   `output_language`) or a transcript segment (with timestamp).
 - Exit codes: **0** searched (also with zero results), **1** config or
   missing/broken/stale index, **2** malformed query or bad `--limit`.
+
+### Library keyword search (Step 5A.4.2a)
+
+The top-bar search field on `/recordings/` runs the same read-only
+engine without leaving the Library:
+
+- One submitted search runs the FULL index integrity sweep EXACTLY
+  once (no health cache): a missing, broken or stale index is a
+  friendly page pointing at `brain search-index status` / `rebuild` —
+  never partially-served stale results, and the web layer never
+  repairs anything itself.
+- Active Library filters (dates, tags) scope the search itself: they
+  narrow the engine's candidate population BEFORE relevance ranking,
+  result bounds and pagination, so lower-ranked in-filter matches are
+  never starved out by an out-of-filter flood. Invalid scope filters
+  run the search unscoped, labelled honestly; an invalid sort falls
+  back to Relevance and keeps every valid filter.
+- Sorting: Relevance (the engine's deterministic comparator order —
+  default and fallback in search mode) or any of the four Library
+  sorts applied across the whole returned match set before pagination.
+- The query, view mode and filters persist across pagination, view
+  toggles and filter edits via plain links/form state; everything
+  works without JavaScript.
+- Privacy: an invalid query or an index-failure page NEVER echoes the
+  rejected text back; error messages are fixed, actionable texts.
+- Strictly read-only: a search GET never writes, locks, rebuilds or
+  synchronizes; result cards are batch-fetched (no per-result
+  queries).
 
 ### Routing profiles and the routing policy
 
@@ -390,9 +419,10 @@ uv run brain serve --host 127.0.0.1 --port 9000
   Oldest, Title A–Z, Title Z–A) and month headings for chronological
   sorts. Card/Table preference is remembered via a server-owned
   `view=`-overridable cookie; everything works without JavaScript.
-  Keyword search exists on the CLI (`brain search`, Step 5A.4.1); the
-  Library search field stays a disabled placeholder until the Step
-  5A.4.2 web search wires it.
+  Keyword search exists on the CLI (`brain search`, Step 5A.4.1) and
+  in the Library itself: the top-bar field runs a keyword search over
+  the same read-only engine (Step 5A.4.2a) — see the Library keyword
+  search section below.
 - `GET /status/` — the status page (app version, storage availability,
   MacWhisper/oMLX configuration, selected models, pipeline counts).
   Page loads run only lightweight local checks; they never launch
@@ -419,10 +449,11 @@ network access, or real audio.
 
 ## Current limitations
 
-- No search UI yet: `brain search` (Step 5A.4.1) is CLI-only, and the
-  Library search field is still a disabled placeholder (the web UI is
-  Step 5A.4.2). Semantic search/hybrid ranking and Ask-with-citations
-  remain later Step 5 work. Keyword matching is substring-style (FTS5
+- Library web search exists (Step 5A.4.2a, keyword-only): snippet
+  highlight fragments, segment timestamp jump links and visual/
+  accessibility polish of search rows are Step 5A.4.2b; semantic
+  search/hybrid ranking and Ask-with-citations remain later Step 5
+  work. Keyword matching is substring-style (FTS5
   trigrams + a Unicode-folded LIKE fallback for 1–2-codepoint terms),
   not stemmed or word-tokenized.
 - No manual topic splitting, scheduling, or retention deletion yet

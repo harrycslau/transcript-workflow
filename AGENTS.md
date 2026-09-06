@@ -378,10 +378,21 @@ Non-negotiable principles:
   dedup, plain-text snippets with offset ranges, and a health split:
   the CLI runs the full `search-index status` sweep EXACTLY ONCE as a
   hard gate (missing/broken/stale ⇒ exit 1, never rebuild), while the
-  engine itself only checks structural queryability. **5A.4.2+ (not
-  implemented)**: web search (its cached-health policy, form,
-  rendering), semantic/hybrid search — do not implement them as part
-  of index maintenance.
+  engine itself only checks structural queryability. **5A.4.2a
+  (delivered)**: Library keyword web search
+  (`workflow/services/search_web.py` + the enabled top-bar field on
+  `/recordings/`) — the FULL health sweep runs EXACTLY once per
+  submitted search GET (NO health cache is permitted); filters scope
+  the ENGINE candidate set via a `scope` Recording-QuerySet parameter
+  compiled inside `search_query.py` into the innermost WHERE (before
+  all window functions, so bounds/truncation/more-match counts are
+  scope-honest); search sorting defaults/falls back to `relevance`
+  (engine order, never a DB ORDER BY) through a structured
+  `sort_error` channel that keeps valid filters; invalid-query and
+  index-failure states clear the echoed query entirely. **5A.4.2b+
+  (not implemented)**: snippet highlight fragments, segment
+  timestamp links, styling/accessibility polish, semantic/hybrid
+  search — do not implement them as part of index maintenance.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (deletion only after successful
   processing + retention delay), launchd scheduling.

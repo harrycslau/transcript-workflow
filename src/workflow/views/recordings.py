@@ -42,30 +42,89 @@ def _effective_view(request) -> str:
 
 def recording_list(request):
     config = get_config()
-    filters = list_filters(request.GET, config.timezone)
-    queryset = recording_list_queryset()
-    if filters.valid:
-        queryset = apply_filters(queryset, filters, config.timezone)
-    paginator = Paginator(queryset, config.web.recordings_per_page)
-    page = paginator.get_page(request.GET.get("page"))
-    cards = [RecordingCard(recording) for recording in page.object_list]
+    raw_q = request.GET.get("q")
+    # A missing or blank/whitespace q is the NORMAL Library: no
+    # validation, no health gate, no engine call — never an
+    # "invalid query" state.
+    searching = raw_q is not None and bool(raw_q.strip())
+    # Search mode extends the sort contract (relevance default/fallback
+    # through the structured sort_error channel); Library mode is the
+    # historical parser.
+    filters = list_filters(request.GET, config.timezone, allow_relevance=searching)
+    view = _effective_view(request)
     from workflow.models import Tag
 
-    view = _effective_view(request)
-    filters_qs = filters.as_querystring()
-    base_qs = filters_qs + (f"&view={view}" if filters_qs else f"view={view}")
+    search = None
+    if searching:
+        from workflow.services import search_web
 
-    context = {
-        "cards": cards,
-        "page": page,
-        "filters": filters,
-        "filter_errors": filters.errors,
-        "filters_qs": filters_qs,
-        "base_qs": base_qs,
-        "effective_view": view,
-        "show_month_headings": filters.sort in ("newest", "oldest"),
-        "configured_tags": Tag.objects.filter(is_configured=True).order_by("name"),
-    }
+        search = search_web.run_web_search(
+            raw_query=raw_q,
+            filters=filters,
+            timezone_name=config.timezone,
+            page_number=request.GET.get("page"),
+            per_page=config.web.recordings_per_page,
+        )
+
+    filters_qs = filters.as_querystring()
+    search_qs = ""
+    if search is not None and search.echo_query:
+        import urllib.parse
+
+        search_qs = urllib.parse.urlencode({"q": search.echo_query})
+
+    if search is not None:
+        # Search results REPLACE the normal Library list on this same
+        # page. The engine already applied filters, truncation flags
+        # and ranking; sorting/pagination happened in the service —
+        # this branch only renders.
+        filter_messages = list(filters.errors)
+        if filters.sort_error:
+            filter_messages.append(filters.sort_error)
+        base_parts = [part for part in (search_qs, filters_qs) if part]
+        base_qs = "&".join(base_parts + [f"view={view}"])
+        context = {
+            "searching": True,
+            "search": search,
+            # None on invalid/index states: the rejected query is never
+            # echoed anywhere in the response.
+            "search_query": search.echo_query,
+            "search_qs": search_qs,
+            "note_unscoped": (
+                search_web.NOTE_UNSCOPED_FILTERS if search.unscoped_filters else ""
+            ),
+            "filters": filters,
+            "filter_errors": filter_messages,
+            "filters_qs": filters_qs,
+            "base_qs": base_qs,
+            "effective_view": view,
+            "show_month_headings": filters.sort in ("newest", "oldest"),
+            "configured_tags": Tag.objects.filter(is_configured=True).order_by("name"),
+        }
+    else:
+        queryset = recording_list_queryset()
+        if filters.valid:
+            queryset = apply_filters(queryset, filters, config.timezone)
+        paginator = Paginator(queryset, config.web.recordings_per_page)
+        page = paginator.get_page(request.GET.get("page"))
+        cards = [RecordingCard(recording) for recording in page.object_list]
+
+        base_qs = filters_qs + (f"&view={view}" if filters_qs else f"view={view}")
+        context = {
+            "searching": False,
+            "search_query": None,
+            "search_qs": "",
+            "cards": cards,
+            "page": page,
+            "filters": filters,
+            "filter_errors": filters.errors,
+            "filters_qs": filters_qs,
+            "base_qs": base_qs,
+            "effective_view": view,
+            "show_month_headings": filters.sort in ("newest", "oldest"),
+            "configured_tags": Tag.objects.filter(is_configured=True).order_by("name"),
+        }
+
     response = render(request, "workflow/recording_list.html", context)
     if request.GET.get("view") in VALID_VIEWS:
         # Server-owned preference; explicit query param always wins over

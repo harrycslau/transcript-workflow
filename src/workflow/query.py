@@ -366,12 +366,33 @@ class ListFilters:
     review: bool = False
     audio: str | None = None
     has_summary: bool | None = None
-    sort: str = "newest"  # newest | oldest | title_az | title_za
+    sort: str = "newest"  # newest | oldest | title_az | title_za (+ relevance in search mode)
+    # Stored sort mode (Step 5A.4.2a, explicit — never implicit): the
+    # default the ``sort`` parameter is omitted against in
+    # ``as_querystring()``. The Library keeps "newest"; search mode
+    # (``allow_relevance=True``) stores "relevance".
+    sort_default: str = "newest"
+    # Search-mode-only structured channel (5A.4.2a): an invalid SORT is
+    # never mixed into ``errors`` (which mean "the scope filters cannot
+    # be applied"): it falls back to the mode default and reports here,
+    # so a bad sort retains every valid filter.
+    sort_error: str | None = None
 
     errors: list[str] = dc_field(default_factory=list)
 
     @property
     def valid(self) -> bool:
+        return not self.errors
+
+    @property
+    def scope_valid(self) -> bool:
+        """Whether the SCOPE FILTERS are safe to apply (search layer).
+
+        Identical predicate to ``valid`` today, but semantically
+        distinct: ``sort_error`` must never affect scope eligibility —
+        an invalid sort keeps the valid filters and only changes the
+        ordering.
+        """
         return not self.errors
 
     def as_querystring(self) -> str:
@@ -400,7 +421,7 @@ class ListFilters:
             params["audio"] = [self.audio]
         if self.has_summary is not None:
             params["has_summary"] = ["1" if self.has_summary else "0"]
-        if self.sort != "newest":
+        if self.sort != self.sort_default:
             params["sort"] = [self.sort]
         return urllib.parse.urlencode(params, doseq=True)
 
@@ -409,13 +430,27 @@ def _parse_date(value: str) -> date | None:
     return date.fromisoformat(value)
 
 
-def list_filters(GET, timezone_name: str = "Europe/Helsinki") -> ListFilters:
+def list_filters(
+    GET, timezone_name: str = "Europe/Helsinki", *, allow_relevance: bool = False
+) -> ListFilters:
     """Parse and validate the recording-list query string.
 
     Invalid values append friendly messages to ``errors`` (the affected
     filter is ignored) — an invalid filter is never a server error.
+
+    ``allow_relevance=True`` (Step 5A.4.2a search mode) extends the sort
+    contract: ``relevance`` is accepted and becomes BOTH the default and
+    the deterministic fallback for an invalid sort, reported through the
+    structured ``sort_error`` channel instead of ``errors`` — so an
+    invalid sort never invalidates the valid scope filters. With the
+    default (Library listing) the behavior is exactly the historical
+    one: ``relevance`` is rejected into ``errors`` and the fallback is
+    ``newest``.
     """
-    filters = ListFilters()
+    filters = ListFilters(
+        sort="relevance" if allow_relevance else "newest",
+        sort_default="relevance" if allow_relevance else "newest",
+    )
 
     def _date_param(name: str, target_attr: str, label: str) -> None:
         raw = (GET.get(name) or "").strip()
@@ -465,12 +500,22 @@ def list_filters(GET, timezone_name: str = "Europe/Helsinki") -> ListFilters:
         else:
             filters.audio = audio
 
-    sort = (GET.get("sort") or "newest").strip().lower()
-    if sort not in SORT_CHOICES:
-        filters.errors.append(
-            "'sort' must be one of 'newest', 'oldest', 'title_az', 'title_za'."
-        )
-        sort = "newest"
+    valid_sorts = SORT_CHOICES + (("relevance",) if allow_relevance else ())
+    sort = (GET.get("sort") or filters.sort_default).strip().lower()
+    if sort not in valid_sorts:
+        if allow_relevance:
+            # Structured search-mode channel: the scope filters stay
+            # valid; only the sort falls back (deterministically).
+            filters.sort_error = (
+                "'sort' must be one of 'relevance', 'newest', 'oldest', "
+                "'title_az', 'title_za'."
+            )
+            sort = "relevance"
+        else:
+            filters.errors.append(
+                "'sort' must be one of 'newest', 'oldest', 'title_az', 'title_za'."
+            )
+            sort = "newest"
     filters.sort = sort
 
     has_summary_raw = (GET.get("has_summary") or "").strip()
@@ -507,8 +552,14 @@ def local_day_bounds(day: date, timezone_name: str) -> tuple[datetime, datetime]
     return start, end
 
 
-def apply_filters(queryset, filters: ListFilters, timezone_name: str):
-    """Apply parsed filters to the (already annotated) queryset."""
+def filter_only(queryset, filters: ListFilters, timezone_name: str):
+    """Apply ONLY the relational filter predicates (Step 5A.4.2a split).
+
+    No ordering — this is the scope-building half of ``apply_filters``
+    (the search scope queryset reuses exactly these predicates, so
+    filtering semantics can never diverge between the Library listing
+    and a scoped keyword search).
+    """
     if filters.date:
         start, end = local_day_bounds(filters.date, timezone_name)
         queryset = queryset.filter(effective_at__gte=start, effective_at__lt=end)
@@ -561,7 +612,38 @@ def apply_filters(queryset, filters: ListFilters, timezone_name: str):
         )
         queryset = queryset.filter(current).distinct() if filters.has_summary else queryset.exclude(current).distinct()
 
-    return queryset.order_by(*_sort_order(filters.sort))
+    return queryset
+
+
+def apply_filters(queryset, filters: ListFilters, timezone_name: str):
+    """Apply parsed filters and the list ordering (historical contract:
+    exact composition of :func:`filter_only` + :func:`apply_sort`)."""
+    return apply_sort(filter_only(queryset, filters, timezone_name), filters.sort)
+
+
+def apply_sort(queryset, sort: str):
+    """Order a (filtered) queryset by one of the Library sort choices.
+
+    ``relevance`` is NEVER ordered here: search-mode relevance order is
+    the engine's comparator output and is preserved by the search
+    orchestration layer, never translated into database ordering.
+    """
+    return queryset.order_by(*_sort_order(sort))
+
+
+def search_scope_queryset(filters: ListFilters, timezone_name: str):
+    """Lightweight ``Recording`` eligibility queryset for search scoping.
+
+    The search backend receives ONLY this constrained QuerySet (never
+    compiled SQL): the engine validates the model, clears ordering and
+    forces a single-column PK selection before compiling it. Built on
+    the plain model with just the ``effective_at`` annotation the date
+    filters need — no presentation annotations, no select/prefetch
+    related, no ordering — and it reuses :func:`filter_only`, so scope
+    semantics can never diverge from the Library filters.
+    """
+    queryset = Recording.objects.annotate(effective_at=effective_at_annotation())
+    return filter_only(queryset, filters, timezone_name)
 
 
 def _sort_order(sort: str):

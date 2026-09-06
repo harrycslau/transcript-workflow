@@ -380,13 +380,19 @@ class TestLockedControls:
         assert str(needs_review.pk) in content
         assert str(ok.pk) not in content
 
-    def test_search_is_disabled_placeholder_only(self, client):
+    def test_search_is_one_enabled_keyword_bar(self, client):
+        """5A.4.2a: the single top-bar search field is functional and
+        keyword-only. Semantic/Hybrid controls must not exist yet —
+        nothing may pretend to work."""
         content = client.get("/recordings/").content.decode()
-        m = re.search(r'<input[^>]*type="search"[^>]*>', content)
-        assert m is not None
-        assert "disabled" in m.group(0)
-        assert "Search coming soon" in content
-        assert "name=" not in m.group(0)  # non-submitting
+        search_inputs = re.findall(r'<input[^>]*type="search"[^>]*>', content)
+        assert len(search_inputs) == 1
+        assert "disabled" not in search_inputs[0]
+        assert 'name="q"' in search_inputs[0]
+        assert "Search coming soon" not in content
+        assert "Semantic" not in content
+        assert "Hybrid" not in content
+        assert 'role="search"' in content
 
 
 # ---------------------------------------------------------------------------

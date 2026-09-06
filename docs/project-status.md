@@ -1,12 +1,87 @@
-# Project status — implementation handoff (Step 5A.4.1 delivered)
+# Project status — implementation handoff (Step 5A.4.2a delivered)
 
-This file reflects the repository through Step 5A.4.1: Step 4, the
+This file reflects the repository through Step 5A.4.2a: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
-(Step 5A.3) and the read-only keyword search backend + CLI
-(Step 5A.4.1). It is a snapshot, not a durable instruction file;
-`AGENTS.md` holds the standing rules.
+(Step 5A.3), the read-only keyword search backend + CLI
+(Step 5A.4.1) and the Library keyword web search (Step 5A.4.2a).
+It is a snapshot, not a durable instruction file; `AGENTS.md` holds
+the standing rules.
+
+## Step 5A.4.2a — Library Keyword Web Search (delivered)
+
+- **Service** `workflow/services/search_web.py` — the ONE home of the
+  Library search flow, strictly read-only: validate → FULL health
+  sweep EXACTLY once per submitted search GET (`preflight_full_health`;
+  NO health cache — safe cross-layer invalidation is not provable) →
+  scoped engine call → search-aware sorting → pagination → ONE
+  prefetch-contracted card fetch for the page window. Blank/whitespace
+  `q` is the normal Library (no validation, no gate, no engine).
+- **Engine scope** (the one real engine change):
+  `search_recordings(..., scope=<Recording QuerySet>)`. The engine
+  validates model/unsliced, clears caller ordering, forces a
+  single-column PK selection and compiles on the same DB alias
+  (`_compile_scope`) — callers pass QuerySets, never SQL. The
+  predicate lands in the INNERMOST matched-set WHERE, BEFORE every
+  window function, so ranking, both bounds, `truncated` and
+  `more_recordings_matched` are computed over the in-scope population
+  only (proven against brute-force ground truth and the 240-flood
+  regression: the lower-ranked in-scope match is never starved;
+  default-bound unscoped runs legitimately answer "top 200 of 241,
+  truncated=false, 41 more" while the scoped run sees only its own
+  matches). `scope=None` is byte-identical to the 5A.4.1 engine.
+- **Sorting contract**: search mode parses sorts with
+  `allow_relevance=True` — `relevance` (engine comparator order,
+  NEVER a DB ORDER BY) is the default AND the structured fallback for
+  invalid sorts via `ListFilters.sort_error` (a bad sort keeps every
+  valid filter; only invalid SCOPE filters fall back to a labelled
+  unscoped search). `ListFilters` gained `sort_default`/`sort_error`/
+  `scope_valid`; `apply_filters` split into `filter_only` +
+  `apply_sort` so `search_scope_queryset` reuses the EXACT Library
+  filter predicates; `as_querystring()` omits the sort iff it equals
+  the mode default.
+- **States**: `ok` (zero results included; query echoed only via
+  autoescaping), `invalid` (fixed bound messages) and `index`
+  (sanitized `search-index status`/`rebuild` guidance). invalid and
+  index states set `echo_allowed=False` — the rejected text appears
+  NOWHERE in the response (proven by canary tests).
+- **Persistence without JavaScript**: the top-bar form submits `q`;
+  the filter form carries a hidden `q`; pagination/view-toggle/
+  filter links carry the merged `base_qs` (q + filters + view).
+  "Clear search" drops only `q`; "Clear all" drops everything.
+- **Purity & cost**: GET-only SELECT/PRAGMA (CaptureQueriesContext)
+  with raise-guards on sync/rebuild/lock; identical query totals for
+  40 vs 5 results and page 1 vs page 2 (no N+1); zero-result pages
+  skip the row fetch. No new URLs, config keys, migrations or schema.
+- **Scope compilation (review rounds 2–3)**: an EMPTY scope is VALID
+  in EVERY empty-query form — `Recording.objects.none()` (flagged) and
+  `filter(pk__in=[])` (compiler-proven only): `as_sql()` raises
+  `django.core.exceptions.EmptyResultSet`, which is caught and answered
+  with the same provably-empty subquery through the normal zero-result
+  path, never `EmptyResultSet` leaking and never the sanitized error
+  (the private `query.is_empty()` pre-check was removed — the compiler
+  is the single emptiness authority). Every other compilation failure
+  maps to the sanitized `SearchIndexError(_QUERY_FAILED_ERROR) from
+  None`: SQL, params, paths, indexed content, the query and the
+  underlying exception text never escape the message or the formatted
+  traceback (proven with sentinel texts injected at the Django
+  compiler seam).
+- **Note fidelity (review round 2)**: `NOTE_SORT_WINDOW` accompanies
+  non-relevance sorting ONLY when the returned winner set is known
+  incomplete (`more_recordings_matched > 0` or `None`); pure
+  candidate-bound truncation with the full winner set present shows
+  only the truncation note.
+- **Logging privacy (review round 2)**: caplog-tested (DEBUG on the
+  `workflow` tree) — the query canary appears in NO log record for
+  invalid-query, fts_missing/broken/stale and sanitized engine-failure
+  states; successful pages echo the query only through template
+  autoescaping.
+- **Deliberately NOT implemented (Step 5A.4.2b+)**: `<mark>`
+  highlight fragments (snippets render as plain text + provenance
+  chips), segment timestamp jump links, styling/a11y polish of search
+  rows, Semantic/Hybrid controls (still FORBIDDEN — tests assert their
+  absence), any health cache or background maintenance.
 
 ## Step 5A.4.1 — Keyword Search Backend + CLI (delivered)
 
@@ -150,11 +225,12 @@ index foundation (Step 5A.2), incremental index synchronization
   `tests/test_search_index_sync.py::TestConvergence::test_unlocked_tag_service_race_converges`
   is a genuine thread race against SQLite write serialization and may
   fail sporadically in any run.
-- **Deliberately NOT implemented**: web search (Step 5A.4.2),
+- **Deliberately NOT implemented**: web search (subsequently delivered
+  as Step 5A.4.2a — see the section above),
   ranking beyond the deterministic comparator, stemming/word
   tokenization, embeddings/semantic/hybrid search,
-  Ask-with-citations. The Library search field remains the disabled
-  placeholder.
+  Ask-with-citations. At that round the Library search field was
+  still the disabled placeholder.
 
 ## Step 5A.3 — Incremental Search Index Synchronization (delivered)
 
@@ -979,7 +1055,14 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current: **1261 tests passing** (Step 5A.4.1 keyword search backend +
+- Current: **1329 tests passing** (Step 5A.4.2a Library keyword web
+  search: +68 over the 1261 baseline — 9 engine-scope cases incl. the
+  240-flood ground-truth regression + 43 web-search cases in the first
+  round; +3 engine and +11 web cases in the review round 2: empty /
+  sanitized scope compilation, note fidelity, caplog privacy; +1
+  engine and +1 web case in the final round: compiler-discovered
+  empty scope `filter(pk__in=[])`); Step
+  5A.4.1 keyword search backend +
   CLI + snippet-bound review rounds: +92 over the 1169 baseline); earlier snapshots
   recorded 495 (Step 3), 985/992 (Step 4 + multilingual corrective),
   1056/1059 (Step 5A.1), 1132 (Step 5A.2 incl. review corrections),
@@ -1006,11 +1089,13 @@ Production Library UI are delivered.
 - `audioop` deprecation (Python 3.13 removal; revisit before upgrade).
 - Parked recordings (missing/out-of-inbox sources) wait for the next
   ingest/run; no proactive notification.
-- **No search UI yet**: `brain search` (Step 5A.4.1) is the CLI
-  keyword search over the FTS5 index; the Library search field is
-  still a disabled placeholder until the Step 5A.4.2 web search, and
-  embeddings/semantic/hybrid search plus Ask-with-citations remain
-  later Step 5 work. Keyword matching is substring-style (trigrams +
+- **Library web search is keyword-only (Step 5A.4.2a delivered)**:
+  `brain search` remains the CLI entry point and `/recordings/` the
+  web entry; snippet highlight fragments (`<mark>`), segment
+  timestamp jump links and search-row styling/a11y polish are
+  Step 5A.4.2b, and embeddings/semantic/hybrid search plus
+  Ask-with-citations remain later Step 5 work. Keyword matching is
+  substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
   `brain search`'s full health gate REFUSING to serve (exit 1), with
