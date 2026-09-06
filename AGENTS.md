@@ -402,9 +402,29 @@ Non-negotiable principles:
   Recording — any doubt keeps the plain non-link chip; Card/Table
   parity through the `_search_snippet.html`/`_search_provenance.html`
   partials; external CSS only, CSP unchanged, search GETs stay
-  strictly read-only. Embeddings, semantic/hybrid search and
-  Ask-with-citations are the later **Step 5B**; no further 5A
-  sub-steps exist.
+  strictly read-only. No further 5A sub-steps exist.
+- **Pre-5B stability patch**: fix the baseline-reproducible concurrent
+  web-tag SQLite race in
+  `TestConvergence::test_unlocked_tag_service_race_converges` before
+  adding embedding work. Use a finite, bounded retry only for SQLite
+  lock/busy failures, with a fresh transaction per attempt and bounded
+  backoff; unrelated database failures must not be retried. Update the
+  currently over-optimistic convergence claim in project status only
+  after repeatable executable verification.
+- **Step 5B — Local Embeddings Foundation**: use only the configured
+  local oMLX embedding endpoint/model. Add versioned embedding storage
+  with model/dimension/content-hash provenance, bounded status/rebuild/
+  repair commands, and incremental synchronization. Do not add
+  semantic-search UI or Ask-with-citations in this phase.
+- **Step 5C — Semantic and Hybrid Search**: bounded semantic retrieval
+  plus deterministic keyword/semantic fusion; retain per-Recording
+  deduplication, date/tag scope filters, provenance, and explicit stale/
+  unavailable states. Add Keyword/Semantic/Hybrid modes to CLI and web.
+- **Step 5D — Ask with Citations**: bounded retrieval into the local LLM
+  with citations that resolve only to actually retrieved transcript
+  segments or summaries, including transcript jump links. Never invent
+  citations; report insufficient evidence. Initial CLI/web delivery
+  does not persist question/answer history unless separately approved.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (deletion only after successful
   processing + retention delay), launchd scheduling.

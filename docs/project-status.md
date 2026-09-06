@@ -347,10 +347,14 @@ the standing rules.
   commits).
 - **Concurrency truth, no magic**: pipeline/web-action commits happen
   under the flock so their hooks run locked; web tag edits have NO
-  flock and rely on SQLite writer serialization — a concurrent unlocked
-  tag race is proven to converge (final reconcile after logged,
-  swallowed busy failures). `reconcile_recording` never registers a
-  sync (no recursion) and never takes the pipeline lock.
+  flock and rely on SQLite writer serialization. A real, baseline-
+  reproducible race remains in concurrent tag mutations:
+  `TestConvergence::test_unlocked_tag_service_race_converges` can fail
+  with `database table is locked: workflow_tagassignment` (observed
+  roughly 1-in-6 runs). Fix this in a dedicated bounded-retry stability
+  patch before Step 5B; do not describe the path as proven to converge
+  until that test is reliably green. `reconcile_recording` never
+  registers a sync (no recursion) and never takes the pipeline lock.
 - **Bounded**: per-recording streaming reuses the 5A.2 chunk bound (one
   recording with 1200 segments syncs in ≤ 100-row pages, proven by
   spying INSERT batch sizes); per-recording spec sets equal the rebuild
@@ -1150,8 +1154,8 @@ Production Library UI are delivered.
 - **Library web search is keyword-only (Step 5A.4.2 COMPLETE)**:
   `brain search` remains the CLI entry point and `/recordings/` the
   web entry; highlights, segment jump links and the search-row
-  styling/a11y polish are delivered. Embeddings, semantic/hybrid
-  search and Ask-with-citations are the later **Step 5B**. Keyword
+  styling/a11y polish are delivered. Local embeddings, semantic/hybrid
+  search and Ask-with-citations are the later **Steps 5B–5D**. Keyword
   matching is substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
@@ -1175,9 +1179,28 @@ Production Library UI are delivered.
   dedup, bounded snippets and the separated full-health gate) and
   **Step 5A.4.2 web search is COMPLETE** (5A.4.2a scoped service +
   states, no health cache; 5A.4.2b highlights, segment jump links,
-  Card/Table parity and accessibility). **Step 5A is complete.** The
-  next planned unit is **Step 5B**: local embeddings, semantic/hybrid
-  search and Ask-with-citations.
+  Card/Table parity and accessibility). **Step 5A is complete.**
+  Before starting the next feature phase, complete one narrowly scoped
+  **stability patch** for the documented concurrent web-tag SQLite lock
+  race (bounded retry of lock/busy failures only, fresh transaction per
+  attempt, finite backoff, no retry of unrelated database failures).
+- **Step 5B — Local Embeddings Foundation**: use the configured local
+  oMLX embedding endpoint/model; add versioned embedding storage and
+  provenance (model, dimensions, source content hash/index version);
+  provide bounded status/rebuild/repair commands and incremental sync.
+  Keep this phase to index production and integrity — no semantic-search
+  UI or Ask feature yet.
+- **Step 5C — Semantic and Hybrid Search**: implement bounded semantic
+  retrieval and deterministic keyword+semantic fusion, preserving
+  recording deduplication, tag/date scope, provenance and stale/index-
+  unavailable states; expose Keyword/Semantic/Hybrid modes in CLI and
+  the Library web UI.
+- **Step 5D — Ask with Citations**: retrieve bounded local evidence,
+  call only the local LLM, and produce answers whose citations map to
+  real retrieved transcript segments or summaries (including working
+  transcript jump links). Never invent citations; surface insufficient
+  evidence clearly. Add CLI and web flows; persistence of question/
+  answer history is out of the initial scope unless separately approved.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation
