@@ -389,10 +389,22 @@ Non-negotiable principles:
   scope-honest); search sorting defaults/falls back to `relevance`
   (engine order, never a DB ORDER BY) through a structured
   `sort_error` channel that keeps valid filters; invalid-query and
-  index-failure states clear the echoed query entirely. **5A.4.2b+
-  (not implemented)**: snippet highlight fragments, segment
-  timestamp links, styling/accessibility polish, semantic/hybrid
-  search — do not implement them as part of index maintenance.
+  index-failure states clear the echoed query entirely. **5A.4.2b
+  (delivered — completing Step 5A.4.2)**: snippets render through
+  service-built plain-text fragments marked with semantic `<mark>`
+  under one deterministic malformed-range policy (exact plain `str`,
+  template autoescaping only — `mark_safe`/`SafeString`/generated HTML
+  are forbidden here); a segment provenance chip links to the
+  active-transcript page carrying its ordinal
+  (`?page=ordinal//per_page+1#segment-<ordinal>`, 0-based ordinals,
+  `web.transcript_segments_per_page`) ONLY after ONE bounded batch
+  SELECT proves the indexed transcript is active AND owned by the SAME
+  Recording — any doubt keeps the plain non-link chip; Card/Table
+  parity through the `_search_snippet.html`/`_search_provenance.html`
+  partials; external CSS only, CSP unchanged, search GETs stay
+  strictly read-only. Embeddings, semantic/hybrid search and
+  Ask-with-citations are the later **Step 5B**; no further 5A
+  sub-steps exist.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (deletion only after successful
   processing + retention delay), launchd scheduling.

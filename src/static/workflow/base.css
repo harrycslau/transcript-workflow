@@ -321,6 +321,44 @@ button:hover, .link-button:hover { background: var(--bg); }
 .results-count { font-size: 0.8125rem; color: var(--color-text-3); }
 
 /* ============================================================
+   KEYWORD SEARCH RESULTS (Step 5A.4.2b)
+   ============================================================ */
+.search-snippet {
+  margin: 0.35rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--color-text-2);
+  overflow-wrap: anywhere;
+}
+.search-note { margin: 0.25rem 0; font-size: 0.8125rem; }
+mark {
+  background: var(--color-accent-bg);
+  color: inherit;
+  padding: 0 0.1em;
+  border-radius: 2px;
+}
+.match-chip {
+  display: inline-block;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  padding: 0.05rem 0.45rem;
+  border: 1px solid var(--color-border-2);
+  border-radius: 999px;
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+}
+a.match-chip { text-decoration: none; }
+a.match-chip:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent-2);
+  background: var(--color-accent-bg);
+}
+/* Segment jump links land on the anchored transcript paragraph. */
+.transcript-segment:target {
+  background: var(--color-accent-bg);
+  scroll-margin-top: 4.5rem;
+}
+
+/* ============================================================
    DATE GROUP HEADERS
    ============================================================ */
 .date-group-header {
@@ -623,6 +661,12 @@ th { color: var(--muted); font-weight: 600; }
     flex-shrink: 0;
   }
   .recording-table td > a.col-title { text-align: right; }
+  .recording-table td { flex-wrap: wrap; }
+  .recording-table td .search-snippet {
+    flex-basis: 100%;
+    text-align: left;
+  }
+  .recording-table td .match-chip { max-width: 100%; overflow-wrap: anywhere; }
   .recording-table .month-separator td::before { content: none; }
   .recording-table .month-separator td { display: block; background: var(--color-bg); }
   .recording-table tr.needs-attention td:first-child { box-shadow: none; }

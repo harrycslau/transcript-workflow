@@ -66,7 +66,7 @@
     <p class="empty-state"><a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}">Clear search</a></p>
 
   {% elif search.rows %}
-    <div class="results-header">
+    <div class="results-header" role="status">
       <span class="results-count">{{ search.result_count }} search result{{ search.result_count|pluralize }} for &ldquo;{{ search.echo_query }}&rdquo;</span>
       <a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}">Clear search</a>
     </div>
@@ -93,12 +93,12 @@
                 <td data-label="Date &amp; time">{{ row.card.effective_at_label }} {{ row.card.effective_at|local_time }}</td>
                 <td data-label="Title">
                   <a class="col-title" href="{% url 'recording-detail' row.card.recording.pk %}">{{ row.card.title }}</a>
-                  {% if row.snippet_text %}<div class="search-snippet">{{ row.snippet_text }}</div>{% endif %}
+                  {% if row.snippet_text %}<div class="search-snippet">{% include "workflow/_search_snippet.html" %}</div>{% endif %}
                 </td>
                 <td data-label="Duration">{{ row.card.recording.duration_seconds|duration }}</td>
                 <td data-label="Tags">{% for assignment in row.card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
                 <td data-label="Languages">{% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
-                <td data-label="Match"><span class="match-chip match-{{ row.match_source }}">{{ row.match_label }}</span></td>
+                <td data-label="Match">{% include "workflow/_search_provenance.html" %}</td>
               </tr>
             {% endfor %}
           </tbody>
@@ -115,9 +115,9 @@
             <div class="recording-card-meta">
               <span>{{ row.card.effective_at_label }} {{ row.card.effective_at|local_time }}</span>
               <span>{{ row.card.recording.duration_seconds|duration }}</span>
-              <span class="match-chip match-{{ row.match_source }}">{{ row.match_label }}</span>
+              {% include "workflow/_search_provenance.html" %}
             </div>
-            {% if row.snippet_text %}<p class="search-snippet">{{ row.snippet_text }}</p>{% endif %}
+            {% if row.snippet_text %}<p class="search-snippet">{% include "workflow/_search_snippet.html" %}</p>{% endif %}
             <div class="recording-card-footer">
               <div class="recording-card-tags">{% for assignment in row.card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">no tags</span>{% endfor %}</div>
               <div class="recording-card-langs" aria-label="Available summary languages">{% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">no summaries</span>{% endfor %}</div>
@@ -130,7 +130,7 @@
     {% include "workflow/_pagination.html" with page=search.page %}
 
   {% else %}
-    <div class="results-header">
+    <div class="results-header" role="status">
       <span class="results-count">No search results for &ldquo;{{ search.echo_query }}&rdquo;</span>
       <a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}">Clear search</a>
     </div>

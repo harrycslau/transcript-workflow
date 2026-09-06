@@ -24,7 +24,7 @@
 
 <div class="transcript">
   {% for segment in page_obj.object_list %}
-    <p class="transcript-segment">
+    <p class="transcript-segment" id="segment-{{ segment.ordinal }}">
       {% if segment.start_ms %}<span class="timestamp muted">{{ segment.start_ms|mmss }}</span>{% endif %}
       {% if segment.speaker %}<span class="speaker">{{ segment.speaker }}:</span>{% endif %}
       <span class="segment-text">{{ segment.text }}</span>

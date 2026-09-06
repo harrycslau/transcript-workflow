@@ -1,13 +1,56 @@
-# Project status — implementation handoff (Step 5A.4.2a delivered)
+# Project status — implementation handoff (Step 5A.4.2 complete)
 
-This file reflects the repository through Step 5A.4.2a: Step 4, the
+This file reflects the repository through Step 5A.4.2: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
 (Step 5A.3), the read-only keyword search backend + CLI
-(Step 5A.4.1) and the Library keyword web search (Step 5A.4.2a).
+(Step 5A.4.1) and the Library keyword web search in both its service
+round (5A.4.2a) and its rendering/accessibility round (5A.4.2b).
 It is a snapshot, not a durable instruction file; `AGENTS.md` holds
 the standing rules.
+
+## Step 5A.4.2b — Library Search Rendering & Accessibility (delivered)
+
+- **Snippets as fragments** (`search_web.snippet_fragments`): the ONE
+  deterministic malformed-range policy — invalid snippet/text/matches
+  shape renders NO snippet (non-`str` text is never coerced), a
+  non-list `matches` yields one plain fragment, individually malformed
+  ranges are ignored, surviving ranges are clamped/sorted/merged, and
+  the fragments ALWAYS partition the exact text as exact plain `str`
+  (str SUBCLASSES — trusted-wrapper objects whose `__str__` returns
+  themselves, or hostile subclasses raising in `__iter__`/`__str__` —
+  are rebuilt via the unbound base-str conversion, which runs NO
+  subclass hook; non-str is never coerced). The template
+  wraps `mark=True` pieces in semantic `<mark>` under autoescaping
+  only: `mark_safe`/`SafeString`/generated HTML are forbidden here
+  (contract-scanned by tests). The engine snippet builder is untouched.
+- **Segment jump links**: the provenance chip links to the
+  active-transcript page carrying the indexed ordinal
+  (`?page=ordinal//segments_per_page+1#segment-<ordinal>`, 0-based
+  ordinals, `web.transcript_segments_per_page` threaded from config via
+  `run_web_search(segments_per_page=…)`). ONE bounded batch SELECT per
+  page validates the `(transcript_id, recording_id)` PAIR: the
+  Transcript pk (integer BigAutoField — strict positive-int
+  validation; Recording pks stay UUID strings) must be active AND
+  owned by the result's own Recording. Inactive, missing,
+  foreign-owned or malformed provenance keeps the plain non-link chip
+  — never a guessed link, never a 500. URL fragments are browser-side:
+  tests assert the generated href AND separately GET the path+query to
+  prove the target page carries `id="segment-<ordinal>"` (the ONLY
+  transcript-markup change).
+- **Parity & presentation**: `_search_snippet.html` (fragment loop) and
+  `_search_provenance.html` (chip/span-or-link) are the shared
+  partials; Card and Table keep their own wrappers/cells and show
+  identical marks and hrefs (identical engine results guarantee
+  identical rendering). Search results header gained a static
+  `role="status"`; the page-frame polite `aria-live` container stays
+  the ONLY live region (no per-row announcements). Restrained external
+  CSS only: `mark`, `a.match-chip`, `.transcript-segment:target`
+  landing state + `scroll-margin-top`, mobile stacked-cell wrapping;
+  CSP middleware untouched; search GETs remain strictly read-only
+  (the link-validation SELECT is constant-cost, proven by the
+  existing no-N+1 page-cost equalities plus a 4-vs-1 link-count test).
 
 ## Step 5A.4.2a — Library Keyword Web Search (delivered)
 
@@ -77,11 +120,11 @@ the standing rules.
   invalid-query, fts_missing/broken/stale and sanitized engine-failure
   states; successful pages echo the query only through template
   autoescaping.
-- **Deliberately NOT implemented (Step 5A.4.2b+)**: `<mark>`
-  highlight fragments (snippets render as plain text + provenance
-  chips), segment timestamp jump links, styling/a11y polish of search
-  rows, Semantic/Hybrid controls (still FORBIDDEN — tests assert their
-  absence), any health cache or background maintenance.
+- **Delivered later in Step 5A.4.2b** (see the section above):
+  `<mark>` highlight fragments, segment jump links and the
+  styling/a11y polish. **Still NOT implemented (Step 5B)**:
+  Semantic/Hybrid controls (FORBIDDEN — tests assert their absence),
+  any health cache or background maintenance.
 
 ## Step 5A.4.1 — Keyword Search Backend + CLI (delivered)
 
@@ -1055,7 +1098,22 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current: **1329 tests passing** (Step 5A.4.2a Library keyword web
+- Current: **1388 tests passing** (Step 5A.4.2b search rendering &
+  accessibility: +59 over the 1329 baseline — fragment-policy units,
+  engine-real `<mark>` renders (CJK, emoji, `ﬃ`/`ß` casefold
+  expansions), split XSS coverage (escaped query echo AND escaped
+  indexed payload while valid marks render), pair-validated jump-link
+  pages incl. malformed transcript-id/ordinal and cross-recording
+  regressions, boundary anchors proven by fetching the path+query
+   without the fragment, Card/Table parity, batch-cost, CSP and
+   accessibility tests; +9 SafeString-hardening regressions in the
+   review round — a trusted-wrapper str (whose ``__str__`` returns the
+   SAME object) and a hostile subclass (``__iter__``/``__str__`` raise)
+   through every ``matches`` shape, asserting the builder never raises,
+   every fragment is exact built-in ``str`` with content preserved, and
+   both the plain and marked render paths stay fully autoescaped, plus
+   a production scan banning safe-string machinery in the service);
+   Step 5A.4.2a Library keyword web
   search: +68 over the 1261 baseline — 9 engine-scope cases incl. the
   240-flood ground-truth regression + 43 web-search cases in the first
   round; +3 engine and +11 web cases in the review round 2: empty /
@@ -1089,13 +1147,12 @@ Production Library UI are delivered.
 - `audioop` deprecation (Python 3.13 removal; revisit before upgrade).
 - Parked recordings (missing/out-of-inbox sources) wait for the next
   ingest/run; no proactive notification.
-- **Library web search is keyword-only (Step 5A.4.2a delivered)**:
+- **Library web search is keyword-only (Step 5A.4.2 COMPLETE)**:
   `brain search` remains the CLI entry point and `/recordings/` the
-  web entry; snippet highlight fragments (`<mark>`), segment
-  timestamp jump links and search-row styling/a11y polish are
-  Step 5A.4.2b, and embeddings/semantic/hybrid search plus
-  Ask-with-citations remain later Step 5 work. Keyword matching is
-  substring-style (trigrams +
+  web entry; highlights, segment jump links and the search-row
+  styling/a11y polish are delivered. Embeddings, semantic/hybrid
+  search and Ask-with-citations are the later **Step 5B**. Keyword
+  matching is substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
   `brain search`'s full health gate REFUSING to serve (exit 1), with
@@ -1115,11 +1172,12 @@ Production Library UI are delivered.
   read-only `brain search-index status`, per-recording after-commit
   sync via `workflow/services/search_sync.py` hooks, literal
   plain-text `brain search` with deterministic ranking, per-Recording
-  dedup, bounded snippets and the separated full-health gate). The
-  next planned unit is **Step 5A.4.2 web search** (query form,
-  cached-health policy, rendered highlights). Local embeddings,
-  semantic/hybrid search and Ask-with-citations remain later Step 5
-  work.
+  dedup, bounded snippets and the separated full-health gate) and
+  **Step 5A.4.2 web search is COMPLETE** (5A.4.2a scoped service +
+  states, no health cache; 5A.4.2b highlights, segment jump links,
+  Card/Table parity and accessibility). **Step 5A is complete.** The
+  next planned unit is **Step 5B**: local embeddings, semantic/hybrid
+  search and Ask-with-citations.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation

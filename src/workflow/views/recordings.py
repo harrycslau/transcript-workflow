@@ -64,6 +64,7 @@ def recording_list(request):
             timezone_name=config.timezone,
             page_number=request.GET.get("page"),
             per_page=config.web.recordings_per_page,
+            segments_per_page=config.web.transcript_segments_per_page,
         )
 
     filters_qs = filters.as_querystring()

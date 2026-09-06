@@ -24,10 +24,13 @@ Steps 1–4 are implemented. The app can:
 - browse recordings, transcripts, summaries, history, tags, and the
   review queue in a local web interface
 
-Keyword search is available on the CLI (`brain search`); a search UI and
-semantic search are planned for the rest of Step 5. Manual topic splitting,
-scheduling, and retention deletion are planned for Step 6. **The app does
-not currently delete, move, or modify audio files.**
+Keyword search is available on the CLI (`brain search`) and in the
+Library's web UI (`/recordings/`): scoped filters before ranking,
+highlighted `<mark>` snippets and segment jump links
+(Step 5A.4.2 complete). Semantic/hybrid search and Ask-with-citations
+are planned for Step 5B. Manual topic splitting, scheduling, and
+retention deletion are planned for Step 6. **The app does not currently
+delete, move, or modify audio files.**
 
 ## Prerequisites
 
@@ -181,7 +184,7 @@ source filenames, active tags — never paths or secrets).
 - The index is kept current automatically (Step 5A.3 post-commit
   per-recording synchronization) and is queried read-only by
   `brain search` (Step 5A.4.1, below) and by the Library's top-bar
-  keyword search (Step 5A.4.2a, below).
+  keyword search (Step 5A.4.2a/b, below).
 
 ### Keyword search (Step 5A.4.1)
 
@@ -203,7 +206,7 @@ uv run brain search "budget" --limit 20 --json
   integrity check EXACTLY once; a missing, broken or stale index is a
   clean exit 1 pointing at `brain search-index rebuild` — never
   partially-served stale results. The reusable query engine itself is
-  separate from that gate; the web search (Step 5A.4.2a, below) chose
+  separate from that gate; the web search (Step 5A.4.2a/b, below) chose
   the strictest policy instead of any health cache: the same full
   sweep runs exactly once per submitted search.
 - Results are deduplicated to ONE entry per Recording with
@@ -226,7 +229,7 @@ uv run brain search "budget" --limit 20 --json
 - Exit codes: **0** searched (also with zero results), **1** config or
   missing/broken/stale index, **2** malformed query or bad `--limit`.
 
-### Library keyword search (Step 5A.4.2a)
+### Library keyword search (Step 5A.4.2a/b)
 
 The top-bar search field on `/recordings/` runs the same read-only
 engine without leaving the Library:
@@ -253,6 +256,21 @@ engine without leaving the Library:
 - Strictly read-only: a search GET never writes, locks, rebuilds or
   synchronizes; result cards are batch-fetched (no per-result
   queries).
+- Highlights: snippet match ranges render as semantic `<mark>`
+  elements built from plain-text fragments (server-side, autoescaped;
+  no raw HTML is ever generated). Card and Table views show identical
+  highlights and provenance.
+- Segment jump links: when the match is a transcript segment, its
+  provenance chip links straight to the transcript page containing it
+  (`?page=N#segment-<ordinal>`, using the configured
+  `web.transcript_segments_per_page`). The link is created only after
+  one bounded batch query proves the indexed transcript is still the
+  ACTIVE one AND belongs to the same recording — stale or mismatched
+  provenance keeps a plain label, never a wrong jump.
+- Accessibility: the result count is a polite status region (never a
+  per-row live region), segment chips are keyboard-focusable links,
+  the anchored transcript paragraph gets a landing highlight, and
+  everything still works with no JavaScript and the same strict CSP.
 
 ### Routing profiles and the routing policy
 
@@ -421,8 +439,9 @@ uv run brain serve --host 127.0.0.1 --port 9000
   `view=`-overridable cookie; everything works without JavaScript.
   Keyword search exists on the CLI (`brain search`, Step 5A.4.1) and
   in the Library itself: the top-bar field runs a keyword search over
-  the same read-only engine (Step 5A.4.2a) — see the Library keyword
-  search section below.
+  the same read-only engine, with `<mark>` highlights and transcript
+  jump links (Steps 5A.4.2a/b) — see the Library keyword search
+  section below.
 - `GET /status/` — the status page (app version, storage availability,
   MacWhisper/oMLX configuration, selected models, pipeline counts).
   Page loads run only lightweight local checks; they never launch
@@ -449,11 +468,10 @@ network access, or real audio.
 
 ## Current limitations
 
-- Library web search exists (Step 5A.4.2a, keyword-only): snippet
-  highlight fragments, segment timestamp jump links and visual/
-  accessibility polish of search rows are Step 5A.4.2b; semantic
-  search/hybrid ranking and Ask-with-citations remain later Step 5
-  work. Keyword matching is substring-style (FTS5
+- Library web search is keyword-only (Step 5A.4.2 complete with
+  highlights, jump links and styling/a11y): semantic search/hybrid
+  ranking and Ask-with-citations are later Step 5B work. Keyword
+  matching is substring-style (FTS5
   trigrams + a Unicode-folded LIKE fallback for 1–2-codepoint terms),
   not stemmed or word-tokenized.
 - No manual topic splitting, scheduling, or retention deletion yet

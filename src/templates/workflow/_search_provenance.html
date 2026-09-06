@@ -1,0 +1,1 @@
+{% if row.link_page and row.link_anchor %}<a class="match-chip match-{{ row.match_source }}" href="{% url 'recording-transcript' row.card.recording.pk %}?page={{ row.link_page }}#{{ row.link_anchor }}">{{ row.match_label }}</a>{% else %}<span class="match-chip match-{{ row.match_source }}">{{ row.match_label }}</span>{% endif %}
