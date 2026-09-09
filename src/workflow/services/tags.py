@@ -16,12 +16,83 @@ locked mutating commands (``brain summarize``, ``brain tags --sync``);
 
 from __future__ import annotations
 
-from django.db import IntegrityError, transaction
+import sqlite3
+import time
+from functools import wraps
+
+from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 
 from brainlib.config import AppConfig, tag_name_key
 from workflow.models import Tag, TagAssignment, TagDeactivatedBy, TagOrigin
 from workflow.services.search_sync import schedule_recording_sync
+
+# ---------------------------------------------------------------------------
+# SQLite contention retry policy (Pre-5B stability patch)
+# ---------------------------------------------------------------------------
+#
+# Web tag mutations run WITHOUT the pipeline flock (AGENTS.md), so
+# concurrent unlocked requests can legitimately collide on SQLite's
+# writer lock or shared-cache read lock. SQLite surfaces those as
+# ``sqlite3.OperationalError`` wrapped by Django into
+# ``django.db.OperationalError`` whose ``__cause__`` is the original
+# ``sqlite3.OperationalError`` carrying ``sqlite_errorcode``. The PRIMARY
+# byte of that code is SQLITE_BUSY or SQLITE_LOCKED — extended codes such
+# as ``SQLITE_LOCKED_SHAREDCACHE`` (0x106) keep the same primary byte and
+# therefore qualify too. We retry ONLY such contention, with a finite
+# attempt budget and a short fixed backoff. Anything else re-raises
+# immediately; exhausted contention re-raises the last error. Retries
+# never cover search-sync work: ``schedule_recording_sync`` stays INSIDE
+# the caller's transaction and post-commit sync remains nonfatal under
+# ``search_sync``'s own policy.
+_TAG_RETRY_ATTEMPTS = 3  # total attempts: 1 initial + 2 retries
+_TAG_RETRY_BACKOFF_SECONDS = 0.02  # fixed short delay between attempts
+_TAG_RETRY_BUSY_CODES = frozenset(
+    {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+)
+
+
+def _is_retryable_contention(exc: OperationalError) -> bool:
+    """True only for SQLite BUSY / LOCKED contention.
+
+    The direct underlying cause must be a ``sqlite3.OperationalError``
+    exposing a usable integer ``sqlite_errorcode`` whose primary byte is
+    SQLITE_BUSY or SQLITE_LOCKED (extended codes qualify via the primary
+    byte). Non-SQLite errors, SQLite errors without a usable integer
+    code, and unrelated primary codes all return False.
+    """
+    cause = exc.__cause__
+    if cause is None or not isinstance(cause, sqlite3.OperationalError):
+        return False
+    code = getattr(cause, "sqlite_errorcode", None)
+    if not isinstance(code, int):
+        return False
+    return (code & 0xFF) in _TAG_RETRY_BUSY_CODES
+
+
+def _retry_on_sqlite_contention(func):
+    """Retry ``func`` on bounded SQLite busy/locked contention.
+
+    ``func`` must open its OWN transaction (``@transaction.atomic``) so
+    each attempt runs in a fresh transaction: by the time the exception
+    reaches us, Django's atomic block has already rolled the failed
+    attempt back, so the next invocation starts from a clean connection.
+    The retry wrapper therefore lives OUTSIDE ``@transaction.atomic``.
+    """
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        for attempt in range(_TAG_RETRY_ATTEMPTS):
+            try:
+                return func(*args, **kwargs)
+            except OperationalError as exc:
+                if not _is_retryable_contention(exc):
+                    raise
+                if attempt == _TAG_RETRY_ATTEMPTS - 1:
+                    raise
+                time.sleep(_TAG_RETRY_BACKOFF_SECONDS)
+
+    return wrapper
 
 
 def sync_tags(config: AppConfig) -> dict[str, int]:
@@ -104,6 +175,7 @@ def _lock_recording(recording_pk: str) -> None:
     Recording.objects.select_for_update().get(pk=recording_pk)
 
 
+@_retry_on_sqlite_contention
 @transaction.atomic
 def add_manual_tag(recording, tag: Tag, *, include_retired: bool = False) -> dict:
     """Assign ``tag`` to ``recording`` as a user-owned manual assignment.
@@ -178,6 +250,7 @@ def add_manual_tag(recording, tag: Tag, *, include_retired: bool = False) -> dic
     }
 
 
+@_retry_on_sqlite_contention
 @transaction.atomic
 def confirm_suggestion(recording, tag: Tag) -> dict:
     """Confirm a currently suggested tag: origin becomes ``confirmed``.
@@ -200,6 +273,7 @@ def confirm_suggestion(recording, tag: Tag) -> dict:
     return {"assignment": assignment, "already_confirmed": already_confirmed}
 
 
+@_retry_on_sqlite_contention
 @transaction.atomic
 def remove_tag(recording, tag: Tag) -> dict:
     """Deactivate the effective assignment as an explicit user removal.

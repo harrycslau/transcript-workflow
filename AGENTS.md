@@ -410,14 +410,32 @@ Non-negotiable principles:
   parity through the `_search_snippet.html`/`_search_provenance.html`
   partials; external CSS only, CSP unchanged, search GETs stay
   strictly read-only. No further 5A sub-steps exist.
-- **Pre-5B stability patch**: fix the baseline-reproducible concurrent
-  web-tag SQLite race in
-  `TestConvergence::test_unlocked_tag_service_race_converges` before
-  adding embedding work. Use a finite, bounded retry only for SQLite
-  lock/busy failures, with a fresh transaction per attempt and bounded
-  backoff; unrelated database failures must not be retried. Update the
-  currently over-optimistic convergence claim in project status only
-  after repeatable executable verification.
+- **Pre-5B stability patch (delivered)**: the baseline-reproducible
+  concurrent web-tag SQLite race in
+  `TestConvergence::test_unlocked_tag_service_race_converges` is fixed
+  by a LOCAL bounded retry in `workflow/services/tags.py` around ALL
+  THREE unlocked web tag mutations (`add_manual_tag`,
+  `confirm_suggestion`, `remove_tag`). The retry decorator lives
+  OUTSIDE each wrapped function's `transaction.atomic` boundary, so
+  every attempt runs in a fresh transaction (Django rolls the failed
+  attempt back before the retry re-invokes). Retry applies ONLY to a
+  Django `OperationalError` whose DIRECT cause is a
+  `sqlite3.OperationalError` carrying an integer `sqlite_errorcode`
+  whose primary error code — extended codes included, via `& 0xFF` —
+  is SQLITE_BUSY or SQLITE_LOCKED; at most 3 total attempts with a
+  FIXED 0.02-second delay between attempts; unrelated failures and
+  exhausted contention re-raise immediately. Callback contract
+  unchanged: `schedule_recording_sync` stays INSIDE the transaction —
+  a rolled-back attempt discards any registered callback, and a
+  successful commit of a mutation that schedules sync fires one
+  callback; `confirm_suggestion`'s no-sync behavior (origin-only change,
+  does not affect indexed content) is unchanged. Search-sync failures
+  keep their separate nonfatal no-auto-retry policy — retries never
+  cover post-commit sync work. Verification:
+  16 deterministic focused tests plus independent repeatable runs
+  (focused 50 passed; the real race test 75 consecutive invocations;
+  full suite 1404 passed; no migration). Repeatable verification, not a
+  proof against every possible SQLite contention.
 - **Step 5B — Local Embeddings Foundation**: use only the configured
   local oMLX embedding endpoint/model. Add versioned embedding storage
   with model/dimension/content-hash provenance, bounded status/rebuild/

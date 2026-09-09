@@ -1,4 +1,4 @@
-# Project status — implementation handoff (Step 5A.4.2 complete)
+# Project status — implementation handoff (Step 5A.4.2 + pre-5B stability patch complete)
 
 This file reflects the repository through Step 5A.4.2: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
@@ -6,33 +6,36 @@ corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
 (Step 5A.3), the read-only keyword search backend + CLI
 (Step 5A.4.1) and the Library keyword web search in both its service
-round (5A.4.2a) and its rendering/accessibility round (5A.4.2b).
-It is a snapshot, not a durable instruction file; `AGENTS.md` holds
-the standing rules.
+round (5A.4.2a) and its rendering/accessibility round (5A.4.2b) —
+plus the **pre-5B stability patch** (SQLite web-tag contention retry),
+which has been delivered and has passed independent repeatable
+verification. It is a snapshot, not a durable instruction file;
+`AGENTS.md` holds the standing rules.
 
 ## Handoff audit — 2026-09-09
 
-A documentation-only review of the repository as of HEAD `8c215f8`
-(`feat(docs): update AGENTS.md and project-status.md with stability
-patch details and outline for Steps 5B–5D`) on `main`, tracking
-`origin/main`. The sections below the audit remain the detailed
-delivery snapshot.
+A documentation-only review that updates the previous audit (the docs
+commit `8c215f8`) in place to record that the pre-5B SQLite web-tag
+race is now FIXED and the stability patch delivered. No new commit/HEAD
+is claimed; the patch and its tests are in the working tree.
 
 **Observed facts**
 
-- 20 commits, no Git tags or releases, and no visible CI
-  configuration (no `.github/`, GitLab, or CircleCI files).
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
-  SQLite / minimal dependencies; no frameworks beyond the approved set.
-- Implementation is complete through Step 5A.4.2b (Step 4 web UI,
-  5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
+  SQLite / minimal dependencies; no Git tags/releases, no visible CI
+  configuration; implementation complete through Step 5A.4.2b (Step 4
+  web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
   with highlights and jump links).
-- The current baseline command collected 1388 tests and produced
-  **1387 passed** plus the one known failure:
-  `TestConvergence::test_unlocked_tag_service_race_converges` (the
-  SQLite table-lock race). `manage.py check` and
-  `makemigrations --check` passed.
+- The previously known suite failure is FIXED: the full suite collects
+  **1404 tests and all 1404 pass** (the 1388-test Step 5A.4.2b
+  baseline plus 16 deterministic focused tests added by the stability
+  patch). `TestConvergence::test_unlocked_tag_service_race_converges`
+  is green in the full suite and was additionally run **75 consecutive
+  times in isolation without a single failure** (repeatable
+  verification, not a proof against every possible contention).
+  `manage.py check`, `makemigrations --check` (NO new migration) and
+  `git diff --check` passed.
 - Observed cleanup debt (not fixed here): the unreachable `return
   None` after `return "first"` in
   `workflow/services/web_actions.py:summarize_mode`, and the noted
@@ -40,17 +43,45 @@ delivery snapshot.
 
 **Inference / next steps**
 
-- Immediate next step is the pre-5B bounded SQLite lock/busy retry
-  patch for the documented concurrent web-tag race, then 5B embeddings
-  foundation, 5C semantic/hybrid search, 5D Ask-with-citations, and
-  Step 6.
+- Next phase is **Step 5B — Local Embeddings Foundation**, then 5C
+  semantic/hybrid search, 5D Ask-with-citations, and Step 6.
 - No claim is made here about the real user database's migration state
   (`0007`/`0008` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
 
-> The older "1388 passing" text in the Tests section below is a
-> delivery snapshot from the Step 5A.4.2b round, not the current audit
-> result (which is 1387 passed + the one known race failure above).
+## Pre-5B stability patch — SQLite web-tag contention retry (delivered, repeatably verified)
+
+- **Scope / decorator order**: a local bounded retry in
+  `workflow/services/tags.py` wraps ALL THREE unlocked web tag
+  mutations (`add_manual_tag`, `confirm_suggestion`, `remove_tag`).
+  The retry decorator sits OUTSIDE each function's
+  `transaction.atomic`, so every attempt runs in a fresh transaction
+  (Django rolls the failed attempt back before the retry re-invokes).
+- **Classification**: retry only a Django `OperationalError` whose
+  DIRECT cause is a `sqlite3.OperationalError` with an integer
+  `sqlite_errorcode` whose PRIMARY error code — extended codes via
+  `& 0xFF` — is `SQLITE_BUSY` or `SQLITE_LOCKED`; unrelated failures
+  (no SQLite cause, no usable code, other primary codes) and exhausted
+  contention re-raise immediately.
+- **Budget**: finite — 3 total attempts (1 initial + 2 retries), fixed
+  0.02-second delay between attempts; exhaustion re-raises the last
+  error.
+- **Callback nuance**: `schedule_recording_sync` stays INSIDE the
+  caller's transaction — a rolled-back attempt discards any registered
+  callback, and a successful commit of a mutation that schedules sync
+  fires one callback; `confirm_suggestion` intentionally schedules none
+  (origin-only change, does not affect indexed content). Retries never
+  cover post-commit search-sync work, which keeps its separate
+  nonfatal, no-auto-retry policy.
+- **Tests / verification**: 16 deterministic focused tests in
+  `tests/test_tags_contention_retry.py` (classification incl. extended
+  codes, bounded budget, fresh-transaction semantics, callback
+  contract, coverage of all three mutations). Independent verification:
+  focused run 50 passed; the real race test
+  (`TestConvergence::test_unlocked_tag_service_race_converges`) 75
+  consecutive invocations; full suite 1404 passed; `manage.py check`,
+  `makemigrations --check` (no migration), `git diff --check` passed.
+  Repeatable verification, not a proof against every contention.
 
 ## Step 5A.4.2b — Library Search Rendering & Accessibility (delivered)
 
@@ -306,7 +337,9 @@ delivery snapshot.
   MacWhisper or oMLX; `config/config.yaml` and the real `data/`
   untouched.
 - **Known pre-existing flake** (not introduced here, reproduced
-  ~1-in-6 on the pristine baseline):
+  ~1-in-6 on the pristine baseline — HISTORICAL: this race was later
+  fixed by the pre-5B stability patch, see the current audit at the top
+  of this file):
   `tests/test_search_index_sync.py::TestConvergence::test_unlocked_tag_service_race_converges`
   is a genuine thread race against SQLite write serialization and may
   fail sporadically in any run.
@@ -393,10 +426,12 @@ delivery snapshot.
   reproducible race remains in concurrent tag mutations:
   `TestConvergence::test_unlocked_tag_service_race_converges` can fail
   with `database table is locked: workflow_tagassignment` (observed
-  roughly 1-in-6 runs). Fix this in a dedicated bounded-retry stability
-  patch before Step 5B; do not describe the path as proven to converge
-  until that test is reliably green. `reconcile_recording` never
-  registers a sync (no recursion) and never takes the pipeline lock.
+  roughly 1-in-6 runs). HISTORICAL: this describes the state as of the
+  5A.3 round — the fix is now delivered by the pre-5B stability patch
+  (see the current audit at the top of this file), which made that path
+  repeatably converge rather than merely promising convergence.
+  `reconcile_recording` never registers a sync (no recursion) and never
+  takes the pipeline lock.
 - **Bounded**: per-recording streaming reuses the 5A.2 chunk bound (one
   recording with 1200 segments syncs in ≤ 100-row pages, proven by
   spying INSERT batch sizes); per-recording spec sets equal the rebuild
@@ -1144,7 +1179,23 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current: **1388 tests passing** (Step 5A.4.2b search rendering &
+- Current: **1404 tests passing** — the full suite at the delivered
+  pre-5B stability patch: the historical 1388-test Step 5A.4.2b
+  snapshot below plus **16 deterministic focused tests** added by the
+  stability patch (`tests/test_tags_contention_retry.py`; see the
+  stability-patch section at the top of this file). The previously
+  known single failure —
+  `test_search_index_sync.py::TestConvergence::
+  test_unlocked_tag_service_race_converges` — is FIXED: the focused
+  run passed 50 tests, the real race test passed 75 consecutive
+  invocations, and the whole suite is green (a repeatable
+  verification, not a proof against every possible contention). No
+  real MacWhisper, oMLX, network, ffmpeg, or user audio; "must not
+  happen" mocks raise.
+- Historical snapshot (as of the Step 5A.4.2b round, labeled for
+  clarity; the ~1-in-6 flake named at its end was real then and is
+  since fixed by the stability patch): **1388 tests passing** (Step
+  5A.4.2b search rendering &
   accessibility: +59 over the 1329 baseline — fragment-policy units,
   engine-real `<mark>` renders (CJK, emoji, `ﬃ`/`ß` casefold
   expansions), split XSS coverage (escaped query echo AND escaped
@@ -1170,14 +1221,14 @@ Production Library UI are delivered.
   CLI + snippet-bound review rounds: +92 over the 1169 baseline); earlier snapshots
   recorded 495 (Step 3), 985/992 (Step 4 + multilingual corrective),
   1056/1059 (Step 5A.1), 1132 (Step 5A.2 incl. review corrections),
-  1169 (Step 5A.3). No real MacWhisper,
-  oMLX, network, ffmpeg, or user audio; "must not happen" mocks raise.
-  One pre-existing, baseline-reproducible flake (~1-in-6):
-  `test_search_index_sync.py::TestConvergence::test_unlocked_tag_service_race_converges`
-  (genuine thread race against SQLite write serialization).
-- Verified: `manage.py check`, `makemigrations --check`, fresh-process
-  CLI config errors (no traceback), stage-aware cross-stage recovery,
-  error/secret hygiene, and `git diff --check`.
+  1169 (Step 5A.3). One pre-existing, baseline-reproducible flake
+  (~1-in-6): `test_search_index_sync.py::TestConvergence::
+  test_unlocked_tag_service_race_converges` (genuine thread race
+  against SQLite write serialization) — FIXED by the stability patch.
+- Verified: `manage.py check`, `makemigrations --check` (no new
+  migration), fresh-process CLI config errors (no traceback),
+  stage-aware cross-stage recovery, error/secret hygiene, and
+  `git diff --check`.
 - Sanitized MacWhisper fixtures: `tests/fixtures/macwhisper/`.
 
 ## Known limitations
@@ -1221,11 +1272,18 @@ Production Library UI are delivered.
   dedup, bounded snippets and the separated full-health gate) and
   **Step 5A.4.2 web search is COMPLETE** (5A.4.2a scoped service +
   states, no health cache; 5A.4.2b highlights, segment jump links,
-  Card/Table parity and accessibility). **Step 5A is complete.**
-  Before starting the next feature phase, complete one narrowly scoped
-  **stability patch** for the documented concurrent web-tag SQLite lock
-  race (bounded retry of lock/busy failures only, fresh transaction per
-  attempt, finite backoff, no retry of unrelated database failures).
+  Card/Table parity and accessibility). **Step 5A is complete.** The
+  pre-5B **stability patch** for the documented concurrent web-tag
+  SQLite lock race is **delivered and repeatably verified** (bounded
+  retry of SQLite BUSY/LOCKED-primary-code failures only, fresh
+  transaction per attempt via the retry living OUTSIDE
+  `transaction.atomic`, finite 3-attempt budget with a fixed 0.02 s
+  backoff, no retry of unrelated database failures; callbacks stay
+  transaction-scoped — a rolled-back attempt discards them, a successful
+  commit of a mutation that schedules sync fires one — while
+  `confirm_suggestion`'s origin-only no-sync behavior and the separate
+  search-sync no-auto-retry policy are untouched). **Step 5B is
+  next.**
 - **Step 5B — Local Embeddings Foundation**: use the configured local
   oMLX embedding endpoint/model; add versioned embedding storage and
   provenance (model, dimensions, source content hash/index version);
