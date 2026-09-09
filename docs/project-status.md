@@ -1,45 +1,54 @@
-# Project status — implementation handoff (Step 5B.1 delivered)
+# Project status — implementation handoff (Step 5B.2 delivered)
 
-This file reflects the repository through Step 5B.1: Step 4, the
+This file reflects the repository through Step 5B.2: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
 (Step 5A.3), the read-only keyword search backend + CLI
 (Step 5A.4.1) and the Library keyword web search in both its service
 round (5A.4.2a) and its rendering/accessibility round (5A.4.2b) —
-plus the **pre-5B stability patch** (SQLite web-tag contention retry)
-and the **Step 5B.1 embedding client** (bounded local /embeddings
-client with embedding config and doctor endpoint-pair diagnostics),
-all delivered and independently full-suite verified. It is a snapshot,
-not a durable instruction file; `AGENTS.md` holds the standing rules.
+plus the **pre-5B stability patch** (SQLite web-tag contention retry),
+the **Step 5B.1 embedding client** (bounded local /embeddings client
+with embedding config and doctor endpoint-pair diagnostics), and the
+**Step 5B.2 embedding storage foundation** (versioned generation-based
+models, migration 0009 and the pure-stdlib float32 vector codec).
+Step 5B.2 is delivered in the working tree and independently
+full-suite verified: **1632 collected and 1632 passed** with the only
+warning the known `audioop` deprecation. No new commit/HEAD or
+real-database migration is claimed. It is a
+snapshot, not a durable instruction file; `AGENTS.md` holds the
+standing rules.
 
-## Handoff audit — 2026-09-09
+## Handoff audit — 2026-09-09 (updated for Step 5B.2)
 
-A documentation-only review that updates the previous audit (the docs
-commit `8c215f8`) in place to record that the pre-5B SQLite web-tag
-race is now FIXED and the stability patch delivered. No new commit/HEAD
-is claimed; the patch and its tests are in the working tree.
+Updates the previous audit (the Step 5B.1 state, docs commit
+`8c215f8` plus the embedding-client commit `31e38a9`) in place to
+record that the Step 5B.2 embedding storage foundation is now
+implemented in the working tree and the full suite independently
+verified. No new commit/HEAD or real-database migration is claimed;
+the 5B.2 work and its tests are in the working tree.
 
 **Observed facts**
 
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
-  configuration; implementation complete through Step 5B.1 (Step 4
+  configuration; implementation complete through Step 5B.2 (Step 4
   web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
-  with highlights and jump links, the pre-5B stability patch, and the
-  Step 5B.1 local /embeddings client).
-- The previously known suite failure is FIXED: the full suite collects
-  **1499 tests and all 1499 pass** (the 1388-test Step 5A.4.2b
-  baseline plus 16 deterministic focused tests added by the stability
-  patch and the Step 5B.1 embedding-client/config/diagnostics tests).
-  `TestConvergence::test_unlocked_tag_service_race_converges`
-  is green in the full suite and was additionally run **75 consecutive
-  times in isolation without a single failure** (repeatable
-  verification, not a proof against every possible contention).
-  `manage.py check`, `makemigrations --check` (NO new migration) and
-  `git diff --check` passed; the only warning is the known
-  `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13).
+  with highlights and jump links, the pre-5B stability patch, the
+  Step 5B.1 local /embeddings client, and the Step 5B.2 embedding
+  storage foundation: migration 0009 + generation/document models +
+  vector codec).
+- Step 5B.2 verification: the full suite passes — **1632 collected and
+  1632 passed** (the Step 5B.1 full-suite state was 1499; the 5B.2
+  delta is the 133 new 5B.2 tests), with the only warning the known
+  `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
+  `manage.py check`, `makemigrations --check` (only the new 0009
+  migration) and `git diff --check` pass. Supporting focused detail:
+  `tests/test_vector_codec.py` (72), `tests/test_embedding_models.py`
+  (52), `tests/test_embedding_migration.py` (9) plus the updated
+  `tests/test_migration_readiness.py` and the unchanged
+  `tests/test_embedding_client.py` pass together (**240 passed**).
 - Observed cleanup debt (not fixed here): the unreachable `return
   None` after `return "first"` in
   `workflow/services/web_actions.py:summarize_mode`, and the noted
@@ -47,13 +56,14 @@ is claimed; the patch and its tests are in the working tree.
 
 **Inference / next steps**
 
-- Next is **Step 5B.2 — Embedding Storage Model & Migration** (the
-  remainder of the Step 5B foundation: versioned embedding storage with
-  model/dimension/content-hash provenance, bounded status/rebuild/
-  repair commands and incremental synchronization), then Step 5C
-  semantic/hybrid search, 5D Ask-with-citations, and Step 6.
+- Next is **Step 5B.3 — Embedding status/rebuild/repair** (bounded
+  generation status reporting plus atomic rebuild/repair commands),
+  then Step 5B.4 incremental embedding synchronization, Step 5C
+  semantic/hybrid search, 5D Ask-with-citations, and Step 6. Step
+  5B.3 and Step 5B.4 are explicitly NOT implemented in this working
+  tree: no `search_index`/`search_sync`/CLI/web changes were made.
 - No claim is made here about the real user database's migration state
-  (`0007`/`0008` application is not reported). Local config values and
+  (`0007`–`0009` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
 
 ## Pre-5B stability patch — SQLite web-tag contention retry (delivered, repeatably verified)
@@ -149,6 +159,96 @@ DeprecationWarning), `manage.py check` and `makemigrations --check`
 (NO new migration) passed, `git diff --check` clean. No real network
 in tests; real `config/config.yaml` untouched. No new commit/HEAD is
 claimed; the work and its tests are in the working tree.
+
+## Step 5B.2 — Embedding storage foundation (delivered in the working tree)
+
+**Scope delivered** (durable contract in `AGENTS.md`): versioned
+embedding storage with a SEPARATE generation-based architecture. New
+models in `workflow/models.py`:
+`EmbeddingGenerationState` (`building`/`active`/`superseded`/`failed`),
+`EmbeddingGeneration` (db_table `workflow_embedding_generation`;
+BigAutoField id; `model` TextField; `dimensions` PositiveIntegerField
+1..16384; `embedding_version` CharField(16) binding the FULL embedding
+implementation contract — deterministic text preparation plus vector
+mapping, to be versioned by Step 5B.3, never merely the codec/client;
+`source_index_version` CharField(16) on a SEPARATE axis binding the
+`SearchDocument` index contract; no `EMBEDDING_VERSION` constant in 5B.2
+because the production mapping/version is not implemented until 5B.3;
+`state` with
+default `building`; `created_at` default now; nullable `completed_at`/
+`activated_at`/`superseded_at`/`failed_at`) and `EmbeddingDocument`
+(db_table `workflow_embedding_document`; FK `generation` CASCADE
+`related_name="documents"`; `document_key` TextField COPIED from
+`SearchDocument.document_key` — no FK/pk dependency; `source_content_hash`
+CharField(64); `vector_blob` BinaryField; `embedded_at` default now).
+Model/dimension/version changes create a NEW generation; the prior
+`active` generation stays usable until a later atomic promotion
+supersedes it; duplicate identical-contract generations are allowed (no
+unique identity tuple) so a same-contract rebuild coexists with the old
+active generation. No speculative document-count/snapshot/failure-detail
+fields were added.
+
+**DB constraints** (all real, verified both by ORM tests and raw SQL on
+a genuinely migrated isolated database): at most one `state='active'`
+(partial unique `uniq_active_embedding_generation`); dimensions bounds
+1..16384; `model`/`embedding_version`/`source_index_version` non-empty;
+ONE lifecycle-shape CHECK that doubles as the explicit state allowlist
+(building: all lifecycle timestamps null; active: completed+activated
+set and superseded/failed null; superseded: +superseded_at and failed
+null; failed: failed_at set and the other three null — unknown states
+match no branch and are rejected); chronology CHECKs
+`completed_at <= activated_at` and `activated_at <= superseded_at`;
+`EmbeddingDocument` unique per (generation, document_key) (same key may
+appear in many generations); key/hash/vector non-empty (empty BLOB is
+`X''` at the DB level). No redundant `dimensions` column on documents
+(the generation row is the cross-table truth; SQLite CHECKs cannot
+reference the generation row, so equality is validated by the
+codec/writers/status — deliberately no `save()` override faking DB
+enforcement).
+
+**Migration 0009** (`0009_embedding_foundation.py`, depends on 0008):
+SCHEMA-ONLY — exactly two `CreateModel` operations, no `RunPython`, no
+backfill, no network/embedding-client import or call (proven with
+raising guards during a real executor migration), leaves
+`SearchDocument` and all source tables/rows untouched, and is fully
+reversible (reverse drops only the two embedding tables).
+
+**Vector codec** (`workflow/services/vector_codec.py`, pure stdlib):
+`MAX_DIMENSION = 16384` is now the ONE runtime home of the cap;
+`embedding_client.py` imports it so `embedding_client.MAX_DIMENSION`
+remains available/compatible. Public API `encode_vector(values, *,
+dimensions) -> bytes`, `decode_vector(blob, *, dimensions) ->
+tuple[float, ...]`, `validate_vector_blob(blob, *, dimensions) -> None`.
+Dimensions are exact int 1..16384 (bool/0/negative/over-cap rejected);
+encode accepts only list/tuple of exact int/float (bool rejected),
+non-empty, cardinality exactly `dimensions`, finite before packing,
+overflow/struct failures sanitized and the packed float32 verified
+finite; the raw encoding is exactly `struct.pack(f"<{dimensions}f", ...)`
+(raw little-endian IEEE-754 float32, no header/pickle/JSON); decode
+accepts exact bytes of exactly `dimensions * 4` bytes and rejects
+non-finite values. Errors are sanitized `VectorCodecError(ValueError)`
+with stable codes `invalid_dimension`/`invalid_values`/`invalid_blob`,
+never containing values or blob content. Round trips are deterministic
+and float32-quantized.
+
+**Verification**: the full suite passes — **1632 collected and 1632
+passed** (the Step 5B.1 full-suite state was 1499; the 5B.2 delta is
+the 133 new 5B.2 tests), with the only warning the known `audioop`
+deprecation; `manage.py check` and `makemigrations --check` (0009
+only) passed, and `git diff --check` is clean. Supporting focused
+detail: 72 pure codec
+tests (`tests/test_vector_codec.py`), 52 runtime model-constraint tests
+(`tests/test_embedding_models.py`), 9 genuine MigrationExecutor tests
+for real 0008→0009 and 0009→0008 on isolated SQLite databases
+(`tests/test_embedding_migration.py`), the migration-readiness pending/
+leaf lists updated to include `workflow.0009_embedding_foundation`, and
+the unchanged embedding-client tests — together **240 passed**.
+No real network or embedding calls
+in tests; real `config/config.yaml` untouched; no new commit/HEAD or
+real-database migration is
+claimed — the work and its tests are in the working tree. Step 5B.3
+(status/rebuild/repair) and Step 5B.4 (incremental embedding
+synchronization) are explicitly NOT implemented.
 
 ## Step 5A.4.2b — Library Search Rendering & Accessibility (delivered)
 
@@ -1246,9 +1346,20 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current: **1499 tests passing** — the full suite at the delivered
-  Step 5B.1 state: the historical 1404-test pre-5B stability patch
-  snapshot below plus the Step 5B.1 focused tests
+- Current (Step 5B.2 tree): the full suite passes — **1632 collected
+  and 1632 passed** (the Step 5B.1 full-suite state was 1499; the 5B.2
+  delta is the 133 new 5B.2 tests), with the only warning the known
+  `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
+  `manage.py check`, `makemigrations --check` (0009 only) and
+  `git diff --check` pass. Supporting focused detail: the 5B.2
+  verification set — `tests/test_vector_codec.py` (72),
+  `tests/test_embedding_models.py` (52), `tests/test_embedding_migration.py`
+  (9), the updated `tests/test_migration_readiness.py` and the
+  unchanged `tests/test_embedding_client.py` — together **240 passed**.
+- Step 5B.1 full-suite state (historical, delivered and independently
+  full-suite verified at that time): **1499 tests passing** — the
+  historical 1404-test pre-5B stability patch
+  snapshot plus the Step 5B.1 focused tests
   (`tests/test_embedding_client.py` and the embedding config /
   diagnostics extensions; see the Step 5B.1 section at the top of this
   file). The only warning is the known `audioop` DeprecationWarning
@@ -1316,9 +1427,12 @@ Production Library UI are delivered.
 - **Library web search is keyword-only (Step 5A.4.2 COMPLETE)**:
   `brain search` remains the CLI entry point and `/recordings/` the
   web entry; highlights, segment jump links and the search-row
-  styling/a11y polish are delivered. The Step 5B.1 embedding client is
-  delivered; embedding storage/index production, semantic/hybrid
-  search and Ask-with-citations remain later **Step 5B.2–5D** work.
+  styling/a11y polish are delivered. The Step 5B.1 embedding client and
+  the Step 5B.2 embedding storage foundation (generations + documents,
+  vector codec, migration 0009) are delivered; embedding index
+  production (status/rebuild/repair — Step 5B.3), incremental embedding
+  synchronization (Step 5B.4), semantic/hybrid
+  search and Ask-with-citations remain later **Step 5B.3–5D** work.
   Keyword matching is substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
@@ -1353,17 +1467,23 @@ Production Library UI are delivered.
   commit of a mutation that schedules sync fires one — while
   `confirm_suggestion`'s origin-only no-sync behavior and the separate
   search-sync no-auto-retry policy are untouched). **Step 5B.1 (the
-  local /embeddings client) is delivered; Step 5B.2 — Embedding
-  Storage Model & Migration — is next.**
+  local /embeddings client) and Step 5B.2 (embedding storage
+  foundation: generation/document models, vector codec, migration 0009)
+  are delivered; Step 5B.3 — Embedding Status/Rebuild/Repair — is
+  next.** Step 5B.3 and Step 5B.4 (incremental embedding
+  synchronization) are explicitly NOT implemented.
 - **Step 5B — Local Embeddings Foundation**: **5B.1 delivered** — the
   bounded local /embeddings client
   (`workflow/services/embedding_client.py`) plus the embedding config
-  keys and the doctor endpoint-pair diagnostics. **NOT yet
-  implemented**: versioned embedding storage with
-  provenance (model, dimensions, source content hash/index version);
-  bounded status/rebuild/repair commands and incremental sync.
-  Keep this phase to index production and integrity — no semantic-search
-  UI or Ask feature yet.
+  keys and the doctor endpoint-pair diagnostics. **5B.2 delivered** —
+  versioned embedding storage with provenance (model, dimensions,
+  source content hash/index version): `EmbeddingGeneration` +
+  `EmbeddingDocument` + migration 0009 (schema-only, reversible) + the
+  pure-stdlib `vector_codec.py` float32 codec (see the Step 5B.2
+  section at the top of this file). **NOT yet implemented**: 5B.3
+  bounded status/rebuild/repair commands and 5B.4 incremental
+  synchronization (the next work). Keep this phase to index production
+  and integrity — no semantic-search UI or Ask feature yet.
 - **Step 5C — Semantic and Hybrid Search**: implement bounded semantic
   retrieval and deterministic keyword+semantic fusion, preserving
   recording deduplication, tag/date scope, provenance and stale/index-

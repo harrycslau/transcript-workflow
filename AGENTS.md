@@ -311,14 +311,20 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- Migrations `0001`–`0008` define the current schema (0007 is the
+- Migrations `0001`–`0009` define the current schema (0007 is the
   multilingual-summary migration: `Summary.output_language`,
   `SummaryVariantState`, transcript language-verification fields;
   intentionally irreversible — repair it in place, never add an 0008
   on top of an unapproved 0007; 0008 is the approved search-index
   migration: `SearchDocument` registry + `workflow_search_fts` FTS5
   trigram table, fully reversible with a separate-connection FTS5
-  capability probe, under an approved plan). Add NEW migrations, never
+  capability probe, under an approved plan; 0009 is the approved
+  Step-5B.2 embedding-storage migration: `EmbeddingGeneration` +
+  `EmbeddingDocument` (`workflow_embedding_generation` /
+  `workflow_embedding_document`), SCHEMA-ONLY `CreateModel` operations,
+  fully reversible, with no `RunPython`, no backfill, no network or
+  embedding-client use, and no change to `SearchDocument`/source
+  tables). Add NEW migrations, never
   edit existing/applied ones. Enforce invariants with DB constraints
   (partial uniques, check constraints), not just application logic.
   Run `makemigrations --check` in verification. 0007's data migration
@@ -475,10 +481,82 @@ Non-negotiable principles:
   exact equal pairs share one fetch, distinct pairs fetch independently
   (`check_models_for_config`); doctor NEVER calls `/embeddings` and no
   embedding probe command exists.
-- **Step 5B — Local Embeddings Foundation**: use only the configured
-  local oMLX embedding endpoint/model. Add versioned embedding storage
-  with model/dimension/content-hash provenance, bounded status/rebuild/
-  repair commands, and incremental synchronization. Do not add
+- **Step 5B.2 — Embedding storage foundation (delivered)**: versioned
+  embedding storage with a SEPARATE generation-based architecture,
+  migration 0009 (schema-only, depends on 0008, fully reversible, no
+  backfill/network/embedding-client use). `EmbeddingGeneration`
+  (db_table `workflow_embedding_generation`; BigAutoField id) records
+  `model` (exact configured/canonical model string), `dimensions`
+  (1..16384), `embedding_version` (the FULL embedding implementation
+  contract — deterministic text preparation plus vector mapping, to be
+  versioned by Step 5B.3 — never merely the codec/client) and, on a
+  SEPARATE axis, `source_index_version` (binding the `SearchDocument`
+  index contract); no `EMBEDDING_VERSION` constant exists in 5B.2
+  because the production mapping/version is not implemented until 5B.3.
+  `EmbeddingDocument` (db_table
+  `workflow_embedding_document`) stores per-vector rows whose
+  `document_key` is COPIED independently from
+  `SearchDocument.document_key` — NEVER an FK or pk dependency on
+  `SearchDocument` — with `source_content_hash` provenance and the raw
+  `vector_blob`. Model/dimension/version changes create a NEW
+  generation; the prior `active` generation remains usable until a later
+  atomic promotion supersedes it. Duplicate generations with an
+  identical (model, dimensions, embedding_version, source_index_version)
+  identity are ALLOWED (no unique identity tuple) so a same-contract
+  rebuild can coexist with the old active generation. States are exactly
+  `building`/`active`/`superseded`/`failed`; at most one `active`
+  (partial unique `uniq_active_embedding_generation`); a lifecycle-shape
+  CHECK doubles as the explicit state allowlist (building has all
+  lifecycle timestamps null; active = completed_at+activated_at set with
+  superseded_at/failed_at null; superseded adds superseded_at with
+  failed_at null; failed = failed_at set and the other three null; a
+  FAILED building generation may retain bounded partial
+  `EmbeddingDocument` rows for diagnosis/cleanup/resumption, but they
+  are unusable because the generation is never active);
+  chronology CHECKs `completed_at <= activated_at` and
+  `activated_at <= superseded_at`; dimensions bounds and non-empty
+  identity fields are DB CHECKs. `EmbeddingDocument` is unique per
+  (generation, document_key) — the same key MAY appear in many
+  generations — key/hash/vector must be non-empty, and NO redundant
+  `dimensions` column exists (the generation row is the cross-table
+  truth; SQLite CHECKs cannot reference the generation row, so
+  codec/writers/status validate the equality; no model `save` override
+  fakes DB enforcement). Vectors are portable raw little-endian
+  IEEE-754 float32 BLOBs. `workflow/services/vector_codec.py`
+  (pure stdlib) is the codec and the ONE runtime home of
+  `MAX_DIMENSION = 16384`; `embedding_client.MAX_DIMENSION` remains
+  available by import from it. Public API: `encode_vector(values, *,
+  dimensions) -> bytes`, `decode_vector(blob, *, dimensions) ->
+  tuple[float, ...]`, `validate_vector_blob(blob, *, dimensions) ->
+  None`; dimensions are exact int 1..MAX (bool/0/negative/over-cap
+  rejected); encode accepts only list/tuple of exact int/float (bool
+  rejected), cardinality exactly `dimensions`, finite before packing,
+  overflow/struct failures sanitized, packed result verified finite;
+  the raw encoding is exactly `struct.pack(f"<{dimensions}f", ...)` —
+  no header/pickle/JSON; decode accepts exact bytes of exactly
+  `dimensions * 4` bytes and rejects non-finite values; errors are
+  sanitized `VectorCodecError(ValueError)` with stable codes
+  `invalid_dimension`/`invalid_values`/`invalid_blob`, never containing
+  values, blob content, or paths. 5B.3 (bounded status/rebuild/repair)
+  and 5B.4 (incremental synchronization) are NOT implemented; no
+  `search_index`/`search_sync`/CLI/web changes were made. Verification:
+  the full suite passes — **1632 collected and 1632 passed** (the
+  Step 5B.1 full-suite state was 1499; the 5B.2 delta is the 133 new
+  5B.2 tests below), with the only warning the known `audioop`
+  deprecation; `manage.py check` and `makemigrations --check` are
+  clean. Supporting focused detail: 72 pure codec tests
+  (`tests/test_vector_codec.py`), 52 runtime model-constraint tests
+  (`tests/test_embedding_models.py`), 9 genuine MigrationExecutor
+  tests (`tests/test_embedding_migration.py`) plus the updated
+  migration-readiness and unchanged embedding-client tests (the
+  5B.2 focused set: 240 passed). No commit or real-database migration
+  is claimed.
+- **Step 5B — Local Embeddings Foundation**: **5B.1 (delivered)** the
+  bounded local /embeddings client; **5B.2 (delivered)** versioned
+  embedding storage (generations + documents + vector codec + migration
+  0009). Still NOT implemented: 5B.3 bounded status/rebuild/repair
+  commands and 5B.4 incremental synchronization (both are the next
+  work). Do not add
   semantic-search UI or Ask-with-citations in this phase.
 - **Step 5C — Semantic and Hybrid Search**: bounded semantic retrieval
   plus deterministic keyword/semantic fusion; retain per-Recording

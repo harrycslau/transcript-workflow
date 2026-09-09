@@ -39,6 +39,7 @@ from typing import Any
 import httpx
 
 from brainlib.config import AppConfig
+from workflow.services.vector_codec import MAX_DIMENSION
 
 # Fixed production request encoding_format. There is no runtime fallback
 # and no retry: a single encoding is always sent.
@@ -47,7 +48,6 @@ ENCODING_FORMAT = "base64"
 # Client hard constants (independent of configuration).
 REQUEST_CAP_BYTES = 1024 * 1024  # 1 MiB
 RESPONSE_CAP_BYTES = 2 * 1024 * 1024  # 2 MiB
-MAX_DIMENSION = 16384
 HARD_MAX_BATCH = 128
 
 

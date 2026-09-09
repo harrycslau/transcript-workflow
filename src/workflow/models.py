@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 
 
@@ -742,3 +742,219 @@ class SearchDocument(models.Model):
 
     def __str__(self) -> str:
         return f"SearchDocument({self.document_key})"
+
+
+class EmbeddingGenerationState(models.TextChoices):
+    """Lifecycle state of one embedding-model generation.
+
+    - ``building``: rows are being produced; not yet usable.
+    - ``active``: the generation usable for lookups (prior active
+      generations stay ``active`` until the later atomic promotion
+      supersedes them).
+    - ``superseded``: was promoted to ``active`` and later replaced by a
+      newer generation (history retained).
+    - ``failed``: building failed. Bounded partial ``EmbeddingDocument``
+      rows MAY be retained for diagnosis/cleanup/resumption policy, but
+      they are unusable because the generation is never ``active``.
+    """
+
+    BUILDING = "building", "Building"
+    ACTIVE = "active", "Active"
+    SUPERSEDED = "superseded", "Superseded"
+    FAILED = "failed", "Failed"
+
+
+class EmbeddingGeneration(models.Model):
+    """A generation of embedded vectors for one embedding model.
+
+    Step 5B.2 storage foundation. One generation stores the vectors for
+    a single (``model``, ``dimensions``, ``embedding_version``,
+    ``source_index_version``) contract:
+
+    - ``model`` is the exact configured/canonical model string used to
+      produce the vectors.
+    - ``embedding_version`` binds this generation to the FULL embedding
+      implementation contract (the deterministic text-preparation +
+      vector mapping contract that Step 5B.3 defines and versions; the
+      codec and client are only parts of it). It is a distinct axis from
+      ``source_index_version`` (the ``SearchDocument`` index contract).
+    - ``source_index_version`` binds this generation to the
+      ``SearchDocument`` index contract (``search_index.INDEX_VERSION``):
+      the ``EmbeddingDocument.document_key`` values are meaningful only
+      against that search-index contract.
+    - ``dimensions`` is the per-vector float32 count (1..16384).
+
+    Model/dimension/version changes create a NEW generation; the prior
+    active generation remains usable until a later atomic promotion
+    supersedes it. Duplicate generations with an identical identity tuple
+    MUST be allowed so a same-contract rebuild can coexist with the old
+    active generation — identity is therefore NOT unique.
+
+    ``state`` transitions are DB-enforced: at most one ``active``
+    generation (partial unique), and a lifecycle-shape CHECK that doubles
+    as the explicit state allowlist. Chronology CHECKs keep
+    ``completed_at <= activated_at`` (active/superseded) and
+    ``activated_at <= superseded_at`` (superseded).
+    """
+
+    model = models.TextField(help_text="Exact configured/canonical embedding model string")
+    dimensions = models.PositiveIntegerField(help_text="Per-vector float32 count, 1..16384")
+    embedding_version = models.CharField(
+        max_length=16,
+        help_text="Full embedding implementation contract version (text preparation + mapping; defined in Step 5B.3)",
+    )
+    source_index_version = models.CharField(max_length=16, help_text="SearchDocument index contract version")
+    state = models.CharField(
+        max_length=16,
+        choices=EmbeddingGenerationState.choices,
+        default=EmbeddingGenerationState.BUILDING,
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    superseded_at = models.DateTimeField(null=True, blank=True)
+    failed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        db_table = "workflow_embedding_generation"
+        constraints = [
+            # At most one usable (active) generation at a time.
+            models.UniqueConstraint(
+                fields=["state"],
+                condition=Q(state=EmbeddingGenerationState.ACTIVE),
+                name="uniq_active_embedding_generation",
+            ),
+            # Vector-dimension contract; the column itself is an integer
+            # and the codec/writers additionally cap at MAX_DIMENSION.
+            models.CheckConstraint(
+                condition=Q(dimensions__gte=1) & Q(dimensions__lte=16384),
+                name="chk_embedding_generation_dimensions_bounds",
+            ),
+            # Identity fields must be non-empty (never the empty string).
+            models.CheckConstraint(
+                condition=(~Q(model="") & ~Q(embedding_version="") & ~Q(source_index_version="")),
+                name="chk_embedding_generation_identity_nonempty",
+            ),
+            # Lifecycle state/shape in ONE check that doubles as the
+            # explicit state allowlist: unknown states match no branch
+            # and are rejected.
+            models.CheckConstraint(
+                condition=(
+                    # building: every lifecycle timestamp null
+                    Q(
+                        state=EmbeddingGenerationState.BUILDING,
+                        completed_at__isnull=True,
+                        activated_at__isnull=True,
+                        superseded_at__isnull=True,
+                        failed_at__isnull=True,
+                    )
+                    # active: completed + activated set, superseded/failed null
+                    | Q(
+                        state=EmbeddingGenerationState.ACTIVE,
+                        completed_at__isnull=False,
+                        activated_at__isnull=False,
+                        superseded_at__isnull=True,
+                        failed_at__isnull=True,
+                    )
+                    # superseded: completed + activated + superseded set,
+                    # failed null
+                    | Q(
+                        state=EmbeddingGenerationState.SUPERSEDED,
+                        completed_at__isnull=False,
+                        activated_at__isnull=False,
+                        superseded_at__isnull=False,
+                        failed_at__isnull=True,
+                    )
+                    # failed: failed_at set, the others null
+                    | Q(
+                        state=EmbeddingGenerationState.FAILED,
+                        completed_at__isnull=True,
+                        activated_at__isnull=True,
+                        superseded_at__isnull=True,
+                        failed_at__isnull=False,
+                    )
+                ),
+                name="chk_embedding_generation_lifecycle_shape",
+            ),
+            # Chronology: completed_at <= activated_at whenever
+            # activated_at is set (active/superseded generations).
+            models.CheckConstraint(
+                condition=(
+                    ~Q(activated_at__isnull=False)
+                    | Q(completed_at__isnull=True)
+                    | Q(completed_at__lte=F("activated_at"))
+                ),
+                name="chk_embedding_generation_completed_before_activated",
+            ),
+            # Chronology: activated_at <= superseded_at whenever
+            # superseded_at is set (superseded generations only; the
+            # lifecycle shape guarantees activated_at is present there).
+            models.CheckConstraint(
+                condition=(
+                    ~Q(superseded_at__isnull=False)
+                    | Q(activated_at__lte=F("superseded_at"))
+                ),
+                name="chk_embedding_generation_activated_before_superseded",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return (
+            f"EmbeddingGeneration({self.model!r}, {self.dimensions}d, "
+            f"{self.state})"
+        )
+
+
+class EmbeddingDocument(models.Model):
+    """One stored embedding vector row inside an :class:`EmbeddingGeneration`.
+
+    The stable linkage to the keyword-search registry is by COPIED
+    ``document_key`` (a copy of ``SearchDocument.document_key``) — there
+    is intentionally NO FK/dependency on ``SearchDocument`` or its pk, so
+    embedding generations survive search-index rebuilds that renumber pks
+    and never block source-data deletion.
+
+    ``source_content_hash`` is the ``SearchDocument.content_hash`` the
+    vector was produced from; ``vector_blob`` is the portable raw
+    little-endian IEEE-754 float32 encoding of exactly ``dimensions``
+    floats (see ``workflow.services.vector_codec``). Dimensions are NOT
+    repeated here: the owning generation's ``dimensions`` is the truth,
+    and cross-table dimension equality is validated by the codec/writers/
+    status (SQLite CHECKs cannot reference the generation row).
+    """
+
+    generation = models.ForeignKey(
+        EmbeddingGeneration, on_delete=models.CASCADE, related_name="documents"
+    )
+    document_key = models.TextField(
+        help_text="Copied SearchDocument.document_key at embedding time (no FK)"
+    )
+    source_content_hash = models.CharField(max_length=64, help_text="sha256 of the source SearchDocument content")
+    vector_blob = models.BinaryField(help_text="Raw little-endian IEEE-754 float32 vector")
+    embedded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["generation", "document_key"]
+        db_table = "workflow_embedding_document"
+        constraints = [
+            # One vector per (generation, source document key); the same
+            # key MAY appear in many generations.
+            models.UniqueConstraint(
+                fields=["generation", "document_key"],
+                name="uniq_embedding_document_per_generation",
+            ),
+            # Stored fields must be non-empty (never the empty string /
+            # empty BLOB).
+            models.CheckConstraint(
+                condition=(
+                    ~Q(document_key="")
+                    & ~Q(source_content_hash="")
+                    & ~Q(vector_blob=b"")
+                ),
+                name="chk_embedding_document_fields_nonempty",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"EmbeddingDocument({self.generation_id}, {self.document_key!r})"
