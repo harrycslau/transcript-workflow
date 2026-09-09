@@ -27,7 +27,7 @@ from __future__ import annotations
 import shutil
 import sqlite3
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import httpx
@@ -271,6 +271,7 @@ def check_omlx(
     base_url: str,
     api_key_env: str,
     fetcher: Callable[..., list[str]] | None = None,
+    label: str = "oMLX endpoint",
 ) -> tuple[CheckResult, list[str], str]:
     """Check oMLX reachability. Returns (result, model_ids, verification_state).
 
@@ -285,19 +286,31 @@ def check_omlx(
         models = fetcher(base_url, api_key_env)
     except httpx.HTTPError as exc:
         reason = type(exc).__name__
-        return CheckResult("oMLX endpoint", WARN, f"unreachable at {base_url} ({reason})"), [], MODELS_UNVERIFIED
+        return CheckResult(label, WARN, f"unreachable at {base_url} ({reason})"), [], MODELS_UNVERIFIED
     except OmlxPayloadError as exc:
-        return CheckResult("oMLX endpoint", WARN, f"reachable at {base_url}, but /models returned an invalid payload ({exc})"), [], MODELS_UNVERIFIED
+        return CheckResult(label, WARN, f"reachable at {base_url}, but /models returned an invalid payload ({exc})"), [], MODELS_UNVERIFIED
     except OSError as exc:
-        return CheckResult("oMLX endpoint", WARN, f"unreachable at {base_url} ({exc})"), [], MODELS_UNVERIFIED
+        return CheckResult(label, WARN, f"unreachable at {base_url} ({exc})"), [], MODELS_UNVERIFIED
 
     if not models:
-        return CheckResult("oMLX endpoint", WARN, f"reachable at {base_url}, but /models returned no model IDs"), [], MODELS_EMPTY
+        return CheckResult(label, WARN, f"reachable at {base_url}, but /models returned no model IDs"), [], MODELS_EMPTY
     return (
-        CheckResult("oMLX endpoint", PASS, f"reachable at {base_url}, {len(models)} model(s) available"),
+        CheckResult(label, PASS, f"reachable at {base_url}, {len(models)} model(s) available"),
         models,
         MODELS_VERIFIED,
     )
+
+
+def _check_one_model(label: str, model: str, state: str, available_models: list[str]) -> CheckResult:
+    if not model.strip():
+        return CheckResult(label, WARN, "no model configured (blank)")
+    if state == MODELS_VERIFIED:
+        if model in available_models:
+            return CheckResult(label, PASS, model)
+        return CheckResult(label, WARN, f"'{model}' not in /v1/models")
+    if state == MODELS_EMPTY:
+        return CheckResult(label, WARN, f"'{model}' configured, but the endpoint reports no models")
+    return CheckResult(label, WARN, f"'{model}' configured, but could not be verified (no valid /v1/models response)")
 
 
 def check_models(
@@ -316,21 +329,48 @@ def check_models(
     - ``MODELS_UNVERIFIED``: the list could not be retrieved or parsed;
       configured names are reported as unverifiable warnings.
     """
+    return [
+        _check_one_model("Summary model", summary_model, state, available_models),
+        _check_one_model("Embedding model", embedding_model, state, available_models),
+    ]
+
+
+def check_models_for_config(
+    config: AppConfig,
+    fetcher: Callable[..., list[str]] | None = None,
+) -> list[CheckResult]:
+    """Validate the summary and embedding models against their own endpoints.
+
+    Endpoints are identified by their exact ``(base_url, api_key_env)``
+    pair. Equal pairs share ONE ``/v1/models`` fetch; distinct pairs are
+    fetched independently, and each configured model is checked against
+    the models reported by its own endpoint. Never calls ``/embeddings``.
+
+    Preserves the historical shared-configuration output: a single
+    "oMLX endpoint" check followed by "Summary model" and "Embedding
+    model" results. When the two endpoints differ, a separate "oMLX
+    endpoint (embedding)" check is emitted.
+    """
+    fetcher = fetcher or fetch_omlx_models
+    llm_key = (config.llm.base_url, config.llm.api_key_env)
+    emb_key = (config.embedding.base_url, config.embedding.api_key_env)
+
+    by_key: dict[tuple[str, str], tuple[CheckResult, list[str], str]] = {}
+    for base, env in dict.fromkeys((llm_key, emb_key)):
+        by_key[(base, env)] = check_omlx(base, env, fetcher=fetcher)
+
     results: list[CheckResult] = []
-
-    def check_one(label: str, model: str) -> CheckResult:
-        if not model.strip():
-            return CheckResult(label, WARN, "no model configured (blank)")
-        if state == MODELS_VERIFIED:
-            if model in available_models:
-                return CheckResult(label, PASS, model)
-            return CheckResult(label, WARN, f"'{model}' not in /v1/models")
-        if state == MODELS_EMPTY:
-            return CheckResult(label, WARN, f"'{model}' configured, but the endpoint reports no models")
-        return CheckResult(label, WARN, f"'{model}' configured, but could not be verified (no valid /v1/models response)")
-
-    results.append(check_one("Summary model", summary_model))
-    results.append(check_one("Embedding model", embedding_model))
+    llm_result, llm_models, llm_state = by_key[llm_key]
+    emb_result, emb_models, emb_state = by_key[emb_key]
+    if llm_key == emb_key:
+        results.append(llm_result)
+    else:
+        results.append(llm_result)
+        # Distinct pair: relabel the already-fetched embedding endpoint
+        # check so doctor output distinguishes the two endpoints.
+        results.append(replace(emb_result, name="oMLX endpoint (embedding)"))
+    results.append(_check_one_model("Summary model", config.llm.model, llm_state, llm_models))
+    results.append(_check_one_model("Embedding model", config.embedding.model, emb_state, emb_models))
     return results
 
 
@@ -463,9 +503,7 @@ def run_doctor() -> tuple[list[CheckResult], int]:
         results.append(CheckResult("Legacy tags", WARN, config.legacy_tags_notice))
     results.append(redact_secret_check(config))
 
-    omlx_result, models, state = check_omlx(config.llm.base_url, config.llm.api_key_env)
-    results.append(omlx_result)
-    results.extend(check_models(config.llm.model, config.embedding.model, state, models))
+    results.extend(check_models_for_config(config))
 
     exit_code = 1 if any(r.is_fatal for r in results) else 0
     return results, exit_code

@@ -262,6 +262,91 @@ class TestWebSection:
         assert config.web.transcript_segments_per_page == 200
 
 
+class TestEmbeddingSection:
+    def test_defaults_when_omitted(self, tmp_path):
+        config = load_config(write_config(tmp_path, minimal_valid()))
+        assert config.embedding.timeout_seconds == 120
+        assert config.embedding.batch_size == 32
+
+    def test_overrides(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["timeout_seconds"] = 60
+        data["embedding"]["batch_size"] = 16
+        config = load_config(write_config(tmp_path, data))
+        assert config.embedding.timeout_seconds == 60
+        assert config.embedding.batch_size == 16
+
+    def test_accepts_cap_boundaries(self, tmp_path):
+        # The caps themselves (timeout 600, batch 128) are valid values.
+        data = minimal_valid()
+        data["embedding"]["timeout_seconds"] = 600
+        data["embedding"]["batch_size"] = 128
+        config = load_config(write_config(tmp_path, data))
+        assert config.embedding.timeout_seconds == 600
+        assert config.embedding.batch_size == 128
+
+    def test_rejects_boolean(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["timeout_seconds"] = True
+        with pytest.raises(ConfigError, match="got bool"):
+            load_config(write_config(tmp_path, data))
+
+    def test_rejects_boolean_batch(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["batch_size"] = True
+        with pytest.raises(ConfigError, match="got bool"):
+            load_config(write_config(tmp_path, data))
+
+    def test_rejects_non_positive_timeout(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["timeout_seconds"] = 0
+        with pytest.raises(ConfigError, match="positive"):
+            load_config(write_config(tmp_path, data))
+
+    def test_rejects_non_positive_batch(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["batch_size"] = -1
+        with pytest.raises(ConfigError, match="positive"):
+            load_config(write_config(tmp_path, data))
+
+    def test_rejects_timeout_over_cap(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["timeout_seconds"] = 601
+        with pytest.raises(ConfigError, match="must not exceed 600"):
+            load_config(write_config(tmp_path, data))
+
+    def test_rejects_batch_over_cap(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["batch_size"] = 129
+        with pytest.raises(ConfigError, match="must not exceed 128"):
+            load_config(write_config(tmp_path, data))
+
+    def test_rejects_string(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["batch_size"] = "many"
+        with pytest.raises(ConfigError, match="batch_size"):
+            load_config(write_config(tmp_path, data))
+
+    def test_rejects_string_timeout(self, tmp_path):
+        data = minimal_valid()
+        data["embedding"]["timeout_seconds"] = "fast"
+        with pytest.raises(ConfigError, match="timeout_seconds"):
+            load_config(write_config(tmp_path, data))
+
+    def test_rejects_float_timeout(self, tmp_path):
+        # timeout_seconds is an integer-typed key; a float is a type
+        # error, not silently coerced.
+        data = minimal_valid()
+        data["embedding"]["timeout_seconds"] = 12.5
+        with pytest.raises(ConfigError, match="timeout_seconds"):
+            load_config(write_config(tmp_path, data))
+
+    def test_example_config_documents_embedding_section(self):
+        text = EXAMPLE.read_text()
+        assert "timeout_seconds: 120" in text
+        assert "batch_size: 32" in text
+
+
 class TestHeuristicAutoRoute:
     def test_defaults_when_omitted(self, tmp_path):
         config = load_config(write_config(tmp_path, minimal_valid()))

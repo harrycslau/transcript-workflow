@@ -1,16 +1,17 @@
-# Project status — implementation handoff (Step 5A.4.2 + pre-5B stability patch complete)
+# Project status — implementation handoff (Step 5B.1 delivered)
 
-This file reflects the repository through Step 5A.4.2: Step 4, the
+This file reflects the repository through Step 5B.1: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
 (Step 5A.3), the read-only keyword search backend + CLI
 (Step 5A.4.1) and the Library keyword web search in both its service
 round (5A.4.2a) and its rendering/accessibility round (5A.4.2b) —
-plus the **pre-5B stability patch** (SQLite web-tag contention retry),
-which has been delivered and has passed independent repeatable
-verification. It is a snapshot, not a durable instruction file;
-`AGENTS.md` holds the standing rules.
+plus the **pre-5B stability patch** (SQLite web-tag contention retry)
+and the **Step 5B.1 embedding client** (bounded local /embeddings
+client with embedding config and doctor endpoint-pair diagnostics),
+all delivered and independently full-suite verified. It is a snapshot,
+not a durable instruction file; `AGENTS.md` holds the standing rules.
 
 ## Handoff audit — 2026-09-09
 
@@ -23,19 +24,22 @@ is claimed; the patch and its tests are in the working tree.
 
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
-  configuration; implementation complete through Step 5A.4.2b (Step 4
+  configuration; implementation complete through Step 5B.1 (Step 4
   web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
-  with highlights and jump links).
+  with highlights and jump links, the pre-5B stability patch, and the
+  Step 5B.1 local /embeddings client).
 - The previously known suite failure is FIXED: the full suite collects
-  **1404 tests and all 1404 pass** (the 1388-test Step 5A.4.2b
+  **1499 tests and all 1499 pass** (the 1388-test Step 5A.4.2b
   baseline plus 16 deterministic focused tests added by the stability
-  patch). `TestConvergence::test_unlocked_tag_service_race_converges`
+  patch and the Step 5B.1 embedding-client/config/diagnostics tests).
+  `TestConvergence::test_unlocked_tag_service_race_converges`
   is green in the full suite and was additionally run **75 consecutive
   times in isolation without a single failure** (repeatable
   verification, not a proof against every possible contention).
   `manage.py check`, `makemigrations --check` (NO new migration) and
-  `git diff --check` passed.
+  `git diff --check` passed; the only warning is the known
+  `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13).
 - Observed cleanup debt (not fixed here): the unreachable `return
   None` after `return "first"` in
   `workflow/services/web_actions.py:summarize_mode`, and the noted
@@ -43,7 +47,10 @@ is claimed; the patch and its tests are in the working tree.
 
 **Inference / next steps**
 
-- Next phase is **Step 5B — Local Embeddings Foundation**, then 5C
+- Next is **Step 5B.2 — Embedding Storage Model & Migration** (the
+  remainder of the Step 5B foundation: versioned embedding storage with
+  model/dimension/content-hash provenance, bounded status/rebuild/
+  repair commands and incremental synchronization), then Step 5C
   semantic/hybrid search, 5D Ask-with-citations, and Step 6.
 - No claim is made here about the real user database's migration state
   (`0007`/`0008` application is not reported). Local config values and
@@ -82,6 +89,66 @@ is claimed; the patch and its tests are in the working tree.
   consecutive invocations; full suite 1404 passed; `manage.py check`,
   `makemigrations --check` (no migration), `git diff --check` passed.
   Repeatable verification, not a proof against every contention.
+
+## Step 5B.1 — Local /embeddings client (delivered, independently verified)
+
+**Scope delivered** (see the durable contract in `AGENTS.md`): the ONLY
+/embeddings client in `workflow/services/embedding_client.py` (frozen
+`EmbeddingBatch`, `embed_texts(config, texts, *, timeout=None,
+transport=None)`), one fixed production `encoding_format='base64'`, no
+fallback/retry, one HTTP request per call, no logs. Endpoint validated
+before transport (http/https, no credentials/query/fragment, hostname
+exactly `localhost` or a literal loopback IP). Input strictly list/tuple
+of exact `str`, never empty; configured `batch_size` (default 32, cap
+128) and hard caps enforced (request 1 MiB, response 2 MiB,
+`MAX_DIMENSION` 16384). Key read at call time via `api_key_for`;
+Authorization only when set. Response envelope strict: `data` list,
+`model` exact-match, exact cardinality, `index` exact int 0..n-1 unique
+complete, strict base64 little-endian IEEE-754 float32, finite,
+consistent nonzero dimensions, reordered to input order. Sanitized
+stable error taxonomy (`model_not_configured`, `endpoint_not_local`,
+`invalid_input`, `batch_too_large`, `request_too_large`,
+`endpoint_unavailable`, `timeout`, `http_error`, `response_too_large`,
+plus fine `EmbeddingInvalid` codes `malformed_http_json`,
+`invalid_envelope`, `invalid_vector`, `dimension_mismatch`,
+`invalid_encoding`). Config extended minimally (`timeout_seconds`
+default 120 cap 600, `batch_size` default 32 cap 128, positive-int
+validation rejecting booleans; NO `max_input_characters`). Diagnostics
+corrected: `check_models_for_config` fetches /v1/models per exact
+`(base_url, api_key_env)` pair (equal pairs share one fetch, distinct
+pairs independently) and checks each model against its own result;
+shared default configuration output is unchanged. Doctor NEVER calls
+/embeddings; no probe command added.
+
+**Observed probe facts** (real endpoint validation, 5 bounded requests,
+synthetic fixed text only; no auth value present; no DB/user data;
+`config/config.yaml` hash unchanged): POST `<embedding.base_url>/embeddings`
+accepted two-string list batches; response is a top-level object with
+`data`/`model`/`usage`, items are objects with `index`/`embedding`;
+exact cardinality and indices `0..n-1`; the configured model returned
+1024-dimension vectors; the response `model` matched the request
+exactly; both `float` and `base64` `encoding_format` values were
+accepted (production client always sends `base64`); base64 decoded as
+strict little-endian IEEE-754 float32 (4096 bytes/vector, dimension
+1024) with finite/plausible values while a big-endian read was
+non-finite; malformed input returned HTTP 422 with an OpenAI error
+envelope whose keys/types were `error` (object) containing `message`
+(string), `type` (string), `param` (string) and `code` (null) — values
+not recorded. Config values/model names are intentionally not recorded
+here.
+
+**Verification**: focused embedding-client tests (input/bound failures
+prove zero transport calls, envelope/index/base64/vector validation,
+timeout-override validation, privacy canaries absent from exceptions
+and caplog, exactly one request and no retry), config
+defaults/overrides/type/bool/nonpositive/over-cap tests, diagnostics
+shared-pair one-fetch / distinct-pair two-fetch / failure-isolation /
+no-`/embeddings` / sanitized tests. Independently verified by the full
+suite: **1499 passed** (the only warning is the known `audioop`
+DeprecationWarning), `manage.py check` and `makemigrations --check`
+(NO new migration) passed, `git diff --check` clean. No real network
+in tests; real `config/config.yaml` untouched. No new commit/HEAD is
+claimed; the work and its tests are in the working tree.
 
 ## Step 5A.4.2b — Library Search Rendering & Accessibility (delivered)
 
@@ -1179,11 +1246,13 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current: **1404 tests passing** — the full suite at the delivered
-  pre-5B stability patch: the historical 1388-test Step 5A.4.2b
-  snapshot below plus **16 deterministic focused tests** added by the
-  stability patch (`tests/test_tags_contention_retry.py`; see the
-  stability-patch section at the top of this file). The previously
+- Current: **1499 tests passing** — the full suite at the delivered
+  Step 5B.1 state: the historical 1404-test pre-5B stability patch
+  snapshot below plus the Step 5B.1 focused tests
+  (`tests/test_embedding_client.py` and the embedding config /
+  diagnostics extensions; see the Step 5B.1 section at the top of this
+  file). The only warning is the known `audioop` DeprecationWarning
+  (Python 3.12, removal slated for 3.13). The previously
   known single failure —
   `test_search_index_sync.py::TestConvergence::
   test_unlocked_tag_service_race_converges` — is FIXED: the focused
@@ -1247,9 +1316,10 @@ Production Library UI are delivered.
 - **Library web search is keyword-only (Step 5A.4.2 COMPLETE)**:
   `brain search` remains the CLI entry point and `/recordings/` the
   web entry; highlights, segment jump links and the search-row
-  styling/a11y polish are delivered. Local embeddings, semantic/hybrid
-  search and Ask-with-citations are the later **Steps 5B–5D**. Keyword
-  matching is substring-style (trigrams +
+  styling/a11y polish are delivered. The Step 5B.1 embedding client is
+  delivered; embedding storage/index production, semantic/hybrid
+  search and Ask-with-citations remain later **Step 5B.2–5D** work.
+  Keyword matching is substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
   `brain search`'s full health gate REFUSING to serve (exit 1), with
@@ -1282,12 +1352,16 @@ Production Library UI are delivered.
   transaction-scoped — a rolled-back attempt discards them, a successful
   commit of a mutation that schedules sync fires one — while
   `confirm_suggestion`'s origin-only no-sync behavior and the separate
-  search-sync no-auto-retry policy are untouched). **Step 5B is
-  next.**
-- **Step 5B — Local Embeddings Foundation**: use the configured local
-  oMLX embedding endpoint/model; add versioned embedding storage and
+  search-sync no-auto-retry policy are untouched). **Step 5B.1 (the
+  local /embeddings client) is delivered; Step 5B.2 — Embedding
+  Storage Model & Migration — is next.**
+- **Step 5B — Local Embeddings Foundation**: **5B.1 delivered** — the
+  bounded local /embeddings client
+  (`workflow/services/embedding_client.py`) plus the embedding config
+  keys and the doctor endpoint-pair diagnostics. **NOT yet
+  implemented**: versioned embedding storage with
   provenance (model, dimensions, source content hash/index version);
-  provide bounded status/rebuild/repair commands and incremental sync.
+  bounded status/rebuild/repair commands and incremental sync.
   Keep this phase to index production and integrity — no semantic-search
   UI or Ask feature yet.
 - **Step 5C — Semantic and Hybrid Search**: implement bounded semantic

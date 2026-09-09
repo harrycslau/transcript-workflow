@@ -139,6 +139,8 @@ _DEFAULTS: dict[str, Any] = {
         "base_url": "http://localhost:8000/v1",
         "model": "",
         "api_key_env": "BRAIN_LLM_API_KEY",
+        "timeout_seconds": 120,
+        "batch_size": 32,
     },
     "retention": {
         "enabled": False,
@@ -258,6 +260,8 @@ class EmbeddingConfig:
     base_url: str
     model: str
     api_key_env: str
+    timeout_seconds: int
+    batch_size: int
 
 
 @dataclass(frozen=True)
@@ -588,10 +592,18 @@ def _parse_llm(raw: dict[str, Any]) -> LLMConfig:
 
 def _parse_embedding(raw: dict[str, Any]) -> EmbeddingConfig:
     s = _section(raw, "embedding")
+    timeout_seconds = _get_number(s, "timeout_seconds", "embedding", int, positive=True)
+    batch_size = _get_number(s, "batch_size", "embedding", int, positive=True)
+    if timeout_seconds > 600:
+        raise ConfigError(f"[embedding]: 'timeout_seconds' must not exceed 600, got {timeout_seconds}")
+    if batch_size > 128:
+        raise ConfigError(f"[embedding]: 'batch_size' must not exceed 128, got {batch_size}")
     return EmbeddingConfig(
         base_url=_get_nonblank(s, "base_url", "embedding"),
         model=_get(s, "model", "embedding", str),
         api_key_env=_get_nonblank(s, "api_key_env", "embedding"),
+        timeout_seconds=timeout_seconds,
+        batch_size=batch_size,
     )
 
 

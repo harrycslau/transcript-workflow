@@ -436,6 +436,45 @@ Non-negotiable principles:
   (focused 50 passed; the real race test 75 consecutive invocations;
   full suite 1404 passed; no migration). Repeatable verification, not a
   proof against every possible SQLite contention.
+- **Step 5B.1 — Embedding client (delivered)**: `workflow/services/embedding_client.py`
+  is the ONLY /embeddings client (never refactored into `llm.py`).
+  Public API: frozen `EmbeddingBatch(text, embedding)` and
+  `embed_texts(config, texts, *, timeout=None, transport=None)`. One
+  fixed production request `encoding_format='base64'`; NO runtime
+  fallback, NO retries, exactly ONE HTTP request per call, and the
+  client emits no logs. Endpoint = `base_url.rstrip('/') + '/embeddings'`,
+  validated BEFORE transport (http/https only; no credentials/query/
+  fragment; hostname exactly `localhost` or a literal loopback IP —
+  everything else is `endpoint_not_local`). Model must be nonblank.
+  Input: list/tuple of exact `str` only (never a bare str, never empty,
+  never non-str elements, never empty strings; no coercion or
+  truncation). Request body is deterministic UTF-8 JSON (sort_keys),
+  bounded by hard caps: request 1 MiB, response 2 MiB, `MAX_DIMENSION`
+  16384, hard max batch 128 (configured `batch_size` also enforced;
+  config caps it at 128). Key is read at call time via
+  `config.api_key_for(...)`; `Authorization` header only when set.
+  Response validation: top-level `data` list, `model` str EXACTLY equal
+  to the configured model, exact cardinality, item `index` exact int
+  (never bool) forming a complete unique 0..n-1 set, item `embedding`
+  exact str; strict base64 (padding never permissively normalized),
+  decoded bytes nonempty and divisible by 4, little-endian IEEE-754
+  float32 via `struct`, every value finite, consistent nonzero
+  dimensions, dimension capped; vectors reordered by index into input
+  order. Extra fields ignored. Errors are sanitized (never input,
+  vector, body, headers, secret, SQL or path) with a stable taxonomy:
+  `model_not_configured`, `endpoint_not_local`, `invalid_input`,
+  `batch_too_large`, `request_too_large`, `endpoint_unavailable`,
+  `timeout`, `http_error` (safe status only), `response_too_large`,
+  and fine `EmbeddingInvalid.code` values `malformed_http_json`,
+  `invalid_envelope`, `invalid_vector`, `dimension_mismatch`,
+  `invalid_encoding`. Embedding config (`timeout_seconds` default 120,
+  cap 600; `batch_size` default 32, cap 128) is validated at config
+  parsing with positive-int checks that reject booleans; there is NO
+  `max_input_characters` config. `brain doctor` checks the embedding
+  model against ITS OWN `(base_url, api_key_env)` /v1/models result —
+  exact equal pairs share one fetch, distinct pairs fetch independently
+  (`check_models_for_config`); doctor NEVER calls `/embeddings` and no
+  embedding probe command exists.
 - **Step 5B — Local Embeddings Foundation**: use only the configured
   local oMLX embedding endpoint/model. Add versioned embedding storage
   with model/dimension/content-hash provenance, bounded status/rebuild/

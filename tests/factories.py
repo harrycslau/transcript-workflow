@@ -134,7 +134,7 @@ def make_config(tmp_path, **overrides) -> AppConfig:
         ),
         embedding=overrides.pop(
             "embedding",
-            EmbeddingConfig(base_url="http://127.0.0.1:1/v1", model="", api_key_env="BRAIN_TEST_LLM_API_KEY"),
+            EmbeddingConfig(base_url="http://127.0.0.1:1/v1", model="", api_key_env="BRAIN_TEST_LLM_API_KEY", timeout_seconds=120, batch_size=32),
         ),
         retention=overrides.pop(
             "retention",
@@ -201,6 +201,8 @@ def write_cli_config(tmp_path, monkeypatch, **kwargs):
             "base_url": config.embedding.base_url,
             "model": config.embedding.model,
             "api_key_env": config.embedding.api_key_env,
+            "timeout_seconds": config.embedding.timeout_seconds,
+            "batch_size": config.embedding.batch_size,
         },
         "retention": {
             "enabled": config.retention.enabled,

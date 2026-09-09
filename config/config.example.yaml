@@ -117,6 +117,11 @@ embedding:
   base_url: http://localhost:8000/v1
   model: ""
   api_key_env: BRAIN_LLM_API_KEY
+  # Per-request HTTP timeout (seconds) and the maximum number of texts in
+  # a single /embeddings request. Both must be positive integers; timeout
+  # is capped at 600 and batch_size at 128.
+  timeout_seconds: 120
+  batch_size: 32
 
 # Web interface presentation (Step 4). Integers only, positive.
 web:

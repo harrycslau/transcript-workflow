@@ -383,6 +383,176 @@ class TestRedaction:
         assert "super-secret-value" not in output
 
 
+class TestEmbeddingModelEndpoint:
+    """Step 5B.1: the embedding model is checked against its OWN
+    (base_url, api_key_env) endpoint, never against the LLM endpoint
+    when the two differ. Equal pairs share one /v1/models fetch."""
+
+    def _config_with_endpoints(self, tmp_path, llm_pair, emb_pair):
+        from brainlib.config import EmbeddingConfig, LLMConfig
+        from dataclasses import replace
+
+        config = make_config(tmp_path)
+        return replace(
+            config,
+            llm=replace(config.llm, base_url=llm_pair[0], api_key_env=llm_pair[1], model="summary-model"),
+            embedding=EmbeddingConfig(
+                base_url=emb_pair[0], model="embed-model",
+                api_key_env=emb_pair[1], timeout_seconds=120, batch_size=32,
+            ),
+        )
+
+    def test_shared_pair_fetches_once(self, tmp_path, monkeypatch):
+        config = self._config_with_endpoints(
+            tmp_path,
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"),
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"),
+        )
+        calls = []
+
+        def fetcher(base_url, api_key_env, **k):
+            calls.append((base_url, api_key_env))
+            return ["summary-model", "embed-model"]
+
+        results = diagnostics.check_models_for_config(config, fetcher=fetcher)
+        assert len(calls) == 1
+        names = [r.name for r in results]
+        assert names == ["oMLX endpoint", "Summary model", "Embedding model"]
+        by_name = {r.name: r for r in results}
+        assert by_name["Summary model"].status == PASS
+        assert by_name["Embedding model"].status == PASS
+
+    def test_distinct_pairs_fetch_independently(self, tmp_path, monkeypatch):
+        config = self._config_with_endpoints(
+            tmp_path,
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"),
+            ("http://127.0.0.1:2/v1", "BRAIN_TEST_EMB_API_KEY"),
+        )
+        calls = []
+        by_pair = {
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"): ["summary-model"],
+            ("http://127.0.0.1:2/v1", "BRAIN_TEST_EMB_API_KEY"): ["embed-model"],
+        }
+
+        def fetcher(base_url, api_key_env, **k):
+            calls.append((base_url, api_key_env))
+            return by_pair[(base_url, api_key_env)]
+
+        results = diagnostics.check_models_for_config(config, fetcher=fetcher)
+        assert len(calls) == 2
+        assert set(calls) == set(by_pair)
+        names = [r.name for r in results]
+        assert names == ["oMLX endpoint", "oMLX endpoint (embedding)", "Summary model", "Embedding model"]
+        by_name = {r.name: r for r in results}
+        assert by_name["Summary model"].status == PASS
+        assert by_name["Embedding model"].status == PASS
+        # Each model verified against its own endpoint's result.
+        assert by_name["Summary model"].detail == "summary-model"
+        assert by_name["Embedding model"].detail == "embed-model"
+
+    def test_distinct_pair_embedding_absent_from_own_endpoint(self, tmp_path, monkeypatch):
+        config = self._config_with_endpoints(
+            tmp_path,
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"),
+            ("http://127.0.0.1:2/v1", "BRAIN_TEST_EMB_API_KEY"),
+        )
+        calls = []
+        by_pair = {
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"): ["summary-model"],
+            ("http://127.0.0.1:2/v1", "BRAIN_TEST_EMB_API_KEY"): ["other-model"],
+        }
+
+        def fetcher(base_url, api_key_env, **k):
+            calls.append((base_url, api_key_env))
+            return by_pair[(base_url, api_key_env)]
+
+        results = diagnostics.check_models_for_config(config, fetcher=fetcher)
+        by_name = {r.name: r for r in results}
+        assert by_name["Summary model"].status == PASS
+        assert by_name["Embedding model"].status == WARN
+        assert "'embed-model' not in /v1/models" in by_name["Embedding model"].detail
+
+    def test_never_calls_embeddings(self, tmp_path, monkeypatch):
+        config = self._config_with_endpoints(
+            tmp_path,
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"),
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"),
+        )
+        seen = []
+
+        def fetcher(base_url, api_key_env, **k):
+            seen.append(base_url)
+            return ["m"]
+
+        diagnostics.check_models_for_config(config, fetcher=fetcher)
+        assert all("embeddings" not in u for u in seen)
+
+    def test_sanitized_detail_no_secrets(self, tmp_path, monkeypatch):
+        config = self._config_with_endpoints(
+            tmp_path,
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"),
+            ("http://127.0.0.1:2/v1", "BRAIN_TEST_EMB_API_KEY"),
+        )
+        monkeypatch.setenv("BRAIN_TEST_LLM_API_KEY", "super-secret-value")
+
+        def fetcher(base_url, api_key_env, **k):
+            raise httpx.ConnectError("refused")
+
+        results = diagnostics.check_models_for_config(config, fetcher=fetcher)
+        combined = "\n".join(f"{r.name}: {r.detail}" for r in results)
+        assert "super-secret-value" not in combined
+
+    def test_one_endpoint_failure_isolated_from_other(self, tmp_path, monkeypatch):
+        # Distinct pairs: the LLM pair's /v1/models fetch fails while the
+        # embedding pair succeeds. The failure must NOT prevent the
+        # embedding endpoint/model from being correctly classified.
+        config = self._config_with_endpoints(
+            tmp_path,
+            ("http://127.0.0.1:1/v1", "BRAIN_TEST_LLM_API_KEY"),
+            ("http://127.0.0.1:2/v1", "BRAIN_TEST_EMB_API_KEY"),
+        )
+        calls = []
+
+        def fetcher(base_url, api_key_env, **k):
+            calls.append((base_url, api_key_env))
+            if base_url == "http://127.0.0.1:1/v1":
+                raise httpx.ConnectError("refused")
+            return ["embed-model"]
+
+        results = diagnostics.check_models_for_config(config, fetcher=fetcher)
+        assert len(calls) == 2
+        by_name = {r.name: r for r in results}
+        assert by_name["oMLX endpoint"].status == WARN
+        assert "unreachable" in by_name["oMLX endpoint"].detail
+        assert by_name["oMLX endpoint (embedding)"].status == PASS
+        assert by_name["Summary model"].status == WARN
+        assert "could not be verified" in by_name["Summary model"].detail
+        assert by_name["Embedding model"].status == PASS
+        assert by_name["Embedding model"].detail == "embed-model"
+
+    def test_blank_embedding_model_warns(self, tmp_path, monkeypatch):
+        from brainlib.config import EmbeddingConfig, LLMConfig
+        from dataclasses import replace
+
+        config = make_config(tmp_path)
+        config = replace(
+            config,
+            llm=replace(config.llm, model="summary-model"),
+            embedding=EmbeddingConfig(
+                base_url="http://127.0.0.1:1/v1", model="",
+                api_key_env="BRAIN_TEST_LLM_API_KEY", timeout_seconds=120, batch_size=32,
+            ),
+        )
+
+        def fetcher(base_url, api_key_env, **k):
+            return ["summary-model"]
+
+        results = diagnostics.check_models_for_config(config, fetcher=fetcher)
+        by_name = {r.name: r for r in results}
+        assert by_name["Embedding model"].status == WARN
+        assert "no model configured (blank)" in by_name["Embedding model"].detail
+
+
 class TestStep2Diagnostics:
     def test_profiles_pass_when_models_installed(self, config):
         models_output = (
