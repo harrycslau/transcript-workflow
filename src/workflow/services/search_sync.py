@@ -35,6 +35,23 @@ fixed aggregate warning carrying the failure COUNT and nothing else
 search-index status`` remains the detection mechanism and ``rebuild``
 the authoritative repair.
 
+Step 5B.4 embedding synchronization rides the SAME callback: BEFORE the
+search reconciliation the recording's current SearchDocument keys are
+captured into a connection-local TEMP table
+(``embedding_sync.capture_removed_key_snapshot``), and only AFTER a
+SUCCESSFUL search reconciliation ``embedding_sync.sync_recording_embeddings``
+deletes vectors for the removed keys and embeds the missing/stale/invalid
+current rows of the active compatible embedding generation. Search
+failures suppress the embedding step (an unverified SearchDocument set
+must not be embedded) and stay separately logged; embedding failures are
+counted and logged as ONE fixed aggregate warning with category
+``embedding_index_sync_failed`` (no ids, model names, exceptions, paths,
+SQL or vectors). A failed snapshot capture never stops the search
+reconciliation — it counts an embedding failure and leaves stale state
+detectable via ``brain embedding-index status``. No active / no
+compatible active embedding generation is a normal no-op (no network, no
+log). ``embedding_sync`` never schedules recursively.
+
 Self-healing scope: reconcile repairs everything attributable to this
 recording (missing/stale/tampered registry rows, missing/mismatched FTS
 rows for existing registry rows, non-canonical registry rows and their
@@ -65,6 +82,7 @@ from typing import Sequence
 from django.db import connections, transaction
 
 from workflow.models import Recording, SearchDocument
+from workflow.services import embedding_sync
 from workflow.services.search_index import (
     INSERT_CHUNK_SIZE,
     _delete_fts_rows,
@@ -138,14 +156,46 @@ def schedule_recording_sync(recording_ids: Sequence[str], *, using: str = "defau
         return
 
     def _sync_after_commit() -> None:
-        failed = 0
-        for recording_id in ids:
-            try:
-                reconcile_recording(recording_id, using=using)
-            except Exception:
-                failed += 1
-        if failed:
-            LOGGER.warning(_SYNC_FAILED_LOG, failed)
+        search_failed = 0
+        embedding_failed = 0
+        try:
+            for recording_id in ids:
+                snapshot_ok = False
+                try:
+                    # Removed-key attribution: capture the recording's
+                    # pre-reconcile SearchDocument keys (keys only, TEMP
+                    # table). A capture failure NEVER stops the search
+                    # reconciliation — it counts as an embedding-sync
+                    # failure and leaves stale state detectable.
+                    snapshot_ok = embedding_sync.capture_removed_key_snapshot(
+                        recording_id, using=using
+                    )
+                except Exception:
+                    embedding_failed += 1
+                try:
+                    reconcile_recording(recording_id, using=using)
+                except Exception:
+                    # A failed search reconcile leaves the SearchDocument
+                    # set unverified: embedding sync is suppressed for
+                    # this recording (no false provenance), and the
+                    # failure is counted/search-logged separately.
+                    search_failed += 1
+                    continue
+                if snapshot_ok:
+                    try:
+                        embedding_sync.sync_recording_embeddings(
+                            recording_id, using=using
+                        )
+                    except Exception:
+                        embedding_failed += 1
+        finally:
+            # The TEMP snapshot is connection-local and cleared per
+            # synchronous callback (cleanup is best-effort).
+            embedding_sync.clear_removed_key_snapshot(using=using)
+        if search_failed:
+            LOGGER.warning(_SYNC_FAILED_LOG, search_failed)
+        if embedding_failed:
+            embedding_sync.log_embedding_sync_failed(embedding_failed)
 
     transaction.on_commit(_sync_after_commit, using=using)
 

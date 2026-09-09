@@ -67,11 +67,13 @@ Non-negotiable principles:
 
 - SQLite has no advisory locks. All mutating pipeline commands
   (`ingest`, `route`, `transcribe`, `summarize`, `tags --sync`, `run`,
-  `retry`, `search-index rebuild`) must hold the
+  `retry`, `search-index rebuild`, `embedding-index rebuild`,
+  `embedding-index repair`) must hold the
   exclusive `flock` at `data/temp/locks/pipeline.lock`
   (`workflow/services/pipeline_lock.py`); second process exits with
   code 3. Read-only commands (`status`, `review`, `transcripts`,
-  `summaries`, `summary`, `tags`, `search-index status`, `doctor`,
+  `summaries`, `summary`, `tags`, `search-index status`,
+  `embedding-index status`, `doctor`,
   `serve`) never lock.
 - Run `recover_interruptions()` while holding the lock before new work
   in mutating commands; it is idempotent.
@@ -111,6 +113,12 @@ Non-negotiable principles:
   nothing). Sync failures are nonfatal and non-automatic: the index
   stays detectably stale and converges via the next successful sync
   or a rebuild — never add automatic retries or background daemons.
+- Step 5B.4 embedding synchronization rides the SAME post-commit
+  callback (see the 5B.4 bullet below): a per-recording pre-reconcile
+  key snapshot plus `embedding_sync.sync_recording_embeddings` run only
+  after a successful search reconcile, with its own separate fixed
+  aggregate warning (`embedding_index_sync_failed`); the search
+  contract above is unchanged.
 
 ## Content identity, versioning, active-record invariants
 
@@ -716,7 +724,8 @@ Non-negotiable principles:
   at call time so tests mock it without touching the client. Human and
   JSON output are sanitized; error guidance names commands only; no
   probe command.
-- **Verification (independently confirmed)**: the full suite passes —
+- **Verification (historical 5B.3 state, independently confirmed)**: the
+  full suite passes —
   **1746 collected and 1746 passed** with the only warning the known
   `audioop` deprecation; `manage.py check` and `makemigrations --check`
   (no migration) are clean. Supporting focused detail: the 5B.3 focused
@@ -732,11 +741,61 @@ Non-negotiable principles:
   bounded local /embeddings client; **5B.2 (delivered)** versioned
   embedding storage (generations + documents + vector codec + migration
   0009); **5B.3 (delivered)** bounded embedding-index
-  status/rebuild/repair (above). Still NOT implemented: **5B.4
-  incremental embedding synchronization** (the next work) — explicitly
-  no incremental embedding sync, no `search_sync`/`search_index` hooks,
-  no semantic retrieval, no web/GET changes. Do not add
-  semantic-search UI or Ask-with-citations in this phase.
+  status/rebuild/repair (above); **5B.4 (delivered — see the dedicated
+  bullet below)** incremental embedding synchronization. Still NOT
+  implemented: **Step 5C semantic/hybrid retrieval** (the next work) —
+  explicitly no semantic retrieval, no web/GET changes, no
+  Ask-with-citations. Do not add semantic-search UI or Ask-with-citations
+  in this phase.
+- **Step 5B.4 — Incremental embedding synchronization (delivered)**:
+  `workflow/services/embedding_sync.py` is the ONLY incremental
+  `EmbeddingDocument` writer; `embedding_index.py` keeps the explicit
+  status/rebuild/repair. `search_sync.schedule_recording_sync` remains
+  the sole authoritative post-commit trigger and its per-recording
+  callback now: (1) BEFORE the search reconciliation captures the
+  recording's current SearchDocument keys (keys only) into a
+  connection-local SQLite TEMP table (`brain_embedding_removed_keys`,
+  `INSERT...SELECT`, bounded application memory, dropped in `finally`;
+  a capture failure NEVER stops the search reconciliation — it counts an
+  embedding failure and leaves stale state detectable); (2) runs
+  `reconcile_recording`; (3) ONLY on search success invokes
+  `embedding_sync.sync_recording_embeddings` (search failure suppresses
+  the unsafe embedding step and stays separately logged). The worker
+  reuses the EXACT 5B.3 mapping contract (`prepare_document_text`,
+  `EMBEDDING_VERSION`, `embedding_client.embed_texts`,
+  `vector_codec.encode_vector`; SearchDocument is the immediate source,
+  never reconstructed) and deletes removed-key vectors FIRST
+  (network-free, bounded pages, short transactions rechecking source
+  absence and active compatibility), then streams the recording's
+  current SearchDocuments in deterministic `document_key` keyset pages
+  no larger than the validated `embedding.batch_size` (hard max 128),
+  classifies correct/missing/stale/invalid per page with the SHARED
+  5B.3 length-first vector validation, embeds ONLY missing/stale/invalid
+  rows (one HTTP request per non-empty batch, outside all DB
+  transactions) and upserts through the shared short-transaction batch
+  writer that re-reads every source key/hash and the same active
+  generation identity — concurrent source change or active promotion
+  produces no false provenance/write. Config is loaded FRESH inside the
+  callback via `brainlib.config.load_config` (only when an active
+  generation exists); no active generation or an incompatible active
+  generation is a normal no-op (zero network/DML/log; status/rebuild is
+  the remedy). Failures never escape or alter the authoritative/search
+  operation; per-recording independent; the ONLY embedding failure log
+  is one fixed aggregate warning per callback
+  (`category=embedding_index_sync_failed`, count only). No automatic
+  retries, no pipeline lock in the sync, no HTTP while
+  `connection.in_atomic_block`; a prior failed deletion can leave an
+  unattributable embedding orphan after its SearchDocument is gone —
+  status detects it (`orphan_document`) and explicit
+  `brain embedding-index repair`/`rebuild` removes it, exactly like
+  orphan FTS rows (no global callback sweep, retry, queue, daemon or
+  background job). Verification (independently confirmed): full suite
+  **1783 collected and 1783
+  passed** (the 5B.3 state was 1746; the 5B.4 delta is the 37 tests in
+  `tests/test_embedding_index_sync.py`), only the known `audioop`
+  warning; `manage.py check`, `makemigrations --check` (no migration)
+  and `git diff --check` clean. No commit, real-database migration, or
+  real embedding network call is claimed; all tests are mocked/network-free.
 - **Step 5C — Semantic and Hybrid Search**: bounded semantic retrieval
   plus deterministic keyword/semantic fusion; retain per-Recording
   deduplication, date/tag scope filters, provenance, and explicit stale/

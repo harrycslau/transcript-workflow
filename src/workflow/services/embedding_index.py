@@ -1,8 +1,12 @@
 """Bounded embedding index status/rebuild/repair (Step 5B.3).
 
-Delivers the three bounded operations over the Step 5B.2 generation
-store — NO incremental synchronization (Step 5B.4), no semantic
-retrieval, no web changes, no new schema/migration/config keys:
+Delivers the three bounded EXPLICIT operations over the Step 5B.2
+generation store. This module owns ONLY the explicit
+status/rebuild/repair operations; the incremental per-recording
+embedding synchronization (Step 5B.4) lives in
+``workflow.services.embedding_sync`` (which reuses the mapping helpers
+defined here). No semantic retrieval, no web changes, no new
+schema/migration/config keys:
 
 - ``build_embedding_status_report(config, *, using='default')`` —
   strictly read-only (SELECT/PRAGMA only; never locks, never touches the
