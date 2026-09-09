@@ -10,6 +10,48 @@ round (5A.4.2a) and its rendering/accessibility round (5A.4.2b).
 It is a snapshot, not a durable instruction file; `AGENTS.md` holds
 the standing rules.
 
+## Handoff audit — 2026-09-09
+
+A documentation-only review of the repository as of HEAD `8c215f8`
+(`feat(docs): update AGENTS.md and project-status.md with stability
+patch details and outline for Steps 5B–5D`) on `main`, tracking
+`origin/main`. The sections below the audit remain the detailed
+delivery snapshot.
+
+**Observed facts**
+
+- 20 commits, no Git tags or releases, and no visible CI
+  configuration (no `.github/`, GitLab, or CircleCI files).
+- Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
+  SQLite / minimal dependencies; no frameworks beyond the approved set.
+- Implementation is complete through Step 5A.4.2b (Step 4 web UI,
+  5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
+  5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
+  with highlights and jump links).
+- The current baseline command collected 1388 tests and produced
+  **1387 passed** plus the one known failure:
+  `TestConvergence::test_unlocked_tag_service_race_converges` (the
+  SQLite table-lock race). `manage.py check` and
+  `makemigrations --check` passed.
+- Observed cleanup debt (not fixed here): the unreachable `return
+  None` after `return "first"` in
+  `workflow/services/web_actions.py:summarize_mode`, and the noted
+  `audioop` risk on Python 3.13.
+
+**Inference / next steps**
+
+- Immediate next step is the pre-5B bounded SQLite lock/busy retry
+  patch for the documented concurrent web-tag race, then 5B embeddings
+  foundation, 5C semantic/hybrid search, 5D Ask-with-citations, and
+  Step 6.
+- No claim is made here about the real user database's migration state
+  (`0007`/`0008` application is not reported). Local config values and
+  secrets are intentionally omitted from this handoff.
+
+> The older "1388 passing" text in the Tests section below is a
+> delivery snapshot from the Step 5A.4.2b round, not the current audit
+> result (which is 1387 passed + the one known race failure above).
+
 ## Step 5A.4.2b — Library Search Rendering & Accessibility (delivered)
 
 - **Snippets as fragments** (`search_web.snippet_fragments`): the ONE

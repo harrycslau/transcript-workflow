@@ -32,9 +32,16 @@ Non-negotiable principles:
   - `src/workflow/` — Django app: `models.py`, `services/` (ingest,
     routing, transcription, summarize, chunking, rendering, tags,
     audiosamples, statemachine, pipeline, pipeline_lock, search_index,
-    search_sync, library_metadata), `views.py`
-    (status page + `/health/`),
-    `migrations/`.
+    search_sync, search_query, search_web, library_metadata,
+    variant_state, variant_view, web_actions, languages, langresolve,
+    llm, tempcleanup, review), a `views/` package
+    (`recordings.py`, `actions.py`, `exports.py`, `review.py`,
+    `tags.py`, plus package-entry `home`/`health`/error views),
+    `query.py` (Library list/annotations), `forms.py`, `middleware.py`,
+    `context_processors.py`, `sqlite_unicode.py`, `templatetags/`,
+    `migrations/`, and the Step-4/5A web templates under
+    `src/templates/workflow/`. The full web UI (Step 4) plus the
+    Step 5A.1 Library and 5A.4.2 keyword search are delivered.
   - `src/manage.py` — conventional entry point only; the CLI is
     `brain` (`brainlib.cli:main`).
 

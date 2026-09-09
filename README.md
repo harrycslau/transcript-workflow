@@ -27,10 +27,11 @@ Steps 1–4 are implemented. The app can:
 Keyword search is available on the CLI (`brain search`) and in the
 Library's web UI (`/recordings/`): scoped filters before ranking,
 highlighted `<mark>` snippets and segment jump links
-(Step 5A.4.2 complete). Semantic/hybrid search and Ask-with-citations
-are planned for Step 5B. Manual topic splitting, scheduling, and
-retention deletion are planned for Step 6. **The app does not currently
-delete, move, or modify audio files.**
+(Step 5A.4.2 complete). The local embeddings foundation is planned
+for Step 5B, semantic/hybrid search for Step 5C, and
+Ask-with-citations for Step 5D. Manual topic splitting, scheduling,
+and retention deletion are planned for Step 6. **The app does not
+currently delete, move, or modify audio files.**
 
 ## Prerequisites
 
@@ -470,7 +471,7 @@ network access, or real audio.
 
 - Library web search is keyword-only (Step 5A.4.2 complete with
   highlights, jump links and styling/a11y): semantic search/hybrid
-  ranking and Ask-with-citations are later Step 5B work. Keyword
+  ranking and Ask-with-citations are later Step 5C/5D work. Keyword
   matching is substring-style (FTS5
   trigrams + a Unicode-folded LIKE fallback for 1–2-codepoint terms),
   not stemmed or word-tokenized.
