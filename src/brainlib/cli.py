@@ -20,6 +20,17 @@ Commands:
                              or the FTS table is missing/broken).
   brain search-index rebuild Atomically rebuild registry + FTS (mutating;
                              takes the pipeline lock).
+  brain embedding-index status
+                             Read-only embedding index health (no lock; exit
+                             1 unless the source index and the active
+                             embedding generation are fully healthy).
+  brain embedding-index rebuild
+                             Rebuild the embedding index from the search
+                             index (mutating; takes the pipeline lock).
+  brain embedding-index repair
+                             Reconcile the active embedding generation with
+                             the search index (mutating; takes the pipeline
+                             lock).
 
 Exit codes: 0 success/warnings; 1 config or setup error; 2 usage error;
 3 another pipeline process holds the lock. Django is initialized through
@@ -635,6 +646,45 @@ def cmd_search_index(args) -> int:
     return 0 if payload.get("healthy") else 1
 
 
+def cmd_embedding_index(args) -> int:
+    """``brain embedding-index status|rebuild|repair`` (Step 5B.3).
+
+    status: strictly read-only — schema preflight, no pipeline lock and
+    no recovery; exit 0 only when the source index and the active
+    embedding generation are fully healthy, else 1. rebuild/repair:
+    mutating — take the pipeline lock via the shared runner (schema
+    preflight BEFORE lock/recovery; contention exits 3). Error guidance
+    names commands only.
+    """
+    if args.action in ("rebuild", "repair"):
+        def work(config):
+            from workflow.services import embedding_index as ei
+
+            if args.action == "rebuild":
+                return ei.rebuild_embedding_index(config, embedder=ei.embed_texts)
+            return ei.repair_embedding_index(config, embedder=ei.embed_texts)
+
+        return _pipeline_command(args, work)
+
+    from brainlib.config import ConfigError, load_config
+
+    try:
+        config = load_config()
+        _setup_django()
+        _require_applied_migrations()
+        from workflow.services.embedding_index import build_embedding_status_report
+
+        payload = build_embedding_status_report(config)
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ImproperlyConfigured as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    _emit(payload, getattr(args, "json", False))
+    return 0 if payload.get("healthy") else 1
+
+
 def _format_ms(ms) -> str:
     if ms is None:
         return "?"
@@ -860,6 +910,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     rebuild_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
 
+    embedding_index_cmd = subparsers.add_parser(
+        "embedding-index", help="Inspect, rebuild, or repair the local embedding index (Step 5B.3)"
+    )
+    embedding_index_sub = embedding_index_cmd.add_subparsers(dest="action", required=True)
+    status_cmd = embedding_index_sub.add_parser(
+        "status", help="Read-only embedding index health (no lock; exit 1 unless fully healthy)"
+    )
+    status_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    rebuild_cmd = embedding_index_sub.add_parser(
+        "rebuild",
+        help="Rebuild the embedding index from the search index (mutating; takes the pipeline lock)",
+    )
+    rebuild_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+    repair_cmd = embedding_index_sub.add_parser(
+        "repair",
+        help="Reconcile the active embedding generation with the search index (mutating; takes the pipeline lock)",
+    )
+    repair_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+
     args = parser.parse_args(argv)
 
     if args.command == "summarize" and args.regenerate and not args.recording_id:
@@ -901,6 +970,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_search(args)
     if args.command == "search-index":
         return cmd_search_index(args)
+    if args.command == "embedding-index":
+        return cmd_embedding_index(args)
     parser.error(f"unknown command: {args.command}")
     return 2
 

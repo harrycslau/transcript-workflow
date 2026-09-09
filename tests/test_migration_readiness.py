@@ -303,6 +303,11 @@ class TestCliPreflight:
             ["summary", "some-id", "--json"],
             ["tags", "--json"],
             ["tags", "--sync", "--json"],
+            ["search-index", "status", "--json"],
+            ["search-index", "rebuild", "--json"],
+            ["embedding-index", "status", "--json"],
+            ["embedding-index", "rebuild", "--json"],
+            ["embedding-index", "repair", "--json"],
         ],
     )
     def test_every_orm_command_exits_one_with_recovery_command(

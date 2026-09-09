@@ -1,6 +1,6 @@
-# Project status — implementation handoff (Step 5B.2 delivered)
+# Project status — implementation handoff (Step 5B.3 delivered)
 
-This file reflects the repository through Step 5B.2: Step 4, the
+This file reflects the repository through Step 5B.3: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
@@ -9,46 +9,64 @@ index foundation (Step 5A.2), incremental index synchronization
 round (5A.4.2a) and its rendering/accessibility round (5A.4.2b) —
 plus the **pre-5B stability patch** (SQLite web-tag contention retry),
 the **Step 5B.1 embedding client** (bounded local /embeddings client
-with embedding config and doctor endpoint-pair diagnostics), and the
+with embedding config and doctor endpoint-pair diagnostics), the
 **Step 5B.2 embedding storage foundation** (versioned generation-based
-models, migration 0009 and the pure-stdlib float32 vector codec).
-Step 5B.2 is delivered in the working tree and independently
-full-suite verified: **1632 collected and 1632 passed** with the only
-warning the known `audioop` deprecation. No new commit/HEAD or
-real-database migration is claimed. It is a
-snapshot, not a durable instruction file; `AGENTS.md` holds the
-standing rules.
+models, migration 0009 and the pure-stdlib float32 vector codec), and
+the **Step 5B.3 embedding index status/rebuild/repair**
+(`workflow/services/embedding_index.py`, `EMBEDDING_VERSION`, the
+read-only status report, the atomic rebuild with `PRAGMA data_version`
+promotion guard, the active-generation repair, and the
+`brain embedding-index status|rebuild|repair` CLI), including the
+supervisor correction pass (exact model identity, strict text-field
+validation, full operational-error sanitization, no post-promotion
+failure points, the promotion active-identity guard, the in-caller-
+transaction precondition, status sanitization, batch-size hard cap and
+the merge page-boundary regression). Step 5B.3 is delivered in the
+working tree and independently full-suite verified: **1746 collected
+and 1746 passed** (only the known `audioop` deprecation warning), with
+`manage.py check` and `makemigrations --check` clean. No new
+commit/HEAD, real-database migration, or real embedding network call is
+claimed. This file is a snapshot, not a durable instruction file;
+`AGENTS.md` holds the standing rules.
 
-## Handoff audit — 2026-09-09 (updated for Step 5B.2)
+## Handoff audit — 2026-09-09 (updated for Step 5B.3)
 
-Updates the previous audit (the Step 5B.1 state, docs commit
-`8c215f8` plus the embedding-client commit `31e38a9`) in place to
-record that the Step 5B.2 embedding storage foundation is now
-implemented in the working tree and the full suite independently
-verified. No new commit/HEAD or real-database migration is claimed;
-the 5B.2 work and its tests are in the working tree.
+Updates the previous audit (the Step 5B.2 state, docs commit
+`e23a6e4` plus the 5B.2 working-tree work) in place to record that the
+Step 5B.3 bounded embedding index status/rebuild/repair is now
+implemented in the working tree and independently full-suite verified
+(**1746 passed**). No new commit/HEAD, real-database migration, or
+real embedding network call is claimed; the 5B.3 work and its tests
+are in the working tree.
 
 **Observed facts**
 
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
-  configuration; implementation complete through Step 5B.2 (Step 4
+  configuration; implementation complete through Step 5B.3 (Step 4
   web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
   with highlights and jump links, the pre-5B stability patch, the
-  Step 5B.1 local /embeddings client, and the Step 5B.2 embedding
+  Step 5B.1 local /embeddings client, the Step 5B.2 embedding
   storage foundation: migration 0009 + generation/document models +
-  vector codec).
-- Step 5B.2 verification: the full suite passes — **1632 collected and
-  1632 passed** (the Step 5B.1 full-suite state was 1499; the 5B.2
-  delta is the 133 new 5B.2 tests), with the only warning the known
-  `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
-  `manage.py check`, `makemigrations --check` (only the new 0009
-  migration) and `git diff --check` pass. Supporting focused detail:
-  `tests/test_vector_codec.py` (72), `tests/test_embedding_models.py`
-  (52), `tests/test_embedding_migration.py` (9) plus the updated
-  `tests/test_migration_readiness.py` and the unchanged
-  `tests/test_embedding_client.py` pass together (**240 passed**).
+  vector codec, and the Step 5B.3 embedding index status/rebuild/
+  repair).
+- Step 5B.3 verification (independently confirmed): the full suite
+  passes — **1746 collected and 1746 passed** (the Step 5B.2
+  full-suite state was 1632 — historical; the 5B.3 delta is the 109 new
+  5B.3 tests below plus 5 migration-readiness command-inventory
+  additions), with the only warning the known `audioop`
+  DeprecationWarning (Python 3.12, removal slated for 3.13);
+  `manage.py check`, `makemigrations --check` (NO migration) and
+  `git diff --check` pass. Supporting focused detail:
+  `tests/test_embedding_index_service.py` (86) +
+  `tests/test_embedding_index_cli.py` (23) = 109 tests, run
+  together with the search-index/client/codec/embedding-model/
+  embedding-migration/CLI/migration-readiness/search-sync regressions
+  (**455 passed**). The 5B.3 test files run with
+  `django_db(transaction=True)` because the public rebuild/repair
+  refuse to run inside a caller transaction; the schema-mutating
+  status/CLI tests restore the dropped tables/FTS afterwards.
 - Observed cleanup debt (not fixed here): the unreachable `return
   None` after `return "first"` in
   `workflow/services/web_actions.py:summarize_mode`, and the noted
@@ -56,15 +74,175 @@ the 5B.2 work and its tests are in the working tree.
 
 **Inference / next steps**
 
-- Next is **Step 5B.3 — Embedding status/rebuild/repair** (bounded
-  generation status reporting plus atomic rebuild/repair commands),
-  then Step 5B.4 incremental embedding synchronization, Step 5C
-  semantic/hybrid search, 5D Ask-with-citations, and Step 6. Step
-  5B.3 and Step 5B.4 are explicitly NOT implemented in this working
-  tree: no `search_index`/`search_sync`/CLI/web changes were made.
+- Next is **Step 5B.4 — incremental embedding synchronization** (the
+  next work; explicitly NOT implemented in this working tree: no
+  incremental embedding sync, no `search_sync`/`search_index` hooks,
+  no semantic retrieval, no web/GET changes), then Step 5C
+  semantic/hybrid search, 5D Ask-with-citations, and Step 6.
 - No claim is made here about the real user database's migration state
   (`0007`–`0009` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
+
+## Step 5B.3 — Embedding index status/rebuild/repair (delivered in the working tree)
+
+**Scope delivered** (durable contract in `AGENTS.md`): all three bounded
+operations in `workflow/services/embedding_index.py` — no new
+schema/migration/config keys, no 5B.4 synchronization, no `search_sync`
+hooks, no semantic retrieval, no web/GET changes.
+
+- `EMBEDDING_VERSION="1"` — the FULL production embedding mapping
+  contract: `prepare_document_text` (ONE pure helper consuming a
+  SearchDocument row; v1 format is a `brain-embedding-v1` marker line
+  plus four length-prefixed labelled fields `doc_type`/`title_text`/
+  `body_text`/`aux_text` in fixed order, empty fields included, never
+  truncated/coerced; all four fields must be EXACT `str` — malformed
+  rows raise one fixed sanitized error and a hostile value's `__str__`
+  is never invoked) PLUS the vector mapping
+  (`vector_codec.encode_vector`); distinct from
+  `search_index.INDEX_VERSION`. SearchDocument rows are the immediate
+  source (never reconstructed) and their `content_hash`/`index_version`
+  provenance is copied verbatim. The configured embedding model is the
+  EXACT configured/canonical string (blankness via `.strip()` only; the
+  stored/expected/comparison identity is never stripped) — proven with
+  whitespace-padded models through the request, stored generation,
+  status identity and expected model. Exception `.code` interpolation
+  is ALLOWLISTED: known stable 5B.1 embedding/codec codes are surfaced,
+  unknown/hostile custom-subclass codes map to a fixed generic category
+  (never echoed verbatim; proven with hostile-code canaries).
+- `build_embedding_status_report(config, *, using='default')` —
+  strictly read-only (SELECT/PRAGMA only; no lock/network/repair/write;
+  test-proven by CaptureQueriesContext with zero mutating statements and
+  forbidden lock/network patches). Runs the complete
+  `search_index.build_status_report(using=...)` EXACTLY once and
+  surfaces source-index trouble as `source_index_unhealthy`. Stable
+  categories: `schema_missing`, `source_index_unhealthy`,
+  `model_not_configured`, `no_active_generation`, `model_mismatch`,
+  `embedding_version_mismatch`, `source_index_version_mismatch`,
+  `missing_document`, `stale_content`, `orphan_document`,
+  `invalid_vector`. Key samples capped at 20 with exact
+  `keys_truncated` omitted counts; both streams keyset-page in
+  fixed-size batches (no N+1/unbounded accumulation); oversized vector
+  BLOBs are classified by SQLite `length()` FIRST and only exact-length
+  blobs are fetched/decoded in bounded chunks. Active-only integrity:
+  failed/building/superseded generations are counted but their documents
+  never make a healthy active generation unhealthy. Healthy iff source
+  index healthy + model configured + exactly one compatible active
+  generation + zero missing/stale/orphan/invalid active documents. Any
+  structural/query/blob failure inside the internals raises a fixed
+  sanitized `EmbeddingIndexError` (never misleading healthy/count
+  output, never a traceback; injected canary DB/helper failures proven);
+  a genuinely missing embedding schema keeps the normal
+  `schema_missing` report. Schema introspection is failure-honest:
+  genuine table ABSENCE returns False, while an introspection/query
+  FAILURE propagates to the status boundary and becomes
+  `_STATUS_ERROR` — never misreported as `schema_missing`.
+- `rebuild_embedding_index(config, *, using='default',
+  embedder=embed_texts)` — caller (CLI) holds the pipeline lock; the
+  service never acquires it AND refuses to run while already inside a
+  caller SQLite transaction (fixed precondition, zero embedder calls
+  when rejected). The configured model is stored/returned EXACTLY;
+  `embedding.batch_size` must be a positive integer ≤ 128 (over-cap
+  config = fixed sanitized error, zero network). Preflights source
+  search-index health EXACTLY once before any network/write. Streams
+  all current SearchDocuments deterministically by `document_key` in
+  batches ≤ `config.embedding.batch_size`; the first real batch
+  discovers the returned dimension (no extra probe); an empty source
+  uses the fixed non-sensitive `SYNTHETIC_DIMENSION_PROBE`. One HTTP
+  request per batch, no retries, never inside a transaction (proven
+  with a `transaction=True` test asserting
+  `connection.in_atomic_block is False`). Each persisted batch is one
+  bounded short transaction that rechecks every source key/content_hash
+  (changed/missing source aborts/fails the generation). A deterministic
+  rolling sha256 snapshot over ordered `(document_key, content_hash)`
+  framing accumulates during processing — one documented length-prefixed
+  UTF-8 frame (`S<len(key)>:<key>S<len(hash)>:<hash>`, byte lengths, no
+  raw delimiters, both values exact `str` validated) shared
+  byte-identically by the source snapshot and the generation-integrity
+  snapshot, so boundary-shifted/unicode/delimiter values cannot collide
+  (proven by dedicated framing tests); before promotion a fresh
+  complete source sweep + complete key/hash snapshot equality + target
+  generation integrity run in bounded reads. The
+  final-validation→promotion race is closed with `PRAGMA data_version`
+  (capture before final validation; inside the short promotion
+  transaction a harmless no-op update of the building generation takes
+  the SQLite write reservation, then `data_version` is re-read and must
+  match — any other connection's commit fails conservatively). Under
+  that same transaction the CURRENT active generation id is re-read and
+  must EXACTLY equal the captured `prior_active_id` (including None);
+  the prior active's supersede UPDATE must affect exactly one row.
+  Promotion is ONE short transaction: supersede the old active first,
+  then activate the target; any failure rolls back with the old active
+  unchanged and the DB partial unique is the final guard. HEALTH IS
+  ESTABLISHED BY THE PRE-PROMOTION VALIDATION AND THE WRITE-LOCK GUARD
+  AT THE PROMOTION COMMIT — after promotion succeeds the verified result
+  is returned directly with NO post-promotion failure points (no
+  post-promotion status sweep; tests prove actual health with an
+  independent status report immediately after rebuild). Any failure
+  after generation creation marks it `failed` best-effort (bounded
+  partial docs kept; old active never touched; a swallowed mark-failed
+  failure leaves a detectable `building` generation without masking the
+  original sanitized failure); a first-call failure records nothing.
+  DB failures are wrapped in fixed sanitized messages and ALL
+  unexpected `Exception` failures (not KeyboardInterrupt/SystemExit)
+  become one fixed sanitized error — the source preflight, schema
+  validation and (for repair) the active-compatibility queries run
+  INSIDE the same public sanitizing boundary, so unexpected
+  DB/search-helper exceptions there can never leak raw to the CLI
+  (proven by preflight/schema/active canary tests). Returns safe
+  counts only (verified healthy).
+- `repair_embedding_index(config, *, using='default',
+  embedder=embed_texts)` — refuses to run while already inside a caller
+  SQLite transaction (zero embedder calls when rejected); preflights
+  source health, REQUIRES the current active generation to match the
+  configured model / `EMBEDDING_VERSION` / `INDEX_VERSION` exactly (else
+  a stable rebuild-required error; building/failed/superseded/
+  incompatible generations are never chosen). Missing/stale/invalid
+  current keys are re-embedded at most once (HTTP outside transactions;
+  returned dimensions must equal the active generation's or the batch
+  fails requiring rebuild before any write); active-generation orphans
+  are deleted in bounded pages with an in-transaction absence recheck.
+  Each short write transaction re-reads source key/hash and active
+  compatibility; changed rows remain unresolved and never receive false
+  provenance. Partial batch progress is durable; failures never mark the
+  active generation failed. Ends with a fresh status; success only when
+  healthy. No network when only deleting orphans or already healthy.
+  ALL unexpected `Exception` failures are converted to one fixed
+  sanitized error — the source preflight, schema validation and the
+  active-compatibility queries run INSIDE the public sanitizing
+  boundary, so unexpected DB/search-helper exceptions there can never
+  leak raw to the CLI. A small-monkeypatched-page merge regression
+  proves mutations during streaming never skip or delete newly
+  repaired rows.
+- **CLI**: `brain embedding-index status|rebuild|repair [--json]`,
+  symmetric with `search-index`. status: schema preflight, read-only,
+  no pipeline lock/recovery; exit 0 healthy / 1 unhealthy. rebuild and
+  repair go through the shared `_pipeline_command` (schema preflight
+  BEFORE lock/recovery, exclusive pipeline lock, `recover_interruptions`,
+  exit 3 busy, errors exit 1 without traceback). The CLI resolves
+  `embed_texts` from the module at call time so tests mock it without
+  touching the client. Human and JSON output sanitized; error guidance
+  names commands only; no probe command.
+
+**Verification (independently confirmed)**: the full
+suite passes — **1746 collected and 1746 passed** (Step 5B.2 state was
+1632 — historical; the 5B.3 delta is the 5B.3 test files — **109 tests**
+in
+`tests/test_embedding_index_service.py` (86) and
+`tests/test_embedding_index_cli.py` (23) — plus 5 additions to the
+migration-readiness command-inventory incident mirror; the correction
+pass added 20 tests and the boundary-hardening pass added 18 more),
+only the known
+`audioop` warning; `manage.py check` and `makemigrations --check` (NO
+migration) pass; `git diff --check` clean. Focused run of the 5B.3
+tests together with the search-index service/CLI, embedding client,
+vector codec, embedding models, embedding migration, CLI,
+migration-readiness and search-sync regressions: **455 passed**. No
+real network, no real MacWhisper/oMLX, no user data, no real embedding
+network calls; the real
+`config/config.yaml` untouched; no new commit/HEAD or real-database
+migration is claimed — the work and its tests are in the working tree.
+Step 5B.4 (incremental embedding synchronization) is explicitly NOT
+implemented.
 
 ## Pre-5B stability patch — SQLite web-tag contention retry (delivered, repeatably verified)
 
@@ -231,7 +409,8 @@ with stable codes `invalid_dimension`/`invalid_values`/`invalid_blob`,
 never containing values or blob content. Round trips are deterministic
 and float32-quantized.
 
-**Verification**: the full suite passes — **1632 collected and 1632
+**Verification (historical 5B.2 state)**: the full suite then passed —
+**1632 collected and 1632
 passed** (the Step 5B.1 full-suite state was 1499; the 5B.2 delta is
 the 133 new 5B.2 tests), with the only warning the known `audioop`
 deprecation; `manage.py check` and `makemigrations --check` (0009
@@ -246,9 +425,11 @@ the unchanged embedding-client tests — together **240 passed**.
 No real network or embedding calls
 in tests; real `config/config.yaml` untouched; no new commit/HEAD or
 real-database migration is
-claimed — the work and its tests are in the working tree. Step 5B.3
-(status/rebuild/repair) and Step 5B.4 (incremental embedding
-synchronization) are explicitly NOT implemented.
+claimed — the work and its tests are in the working tree. At the 5B.2
+delivery, Step 5B.3 (status/rebuild/repair) and Step 5B.4 (incremental
+embedding synchronization) were explicitly NOT implemented; Step 5B.3
+has since been delivered (see the current handoff at the top of this
+file).
 
 ## Step 5A.4.2b — Library Search Rendering & Accessibility (delivered)
 
@@ -1346,16 +1527,19 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current (Step 5B.2 tree): the full suite passes — **1632 collected
-  and 1632 passed** (the Step 5B.1 full-suite state was 1499; the 5B.2
-  delta is the 133 new 5B.2 tests), with the only warning the known
+- Current (Step 5B.3 tree, independently full-suite verified): the full
+  suite passes — **1746 collected
+  and 1746 passed** (the 5B.3 delta is the 109 new 5B.3 tests in
+  `tests/test_embedding_index_service.py` and
+  `tests/test_embedding_index_cli.py` plus 5 migration-readiness
+  command-inventory additions), with the only warning the known
   `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
-  `manage.py check`, `makemigrations --check` (0009 only) and
-  `git diff --check` pass. Supporting focused detail: the 5B.2
-  verification set — `tests/test_vector_codec.py` (72),
-  `tests/test_embedding_models.py` (52), `tests/test_embedding_migration.py`
-  (9), the updated `tests/test_migration_readiness.py` and the
-  unchanged `tests/test_embedding_client.py` — together **240 passed**.
+  `manage.py check`, `makemigrations --check` (NO migration) and
+  `git diff --check` pass. Supporting focused detail: the 5B.3 focused
+  set (109 passed) plus the search-index/client/codec/embedding-model/
+  embedding-migration/CLI/migration-readiness/search-sync regressions
+  (**455 passed**). The historical full-suite states are 1632
+  (Step 5B.2), 1499 (Step 5B.1) and 1404 (pre-5B stability patch).
 - Step 5B.1 full-suite state (historical, delivered and independently
   full-suite verified at that time): **1499 tests passing** — the
   historical 1404-test pre-5B stability patch
@@ -1467,11 +1651,12 @@ Production Library UI are delivered.
   commit of a mutation that schedules sync fires one — while
   `confirm_suggestion`'s origin-only no-sync behavior and the separate
   search-sync no-auto-retry policy are untouched). **Step 5B.1 (the
-  local /embeddings client) and Step 5B.2 (embedding storage
+  local /embeddings client), Step 5B.2 (embedding storage
   foundation: generation/document models, vector codec, migration 0009)
-  are delivered; Step 5B.3 — Embedding Status/Rebuild/Repair — is
-  next.** Step 5B.3 and Step 5B.4 (incremental embedding
-  synchronization) are explicitly NOT implemented.
+  and Step 5B.3 (embedding index status/rebuild/repair) are delivered;
+  Step 5B.4 — incremental embedding synchronization — is
+  next.** Step 5B.4 (incremental embedding synchronization) is
+  explicitly NOT implemented.
 - **Step 5B — Local Embeddings Foundation**: **5B.1 delivered** — the
   bounded local /embeddings client
   (`workflow/services/embedding_client.py`) plus the embedding config

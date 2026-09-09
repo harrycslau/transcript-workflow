@@ -537,11 +537,13 @@ Non-negotiable principles:
   `dimensions * 4` bytes and rejects non-finite values; errors are
   sanitized `VectorCodecError(ValueError)` with stable codes
   `invalid_dimension`/`invalid_values`/`invalid_blob`, never containing
-  values, blob content, or paths. 5B.3 (bounded status/rebuild/repair)
-  and 5B.4 (incremental synchronization) are NOT implemented; no
-  `search_index`/`search_sync`/CLI/web changes were made. Verification:
-  the full suite passes — **1632 collected and 1632 passed** (the
-  Step 5B.1 full-suite state was 1499; the 5B.2 delta is the 133 new
+  values, blob content, or paths. At the 5B.2 delivery, 5B.3 (bounded
+  status/rebuild/repair) and 5B.4 (incremental synchronization) were
+  NOT implemented and no `search_index`/`search_sync`/CLI/web changes
+  were made (5B.3 has since been delivered — see the 5B.3 bullet
+  below). Verification (historical 5B.2 state): the full suite then
+  passed — **1632 collected and 1632 passed** (the Step 5B.1
+  full-suite state was 1499; the 5B.2 delta is the 133 new
   5B.2 tests below), with the only warning the known `audioop`
   deprecation; `manage.py check` and `makemigrations --check` are
   clean. Supporting focused detail: 72 pure codec tests
@@ -551,12 +553,189 @@ Non-negotiable principles:
   migration-readiness and unchanged embedding-client tests (the
   5B.2 focused set: 240 passed). No commit or real-database migration
   is claimed.
+- **Step 5B.3 — Embedding index status/rebuild/repair (delivered)**: all
+  three bounded operations live in `workflow/services/embedding_index.py`
+  (name preferred; no new schema/migration/config keys, no 5B.4
+  synchronization, no `search_sync` hooks, no semantic retrieval, no
+  web/GET changes). `EMBEDDING_VERSION='1'` is the FULL production
+  embedding mapping contract — deterministic text preparation
+  (`prepare_document_text`, ONE pure helper consuming a SearchDocument
+  row) plus the vector mapping (`vector_codec.encode_vector`) — on a
+  SEPARATE axis from `search_index.INDEX_VERSION`. The v1 text format is
+  documented exactly (version marker line + four length-prefixed labelled
+  fields `doc_type`/`title_text`/`body_text`/`aux_text` in fixed order,
+  empty fields included, never truncated/coerced); ANY change to the
+  format/field order/vector encoding MUST bump `EMBEDDING_VERSION`.
+  SearchDocument rows are the immediate source (never reconstructed);
+  their `content_hash`/`index_version` provenance is copied into
+  `EmbeddingDocument.source_content_hash`/`source_index_version`.
+  `prepare_document_text` validates all four fields are EXACT `str`
+  (malformed rows raise one fixed sanitized error; a hostile value's
+  arbitrary `__str__` is never invoked). The configured embedding model
+  is the EXACT configured/canonical string (5B.1 sends it verbatim):
+  blankness is tested with `.strip()` only and the
+  stored/expected/comparison identity is NEVER stripped or
+  canonicalized. Errors are sanitized `EmbeddingIndexError` (subclasses
+  `ConfigError`, CLI exit 1 without traceback; fixed messages only,
+  guidance names commands only); exception `.code` interpolation is
+  ALLOWLISTED (known stable 5B.1 embedding/codec codes are surfaced,
+  unknown or hostile custom-subclass codes map to a fixed generic
+  category — never echoed verbatim); no service logs.
+- `build_embedding_status_report(config, *, using='default')` is
+  strictly read-only (SELECT/PRAGMA only; no lock/network/repair/write).
+  It runs the COMPLETE `search_index.build_status_report(using=...)`
+  EXACTLY once and surfaces an unhealthy source index as the
+  `source_index_unhealthy` category (never rebuilt). Stable categories
+  (never renamed): `schema_missing`, `source_index_unhealthy`,
+  `model_not_configured`, `no_active_generation`, `model_mismatch`,
+  `embedding_version_mismatch`, `source_index_version_mismatch`,
+  `missing_document`, `stale_content`, `orphan_document`,
+  `invalid_vector`. Key samples are capped at 20 per category with exact
+  `keys_truncated` omitted counts; streams/keyset-pages in fixed-size
+  batches (no N+1, no unbounded accumulation). Malicious oversized
+  vector BLOBs are classified by SQLite `length()` FIRST; only exact
+  `dimensions*4`-byte blobs are fetched/decoded, in bounded chunks.
+  Active-only integrity determines usability: failed/building/superseded
+  generations are counted but their documents never make a healthy
+  active generation unhealthy. There is NO configured dimensions value:
+  status cannot detect a same-name server dimension change (active
+  dimensions are validated by DB bounds and vector blobs; rebuild/repair
+  endpoint results detect dimension changes). Healthy iff source index
+  healthy, model configured, exactly one compatible active generation
+  and zero missing/stale/orphan/invalid active documents. A blank model
+  is the stable `model_not_configured` category with no network. Any
+  structural/query/blob failure inside the status internals raises a
+  fixed sanitized `EmbeddingIndexError` (never misleading healthy/count
+  output, never a traceback); a genuinely missing embedding schema
+  keeps the normal `schema_missing` report. Schema introspection is
+  failure-honest: genuine table ABSENCE returns False, while an
+  introspection/query FAILURE propagates to the status boundary and
+  becomes `_STATUS_ERROR` — never misreported as `schema_missing`.
+- `rebuild_embedding_index(config, *, using='default', embedder=embed_texts)`:
+  the CLI holds the pipeline lock; the service NEVER acquires it AND
+  refuses to run while already inside a caller SQLite transaction (fixed
+  precondition checked BEFORE any embedder invocation; HTTP is never
+  called with `connection.in_atomic_block` True). The configured model
+  is stored/returned EXACTLY (blankness via `.strip()` only);
+  `embedding.batch_size` must be a positive integer ≤ 128 (a manually
+  constructed over-cap config is a fixed sanitized error, zero network).
+  Preflights full source search-index health EXACTLY once before any
+  network/write (unhealthy ⇒ stable error guiding `brain search-index
+  status`/`rebuild`, zero embedding mutation/network). Streams ALL
+  current SearchDocuments deterministically by `document_key` in batches
+  ≤ `config.embedding.batch_size` (no DB cursor or
+  transaction held over HTTP). For a nonempty source the FIRST real
+  batch discovers the returned dimension and only THEN a `building`
+  generation is created in a short transaction and that first batch
+  persisted (no extra dimension probe); an EMPTY source uses the one
+  fixed non-sensitive `SYNTHETIC_DIMENSION_PROBE` and creates an empty
+  building generation (documented/tested). One HTTP request per batch,
+  no retries; exact client cardinality/text pairing and one consistent
+  returned dimension across every batch are validated; vectors encoded
+  with the codec. Each persisted batch is ONE bounded short transaction
+  that rechecks every source key/content_hash before inserting
+  (changed/missing source aborts/fails the generation — never false
+  provenance) and retains bounded partial rows on later failure.
+  A deterministic rolling sha256 snapshot over the exact ordered
+  `(document_key, content_hash)` framing is accumulated while
+  processing; the frame is ONE documented length-prefixed UTF-8
+  encoding (`S<len(key)>:<key>S<len(hash)>:<hash>`, byte lengths, no
+  raw delimiters, both values exact `str` validated) shared
+  byte-identically by the source snapshot and the generation-integrity
+  snapshot, so boundary-shifted/unicode/delimiter values cannot
+  collide. Before promotion: a fresh complete source health sweep
+  PLUS complete current SearchDocument key/hash snapshot equality PLUS
+  target generation integrity (exact key/hash set and vector
+  dimensions/finiteness) in bounded reads. The final-validation →
+  promotion race (including unlocked web-tag/SearchDocument commits) is
+  closed with `PRAGMA data_version`: capture before final validation,
+  and in the SHORT promotion transaction acquire the SQLite write
+  reservation via a harmless no-op update of the building generation,
+  re-read `data_version` and require equality — any other connection's
+  commit fails conservatively (no network and no full scan in that
+  transaction; same-connection mutation cannot race this single-threaded
+  operation). Under that same transaction the CURRENT active generation
+  id is re-read and must EXACTLY equal the captured `prior_active_id`
+  (including None); the prior active's supersede UPDATE must affect
+  exactly one row. Promotion is ONE short transaction: supersede the old
+  active FIRST (`state=superseded`, `superseded_at=now`), then activate
+  the target (`completed_at=activated_at=now`); any failure rolls the
+  whole promotion back with the old active unchanged; the DB partial
+  unique is the final guard. HEALTH IS ESTABLISHED BY THE PRE-PROMOTION
+  VALIDATION AND THE WRITE-LOCK GUARD AT THE PROMOTION COMMIT — after
+  promotion succeeds the verified result is returned directly and there
+  are NO post-promotion failure points (no post-promotion status sweep;
+  tests prove actual health with an independent status report). Any
+  failure AFTER generation creation
+  marks it `failed` (best-effort short transaction, `failed_at`,
+  bounded partial docs kept) and NEVER touches the old active; a
+  pre-generation first-call failure records nothing (dimensions
+  unknown); a swallowed mark-failed failure leaves a detectable
+  `building` generation without masking the original sanitized failure
+  (status reports history, only active usability matters); SIGKILL may
+  also leave `building`. DB failures are wrapped in fixed sanitized
+  messages; ALL unexpected `Exception` failures (not
+  KeyboardInterrupt/SystemExit) are converted to one fixed sanitized
+  error — the source preflight, schema validation and (for repair) the
+  active-compatibility queries run INSIDE the same public sanitizing
+  boundary, so unexpected DB/search-helper exceptions there can never
+  leak raw to the CLI. Returns safe counts only (generation
+  id/model/dimensions, documents, batches, prior active id, verified
+  healthy).
+- `repair_embedding_index(config, *, using='default', embedder=embed_texts)`:
+  refuses to run while already inside a caller SQLite transaction
+  (fixed precondition, zero embedder calls when rejected); preflights
+  source search-index health before any mutation/network and
+  REQUIRES exactly the current active generation with an EXACT match of
+  the configured model, `EMBEDDING_VERSION` and `INDEX_VERSION` —
+  otherwise a stable rebuild-required error (a
+  building/failed/superseded/incompatible generation is never chosen);
+  no remote dimension probe when no embedding work is needed. Reconciles
+  the active generation against the current SearchDocuments via the same
+  bounded two-stream merge: missing/stale/invalid current keys are
+  re-embedded at most once (HTTP outside transactions; returned
+  dimensions must equal the active generation's or the batch fails
+  requiring rebuild BEFORE any write) and active-generation orphans are
+  deleted in bounded pages with an in-transaction absence recheck. Each
+  short write transaction re-reads source key/hash AND active-generation
+  compatibility before the upsert; changed rows remain unresolved and
+  never receive false provenance. Partial batch progress is durable;
+  failures do NOT mark the active generation failed and do not roll back
+  earlier batches. Ends with a fresh status; success only when
+  converged/healthy; unresolved/failure raises a sanitized error and the
+  user inspects `brain embedding-index status` (no automatic retry).
+  No network when only deleting orphans or already healthy. ALL
+  unexpected `Exception` failures are converted to one fixed sanitized
+  error (never a raw traceback).
+- **CLI**: `brain embedding-index status|rebuild|repair [--json]`,
+  symmetric with `search-index`. status: schema preflight, read-only, no
+  pipeline lock/recovery; exit 0 healthy, 1 unhealthy. rebuild/repair go
+  through the shared `_pipeline_command` (schema preflight BEFORE
+  lock/recovery, exclusive pipeline lock, `recover_interruptions`, exit
+  3 busy, errors exit 1); the CLI resolves `embed_texts` from the module
+  at call time so tests mock it without touching the client. Human and
+  JSON output are sanitized; error guidance names commands only; no
+  probe command.
+- **Verification (independently confirmed)**: the full suite passes —
+  **1746 collected and 1746 passed** with the only warning the known
+  `audioop` deprecation; `manage.py check` and `makemigrations --check`
+  (no migration) are clean. Supporting focused detail: the 5B.3 focused
+  set (`tests/test_embedding_index_service.py` 86 +
+  `tests/test_embedding_index_cli.py` 23 = **109 passed**) plus the
+  search-index/client/codec/embedding-model/embedding-migration/CLI/
+  migration-readiness/search-sync regressions (**455 passed**). The
+  historical full-suite states are 1632 (Step 5B.2), 1499 (Step 5B.1)
+  and 1404 (pre-5B stability patch). No commit, real-database
+  migration, or real embedding network call is claimed; all tests are
+  mocked/network-free.
 - **Step 5B — Local Embeddings Foundation**: **5B.1 (delivered)** the
   bounded local /embeddings client; **5B.2 (delivered)** versioned
   embedding storage (generations + documents + vector codec + migration
-  0009). Still NOT implemented: 5B.3 bounded status/rebuild/repair
-  commands and 5B.4 incremental synchronization (both are the next
-  work). Do not add
+  0009); **5B.3 (delivered)** bounded embedding-index
+  status/rebuild/repair (above). Still NOT implemented: **5B.4
+  incremental embedding synchronization** (the next work) — explicitly
+  no incremental embedding sync, no `search_sync`/`search_index` hooks,
+  no semantic retrieval, no web/GET changes. Do not add
   semantic-search UI or Ask-with-citations in this phase.
 - **Step 5C — Semantic and Hybrid Search**: bounded semantic retrieval
   plus deterministic keyword/semantic fusion; retain per-Recording
