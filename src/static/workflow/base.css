@@ -637,8 +637,13 @@ a.match-chip:hover {
 .status-grid dt { color: var(--muted); }
 .status-grid dd { margin: 0; overflow-wrap: anywhere; }
 
-.actions .action-buttons { display: flex; flex-direction: column; gap: 0.6rem; max-width: 34rem; }
-.actions form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.recommended-action .action-buttons,
+.advanced-actions .action-buttons { display: flex; flex-direction: column; gap: 0.6rem; max-width: 34rem; }
+.recommended-action form,
+.advanced-actions form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.recommended-action .muted,
+.advanced-actions .muted { font-size: 0.8125rem; }
+.advanced-actions { max-width: 40rem; }
 .inline-form { display: inline; }
 
 .tag-chips { list-style: none; padding: 0; }

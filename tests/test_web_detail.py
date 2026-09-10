@@ -15,6 +15,7 @@ Proves:
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
 from django.test import Client
@@ -431,6 +432,168 @@ class TestStatusPanel:
         level, detail = self._status(client, recording)
         assert level == "warn"
         assert "routing unverified" in detail
+
+
+class TestDetailActionsPresentation:
+    """Recording Detail action presentation (v6): a compact recommended
+    action for states that genuinely need attention and a collapsed
+    native `<details>` for advanced processing actions. All business
+    semantics (route/confirm/transcribe/retry) stay unchanged; this only
+    re-organises which form is prominent."""
+
+    def test_healthy_has_no_large_actions_section(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        # No large generic Actions section, no suggested recommended action.
+        assert 'aria-label="Actions"' not in content
+        assert 'aria-label="Recommended action"' not in content
+
+    def test_healthy_advanced_disclosure_collapsed_with_route_form(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        # Collapsed native disclosure (no `open`), named explicitly.
+        assert '<details class="technical-details advanced-actions">' in content
+        assert "Advanced processing actions" in content
+        # It retains the manual route form and its fingerprint.
+        assert "/route/" in content
+        assert 'id="id_route_profile_adv"' in content
+        assert 'name="profile"' in content
+        assert 'name="fingerprint"' in content
+
+    def test_needs_review_with_confirmable_decision_confirm_only_prominent(self, client):
+        """With an active unverified routing decision the immediate
+        recommended action is ONLY 'Confirm routing'; manual profile
+        selection moves to the collapsed Advanced disclosure."""
+        recording, _t, _s = make_transcribed_recording(["a"], sha="pa-nr-conf")
+        Recording.objects.filter(pk=recording.pk).update(
+            processing_status=ProcessingStatus.NEEDS_REVIEW
+        )
+        recording.refresh_from_db()
+        RoutingDecision.objects.create(
+            recording=recording, ordinal=1, route_suggestion="european",
+            profile_name="european", model_id="m", method=RoutingMethod.AUTOMATIC,
+            routing_verified=False, is_active=True,
+        )
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' in content
+        assert "Confirm routing" in content
+        # Manual profile selection is NOT prominent; it lives in Advanced.
+        assert 'id="id_route_profile"' not in content
+        assert 'id="id_route_profile_adv"' in content
+        assert 'name="fingerprint"' in content
+
+    def test_needs_review_without_decision_manual_route_only_no_duplicate(self, client):
+        """With no confirmable decision the manual route is the single
+        prominent action and is NOT duplicated in the Advanced
+        disclosure."""
+        recording, _t, _s = make_transcribed_recording(["a"], sha="pa-nr-man")
+        Recording.objects.filter(pk=recording.pk).update(
+            processing_status=ProcessingStatus.NEEDS_REVIEW
+        )
+        recording.refresh_from_db()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' in content
+        assert 'id="id_route_profile"' in content
+        assert "Confirm routing" not in content
+        # Advanced disclosure must not duplicate the prominent manual form.
+        assert 'id="id_route_profile_adv"' not in content
+        assert 'name="fingerprint"' in content
+
+    def test_ready_to_transcribe_prominent_transcribe(self, client):
+        recording, _t, _s = make_transcribed_recording(["a"], sha="pa-ready")
+        Recording.objects.filter(pk=recording.pk).update(
+            processing_status=ProcessingStatus.READY_TO_TRANSCRIBE
+        )
+        recording.refresh_from_db()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' in content
+        assert "Transcribe now" in content
+
+    def test_failed_prominent_retry(self, client):
+        recording, _t, _s = make_transcribed_recording(["a"], sha="pa-fail")
+        Recording.objects.filter(pk=recording.pk).update(
+            processing_status=ProcessingStatus.FAILED
+        )
+        recording.refresh_from_db()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' in content
+        assert "Retry failed stage" in content
+
+    def test_retranscription_failed_prominent_retry(self, client):
+        recording, _t, _s = make_transcribed_recording(["a"], sha="pa-retx")
+        Recording.objects.filter(pk=recording.pk).update(retranscription_failed=True)
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' in content
+        assert "Retry failed stage" in content
+
+    def test_transcribed_unverified_routing_prominent_confirm(self, client):
+        recording, _t, _s = make_transcribed_recording(["a"], sha="pa-unv")
+        RoutingDecision.objects.create(
+            recording=recording, ordinal=1, route_suggestion="european",
+            profile_name="european", model_id="m", method=RoutingMethod.AUTOMATIC,
+            routing_verified=False, is_active=True,
+        )
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' in content
+        assert "Confirm routing" in content
+        assert "Transcribe now" not in content
+
+    def test_running_state_no_prominent_action(self, client):
+        recording, _t, _s = make_transcribed_recording(["a"], sha="pa-run")
+        Recording.objects.filter(pk=recording.pk).update(
+            processing_status=ProcessingStatus.TRANSCRIBING
+        )
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' not in content
+
+    def test_summary_failure_relies_on_contextual_summary_action(self, client):
+        """A summary-only failure keeps its retry in the Summary heading;
+        it must NOT surface a generic duplicate 'Retry failed stage' in
+        the primary action area."""
+        recording, _t, _s, _summary = _summary_recording()
+        Recording.objects.filter(pk=recording.pk).update(summary_status=SummaryState.FAILED)
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' not in content
+        assert "Retry failed stage" not in content
+        # Contextual retry stays in the Summary heading / variant action
+        # (here a current summary exists, so the action is "Regenerate").
+        assert "/summarize/" in content
+
+    def test_summary_failed_without_current_uses_contextual_retry(self, client):
+        """A genuine summary failure (no current summary) keeps its retry
+        in the Summary heading and never surfaces a generic duplicate
+        'Retry failed stage' in the primary action area."""
+        recording, _t, _s = make_transcribed_recording(["a"], sha="pa-sumfail")
+        Recording.objects.filter(pk=recording.pk).update(summary_status=SummaryState.FAILED)
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'aria-label="Recommended action"' not in content
+        assert "Retry failed stage" not in content
+        # The contextual variant action renders the Retry button.
+        assert "Retry" in content
+        assert "/summarize/" in content
+
+
+class TestConfirmFormProgressiveEnhancement:
+    """Small static contract for the shared .confirm-form enhancement:
+    it must attach a submit listener (not click-only), guard repeated
+    submits, disable and relabel the button, and never alter the no-JS
+    POST path. Kept small/maintainable because no browser JS harness
+    exists; rendering-level 'external-only JS / no inline handlers' is
+    already covered by the security tests."""
+
+    def test_app_js_confirm_form_contract(self):
+        from django.contrib.staticfiles import finders
+
+        path = finders.find("workflow/app.js")
+        assert path is not None
+        source = Path(path).read_text(encoding="utf-8")
+        assert ".confirm-form" in source
+        assert 'addEventListener("submit"' in source
+        assert "event.preventDefault()" in source  # guards repeated submits
+        assert "button.disabled = true" in source
+        assert 'setAttribute("aria-disabled", "true")' in source
+        assert 'textContent = "Running…"' in source
+        assert 'setAttribute("aria-busy", "true")' in source
 
 
 class TestNestedKeyPoints:

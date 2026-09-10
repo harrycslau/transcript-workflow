@@ -367,14 +367,17 @@
         <div class="detail-links">
           <a class="detail-link" href="#" data-screen="transcript-screen" aria-label="Open the full transcript">Transcript</a>
           <a class="detail-link" href="#" data-screen="history-screen" aria-label="Open the processing history">History</a>
+          <button class="detail-link detail-link-btn" id="processing-actions-trigger" aria-haspopup="dialog" aria-controls="processing-actions-dialog">Routing</button>
         </div>
       </div>
 
       <div class="detail-tags">
-        <span class="tag tag-confirmed">Work</span>
-        <span class="tag tag-suggested">Meeting</span>
-        <span class="tag">Research</span>
-        <button class="add-tag-btn">+ Add tag</button>
+        <span class="detail-tag-chips" id="detail-tag-chips">
+          <span class="tag tag-confirmed">Work</span>
+          <span class="tag tag-suggested">Meeting</span>
+          <span class="tag">Research</span>
+        </span>
+        <button class="add-tag-btn" id="add-tag-trigger" aria-haspopup="dialog" aria-controls="tag-editor-dialog">+ Add tag</button>
       </div>
 
       <div class="status-panel" role="status">
@@ -697,6 +700,109 @@
     </div>
 
   </main>
+</div>
+
+<!-- Processing actions dialog (prototype proposal) -->
+<div class="dialog-overlay" id="processing-actions-dialog" role="dialog" aria-modal="true" aria-labelledby="processing-actions-title" hidden>
+  <div class="dialog">
+    <div class="dialog-view" id="pa-chooser">
+      <h3 class="dialog-title" id="processing-actions-title">Routing</h3>
+      <p class="dialog-lead">Reroute and retranscribe this recording with a different language profile, or confirm the current routing.</p>
+
+      <div class="dialog-section">
+        <span class="dialog-label">Current routing</span>
+        <span class="tag tag-confirmed">european profile &middot; auto &middot; verified</span>
+      </div>
+
+      <fieldset class="profile-list">
+        <legend class="dialog-label">Choose a routing profile</legend>
+        <label class="profile-option">
+          <input type="radio" name="routing-profile" value="european" checked>
+          <span class="profile-option-body">
+            <span class="profile-option-name">european</span>
+            <span class="profile-option-desc">Current profile &mdash; already verified; no processing change</span>
+          </span>
+        </label>
+        <label class="profile-option">
+          <input type="radio" name="routing-profile" value="cantonese">
+          <span class="profile-option-body">
+            <span class="profile-option-name">cantonese</span>
+            <span class="profile-option-desc">Different profile &mdash; schedules a retranscription</span>
+          </span>
+        </label>
+        <label class="profile-option">
+          <input type="radio" name="routing-profile" value="mandarin">
+          <span class="profile-option-body">
+            <span class="profile-option-name">mandarin</span>
+            <span class="profile-option-desc">Different profile &mdash; schedules a retranscription</span>
+          </span>
+        </label>
+      </fieldset>
+
+      <p class="dialog-note">
+        Choosing a different profile schedules a retranscription with that profile. A new transcript
+        version is created only after the retranscription succeeds; the current transcript and the full
+        history remain preserved. Choosing the current profile keeps the already-confirmed routing and
+        causes no processing change &mdash; no retranscription is scheduled.
+      </p>
+
+      <div class="dialog-actions">
+        <button class="btn dialog-cancel">Cancel</button>
+        <button class="btn btn-primary" id="processing-continue">Continue to confirmation</button>
+      </div>
+    </div>
+
+    <div class="dialog-view" id="pa-confirm" hidden>
+      <h3 class="dialog-title" id="processing-confirm-title">Reroute and retranscribe?</h3>
+      <p class="dialog-lead" id="processing-confirm-lead"></p>
+      <ul class="dialog-bullets" id="processing-confirm-bullets"></ul>
+      <div class="dialog-actions">
+        <button class="btn dialog-cancel">Cancel</button>
+        <button class="btn btn-primary" id="processing-confirm-btn">Confirm</button>
+      </div>
+    </div>
+
+    <div class="dialog-view" id="pa-done" hidden>
+      <h3 class="dialog-title" id="processing-done-title">Prototype: confirmation recorded</h3>
+      <p class="dialog-lead" id="processing-done-lead"></p>
+      <p class="dialog-note">Static prototype only &mdash; no work is scheduled or polled in the background.</p>
+      <div class="dialog-actions">
+        <button class="btn btn-primary dialog-cancel">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Tag editor dialog (prototype proposal) -->
+<div class="dialog-overlay" id="tag-editor-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-editor-title" hidden>
+  <div class="dialog">
+    <h3 class="dialog-title" id="tag-editor-title">Edit tags</h3>
+
+    <label class="dialog-field-label" for="tag-filter">Filter tags</label>
+    <input type="search" id="tag-filter" class="dialog-input" placeholder="Search configured tags..." autocomplete="off">
+
+    <ul class="tag-options" id="tag-options"></ul>
+    <p class="tag-empty" id="tag-options-empty" hidden>No configured tags match.</p>
+
+    <div class="dialog-section" id="custom-tag-section" hidden>
+      <span class="dialog-label">Custom tags</span>
+      <ul class="tag-options tag-options-custom" id="custom-tag-options"></ul>
+    </div>
+
+    <div class="tag-create">
+      <label class="dialog-field-label" for="new-tag-input">Create a new tag</label>
+      <div class="tag-create-row">
+        <input type="text" id="new-tag-input" class="dialog-input" placeholder="New tag name" autocomplete="off" maxlength="40">
+        <button class="btn btn-sm btn-primary" id="create-tag-btn">Create and add</button>
+      </div>
+      <p class="tag-status" id="tag-status" role="status" aria-live="polite"></p>
+      <p class="tag-proto-note">Custom tags are a prototype feature.</p>
+    </div>
+
+    <div class="dialog-actions">
+      <button class="btn dialog-cancel">Done</button>
+    </div>
+  </div>
 </div>
 
 <!-- Confirmation dialog -->

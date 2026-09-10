@@ -24,50 +24,84 @@
   <span class="status-panel-main">{{ status.label }} — {{ status.detail }}</span>
 </div>
 
-{% if actions.route_eligible or actions.confirm_routing_available or actions.transcribe_available or actions.retry_available %}
-<section class="actions" aria-label="Actions">
+{% if recording.processing_status == 'failed' or recording.retranscription_failed or recording.processing_status == 'needs_review' or recording.processing_status == 'ready_to_transcribe' or recording.processing_status == 'transcribed' and routing_decision and not routing_decision.routing_verified %}
+<section class="recommended-action" aria-label="Recommended action">
   <div class="overview-block-head">
-    <h2 class="overview-block-title">Actions</h2>
+    <h2 class="overview-block-title">Recommended action</h2>
   </div>
-  <p class="muted">Actions run under the pipeline lock and re-check the current state before doing anything.</p>
   <div class="action-buttons">
-    {% if actions.route_eligible %}
-      <form method="post" action="{% url 'action-route' recording.pk %}">
-        {% csrf_token %}
-        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
-        <label for="id_route_profile">Route manually</label>
-        <select id="id_route_profile" name="profile">
-          <option value="">Choose a profile…</option>
-          {% for profile in actions.route_profiles %}
-            <option value="{{ profile.name }}">{{ profile.name }} — {{ profile.model }}{% if profile.manual_only %} (manual-only){% endif %}</option>
-          {% endfor %}
-        </select>
-        <button type="submit">Route</button>
-      </form>
-    {% endif %}
-    {% if actions.confirm_routing_available %}
-      <form method="post" action="{% url 'action-confirm-routing' recording.pk %}">
-        {% csrf_token %}
-        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
-        <button type="submit">Confirm routing</button>
-      </form>
-    {% endif %}
-    {% if actions.transcribe_available %}
-      <form method="post" action="{% url 'action-transcribe' recording.pk %}">
-        {% csrf_token %}
-        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
-        <button type="submit">Transcribe now</button>
-      </form>
-    {% endif %}
-    {% if actions.retry_available %}
-      <form method="post" action="{% url 'action-retry' recording.pk %}">
-        {% csrf_token %}
-        <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
-        <button type="submit">Retry failed stage</button>
-      </form>
+    {% if recording.processing_status == 'failed' or recording.retranscription_failed %}
+      {% if actions.retry_available %}
+        <form method="post" action="{% url 'action-retry' recording.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+          <button type="submit" class="confirm-button">Retry failed stage</button>
+        </form>
+      {% endif %}
+    {% elif recording.processing_status == 'needs_review' %}
+      {% if actions.confirm_routing_available %}
+        <form method="post" action="{% url 'action-confirm-routing' recording.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+          <button type="submit" class="confirm-button">Confirm routing</button>
+        </form>
+      {% elif actions.route_eligible %}
+        <form method="post" action="{% url 'action-route' recording.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+          <label for="id_route_profile">Route manually</label>
+          <select id="id_route_profile" name="profile">
+            <option value="">Choose a profile…</option>
+            {% for profile in actions.route_profiles %}
+              <option value="{{ profile.name }}">{{ profile.name }} — {{ profile.model }}{% if profile.manual_only %} (manual-only){% endif %}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="confirm-button">Route</button>
+        </form>
+      {% endif %}
+    {% elif recording.processing_status == 'ready_to_transcribe' %}
+      {% if actions.transcribe_available %}
+        <form method="post" action="{% url 'action-transcribe' recording.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+          <button type="submit" class="confirm-button">Transcribe now</button>
+        </form>
+      {% endif %}
+    {% elif recording.processing_status == 'transcribed' and routing_decision and not routing_decision.routing_verified %}
+      {% if actions.confirm_routing_available %}
+        <form method="post" action="{% url 'action-confirm-routing' recording.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+          <button type="submit" class="confirm-button">Confirm routing</button>
+        </form>
+      {% endif %}
     {% endif %}
   </div>
 </section>
+{% endif %}
+
+{% if actions.route_eligible %}
+{% if recording.processing_status != 'needs_review' or actions.confirm_routing_available %}
+<details class="technical-details advanced-actions">
+  <summary>Advanced processing actions</summary>
+  <p class="muted">Actions run under the pipeline lock and re-check the current state before doing anything.</p>
+  <div class="action-buttons">
+    <form method="post" action="{% url 'action-route' recording.pk %}">
+      {% csrf_token %}
+      <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+      <label for="id_route_profile_adv">Route manually</label>
+      <select id="id_route_profile_adv" name="profile">
+        <option value="">Choose a profile…</option>
+        {% for profile in actions.route_profiles %}
+          <option value="{{ profile.name }}">{{ profile.name }} — {{ profile.model }}{% if profile.manual_only %} (manual-only){% endif %}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Route</button>
+    </form>
+    <p class="muted">Choosing a different routing profile schedules a retranscription; a new transcript version is created only when the retranscription succeeds, and the current transcript and history remain preserved until then. Choosing the current profile only confirms the existing routing and does not retranscribe.</p>
+  </div>
+</details>
+{% endif %}
 {% endif %}
 
 <section class="detail-tags" aria-label="Tags">

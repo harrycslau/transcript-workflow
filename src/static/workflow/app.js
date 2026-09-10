@@ -50,13 +50,42 @@
     });
   }
 
+  // Progressive enhancement for the shared .confirm-form submit: the FIRST
+  // submit proceeds normally (native POST -> redirect -> GET preserved)
+  // while its submit button is disabled and relabelled "Running…" and the
+  // form is marked busy; repeated submit events are guarded in memory so
+  // the action is never submitted twice. When JS is absent the form is an
+  // ordinary POST form — no inline handlers, no CSP change.
+  function initConfirmForms() {
+    var submitted = new WeakSet();
+    var forms = document.querySelectorAll(".confirm-form");
+    Array.prototype.forEach.call(forms, function (form) {
+      form.addEventListener("submit", function (event) {
+        if (submitted.has(form)) {
+          event.preventDefault();
+          return;
+        }
+        submitted.add(form);
+        var button = form.querySelector('button[type="submit"]');
+        if (button) {
+          button.disabled = true;
+          button.setAttribute("aria-disabled", "true");
+          button.textContent = "Running…";
+        }
+        form.setAttribute("aria-busy", "true");
+      });
+    });
+  }
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       initCopyButtons();
       initConfirmButtons();
+      initConfirmForms();
     });
   } else {
     initCopyButtons();
     initConfirmButtons();
+    initConfirmForms();
   }
 })();

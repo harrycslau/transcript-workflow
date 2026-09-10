@@ -393,7 +393,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ---- Keyboard shortcut ----
   document.addEventListener('keydown', e => {
-    if (e.key === '/' && document.activeElement !== searchInput) {
+    const anyDialogOpen = document.querySelector('.dialog-overlay:not([hidden])') !== null;
+    if (e.key === '/' && !anyDialogOpen && document.activeElement !== searchInput) {
       e.preventDefault();
       searchInput.focus();
       if (currentScreen !== 'library') showScreen('library');
@@ -405,7 +406,232 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // ---- Prototype dialogs: shared helper (Processing actions + Tag editor) ----
+  function focusableIn(el) {
+    const sel = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    return Array.from(el.querySelectorAll(sel)).filter(n => n.offsetParent !== null);
+  }
+
+  function setupDialog(overlay, opts = {}) {
+    const trigger = opts.trigger ? document.getElementById(opts.trigger) : null;
+    const cancelSel = opts.cancelSelector || '.dialog-cancel';
+
+    function open() {
+      overlay._prevFocus = document.activeElement;
+      overlay.hidden = false;
+      const list = focusableIn(overlay);
+      (list[0] || overlay).focus();
+      if (opts.onOpen) opts.onOpen();
+    }
+    function close() {
+      overlay.hidden = true;
+      const prev = overlay._prevFocus;
+      if (prev && prev.isConnected && typeof prev.focus === 'function') prev.focus();
+      if (opts.onClose) opts.onClose();
+    }
+    if (trigger) trigger.addEventListener('click', e => { e.preventDefault(); open(); });
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay || e.target.closest(cancelSel)) close();
+    });
+    overlay.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); close(); return; }
+      if (e.key === 'Tab') {
+        const list = focusableIn(overlay);
+        if (!list.length) return;
+        const first = list[0], last = list[list.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      }
+    });
+    return { open, close };
+  }
+
+  // ---- Processing actions dialog (prototype proposal) ----
+  const processingOverlay = document.getElementById('processing-actions-dialog');
+  const processingRadios = Array.from(document.querySelectorAll('input[name="routing-profile"]'));
+  const PROCESSING_PROFILES = {
+    european: { name: 'european', current: true },
+    cantonese: { name: 'cantonese', current: false },
+    mandarin: { name: 'mandarin', current: false },
+  };
+
+  function processingView(name) { return document.getElementById('pa-' + name); }
+
+  function showProcessingView(name) {
+    ['chooser', 'confirm', 'done'].forEach(v => { processingView(v).hidden = v !== name; });
+    const heading = processingView(name).querySelector('h3');
+    if (heading && heading.id) processingOverlay.setAttribute('aria-labelledby', heading.id);
+    const first = focusableIn(processingView(name))[0];
+    if (first) first.focus();
+  }
+
+  setupDialog(processingOverlay, {
+    trigger: 'processing-actions-trigger',
+    onOpen() {
+      showProcessingView('chooser');
+      processingRadios.forEach(r => { r.checked = r.value === 'european'; });
+    },
+  });
+
+  document.getElementById('processing-continue').addEventListener('click', () => {
+    const selected = processingRadios.find(r => r.checked);
+    const profile = PROCESSING_PROFILES[selected.value];
+    const confirmTitle = document.getElementById('processing-confirm-title');
+    const confirmLead = document.getElementById('processing-confirm-lead');
+    const bullets = document.getElementById('processing-confirm-bullets');
+    if (profile.current) {
+      confirmTitle.textContent = 'Keep current routing?';
+      confirmLead.textContent = `The ${profile.name} routing is already confirmed. Keeping it causes no processing change and no retranscription.`;
+      bullets.innerHTML = '<li>No retranscription is scheduled.</li><li>The current transcript and full history stay untouched.</li>';
+    } else {
+      confirmTitle.textContent = 'Reroute and retranscribe?';
+      confirmLead.textContent = `Switch routing to the ${profile.name} profile and schedule a retranscription.`;
+      bullets.innerHTML = '<li>A new transcript version is created only after the retranscription succeeds.</li><li>The current transcript and the full history remain preserved.</li>';
+    }
+    showProcessingView('confirm');
+  });
+
+  document.getElementById('processing-confirm-btn').addEventListener('click', () => {
+    const selected = processingRadios.find(r => r.checked);
+    const profile = PROCESSING_PROFILES[selected.value];
+    document.getElementById('processing-done-lead').textContent = profile.current
+      ? `Routing remains confirmed as ${profile.name}. No processing change.`
+      : `Reroute to ${profile.name} with retranscription recorded as confirmed.`;
+    showProcessingView('done');
+  });
+
+  // ---- Tag editor dialog (prototype proposal) ----
+  const tagOverlay = document.getElementById('tag-editor-dialog');
+  const tagFilter = document.getElementById('tag-filter');
+  const tagOptions = document.getElementById('tag-options');
+  const tagOptionsEmpty = document.getElementById('tag-options-empty');
+  const customTagSection = document.getElementById('custom-tag-section');
+  const customTagOptions = document.getElementById('custom-tag-options');
+  const newTagInput = document.getElementById('new-tag-input');
+  const createTagBtn = document.getElementById('create-tag-btn');
+  const tagStatus = document.getElementById('tag-status');
+  const detailTagChips = document.getElementById('detail-tag-chips');
+
+  // Configured tags are configuration-owned; assigned state mirrors the detail row.
+  // `base` keeps the confirmed/suggested distinction when a previously assigned
+  // tag is re-added; a fresh assignment falls back to plain 'assigned'.
+  const configuredTags = [
+    { name: 'Work', base: 'confirmed', state: 'confirmed' },
+    { name: 'Meeting', base: 'suggested', state: 'suggested' },
+    { name: 'Research', base: 'assigned', state: 'assigned' },
+    { name: 'Personal', base: 'unassigned', state: 'unassigned' },
+    { name: 'Language', base: 'unassigned', state: 'unassigned' },
+    { name: 'Idea', base: 'unassigned', state: 'unassigned' },
+  ];
+  const TAG_STATE_CLASS = { confirmed: 'tag-confirmed', suggested: 'tag-suggested', assigned: '', unassigned: '' };
+  let customTags = [];
+
+  // Concise visible labels: state is only surfaced inline for suggested tags;
+  // the full state stays available to assistive technology via aria-label.
+  function tagLabelText(t) {
+    return t.state === 'suggested' ? t.name + ' (suggested)' : t.name;
+  }
+  function tagAriaLabel(t) {
+    const stateWord = { confirmed: 'confirmed', suggested: 'suggested', assigned: 'assigned' }[t.state];
+    return stateWord ? t.name + ', ' + stateWord : t.name + ', not assigned';
+  }
+
+  function tagChipElement(name, stateClass) {
+    const chip = document.createElement('span');
+    chip.className = 'tag ' + stateClass;
+    chip.textContent = name;
+    return chip;
+  }
+
+  function renderDetailTagRow() {
+    detailTagChips.innerHTML = '';
+    configuredTags.filter(t => t.state !== 'unassigned').forEach(t => {
+      detailTagChips.appendChild(tagChipElement(t.name, TAG_STATE_CLASS[t.state]));
+    });
+    customTags.forEach(name => {
+      detailTagChips.appendChild(tagChipElement(name, 'tag-manual'));
+    });
+  }
+
+  function renderTagOptions() {
+    const q = tagFilter.value.trim().toLowerCase();
+    const matched = configuredTags.filter(t => !q || t.name.toLowerCase().includes(q));
+    tagOptions.innerHTML = '';
+    matched.forEach(t => {
+      const li = document.createElement('li');
+      const label = document.createElement('label');
+      label.className = 'tag-option';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.value = t.name;
+      input.checked = t.state !== 'unassigned';
+      input.setAttribute('aria-label', tagAriaLabel(t));
+      label.appendChild(input);
+      const chip = document.createElement('span');
+      chip.className = 'tag ' + TAG_STATE_CLASS[t.state];
+      chip.textContent = tagLabelText(t);
+      label.appendChild(chip);
+      li.appendChild(label);
+      label.addEventListener('change', () => {
+        t.state = input.checked ? (t.base === 'unassigned' ? 'assigned' : t.base) : 'unassigned';
+        chip.textContent = tagLabelText(t);
+        chip.className = 'tag ' + TAG_STATE_CLASS[t.state];
+        input.setAttribute('aria-label', tagAriaLabel(t));
+        renderDetailTagRow();
+      });
+      tagOptions.appendChild(li);
+    });
+    tagOptionsEmpty.hidden = matched.length > 0;
+  }
+
+  function renderCustomTags() {
+    customTagSection.hidden = customTags.length === 0;
+    customTagOptions.innerHTML = '';
+    customTags.forEach(name => {
+      const li = document.createElement('li');
+      const chip = document.createElement('span');
+      chip.className = 'tag tag-manual';
+      chip.textContent = name;
+      li.appendChild(chip);
+      customTagOptions.appendChild(li);
+    });
+  }
+
+  function setTagStatus(text, kind) {
+    tagStatus.textContent = text;
+    tagStatus.classList.toggle('error', kind === 'error');
+    tagStatus.classList.toggle('ok', kind === 'ok');
+  }
+
+  function createCustomTag() {
+    const name = newTagInput.value.trim();
+    if (!name) { setTagStatus('Enter a tag name first.', 'error'); return; }
+    const dupConfigured = configuredTags.some(t => t.name.toLowerCase() === name.toLowerCase());
+    const dupCustom = customTags.some(t => t.toLowerCase() === name.toLowerCase());
+    if (dupConfigured || dupCustom) { setTagStatus(`"${name}" already exists as a tag.`, 'error'); return; }
+    customTags.push(name);
+    newTagInput.value = '';
+    renderCustomTags();
+    renderDetailTagRow();
+    setTagStatus(`Added custom tag "${name}" (prototype only).`, 'ok');
+  }
+
+  createTagBtn.addEventListener('click', createCustomTag);
+  newTagInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); createCustomTag(); } });
+  tagFilter.addEventListener('input', renderTagOptions);
+
+  setupDialog(tagOverlay, {
+    trigger: 'add-tag-trigger',
+    onOpen() {
+      tagFilter.value = '';
+      renderTagOptions();
+      renderCustomTags();
+      setTagStatus('', '');
+    },
+  });
+
   // ---- Init ----
   updateResultsCount();
   renderCardGroups(sortDesktop.value);
+  renderDetailTagRow();
 });

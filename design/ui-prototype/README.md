@@ -19,6 +19,12 @@ open design/ui-prototype/index.html
 - On Recording Detail, switch **language variant tabs** (visual state only) and use
   **Copy Markdown**, **Download .md**, **Plain text**, and **Regenerate summary**
 - Open the separate **Transcript** or **History** screens from the detail header
+- **Routing** in the detail header opens a modal chooser to reroute and
+  retranscribe with a different routing profile, or confirm the current routing
+  (prototype-only, static — nothing is scheduled or polled)
+- **+ Add tag** opens the tag editor dialog: filter configured tags in compact
+  rows, toggle assignments, and create prototype-only custom tags with
+  **Create and add**
 - Each separate screen has a **Back to Recording overview** control
 - **Back to Library** preserves query, filters, and scroll position
 - **Copy Markdown** / **Copy transcript** use the clipboard when available
@@ -85,6 +91,52 @@ the metadata instead of duplicating it:
   stay collapsed in native `<details>` blocks, partitioned by concern so
   no field appears twice.
 
+## This iteration's prototype-only proposals
+
+Two prototype-only interactions were added on Recording Detail. Both are static
+design proposals and neither implies that a backend for them exists today.
+
+### 1. Routing chooser
+
+A compact **Routing** trigger sits next to the Transcript and History
+links in the Recording Detail header. It opens an accessible modal chooser that
+clearly shows the current routing (european profile · auto · verified) and lets
+the user pick a routing profile:
+
+- Choosing a **different profile** (cantonese / mandarin) schedules a
+  retranscription with that profile. The chooser explains that a new transcript
+  version is created **only after** the retranscription succeeds, and that the
+  current transcript and full history remain preserved.
+- Choosing the **current profile** keeps the already-confirmed routing — no
+  processing change and no retranscription.
+
+The primary button demonstrates **Continue to confirmation**, which updates the
+dialog to a prototype confirmation state with copy tailored to the selected
+profile, followed by a static "confirmation recorded" state. The prototype
+explicitly does **not** simulate background or polling behaviour — no work is
+scheduled in the background.
+
+### 2. Tag editor dialog + custom tag creation
+
+The inert **+ Add tag** button now opens a tag editor dialog containing:
+
+- a **search/filter textbox** over configured tags, with compact selectable rows
+  that use concise labels — `Work`, `Meeting (suggested)`, `Research`,
+  `Personal`, `Language`, `Idea` — and update the detail tag row when toggled.
+  No visible state labels or legend are shown; the confirmed/suggested
+  distinction stays available to assistive technology via `aria-label` on each
+  checkbox;
+- a **Create a new tag** textbox with a **Create and add** action that appends a
+  manual tag chip to the detail tag row, rejects blank and duplicate entries, and
+  reports the outcome in a small status message.
+
+Custom-tag creation is **explicitly labelled as a prototype proposal** (one short
+muted note: "Custom tags are a prototype feature."). Current production tag
+definitions are configuration-owned (YAML `tags.allowed`), so creating and
+storing custom tags requires a **future product and backend decision** — the
+prototype does not imply this backend exists today. The full production/config
+ownership explanation lives in this README only.
+
 ## Information architecture (proposal)
 
 ```
@@ -98,9 +150,9 @@ Results: Cards or Table — same data, same filters
               |
               v
 Recording Detail:
-  compact header + Transcript / History links
+  compact header + Transcript / History / Routing links
   status / next-action panel ("No action required")
-  compact tags
+  compact tags (+ Add tag → tag editor dialog)
   Summary (complete document flow: variant tabs + status, utility
     actions, overview, nested key points, action items, people &
     organizations, topics; collapsed Summary provenance)
@@ -137,6 +189,16 @@ obsolete Summary-screen markup and dead selectors are removed.
 - Summary headings use a semantic `<h2>`/`<h3>` hierarchy under the
   recording `<h1>`, and nested numbering comes from real list
   semantics, not decorative text
+- Both new dialogs (Routing, Tag editor) use `role="dialog"`,
+  `aria-modal="true"` and `aria-labelledby`, are hidden with the native
+  `hidden` attribute (no inline JS/styles), and share one small local
+  dialog helper: opening moves focus into the dialog, `Escape`, backdrop
+  click and Cancel close it, closing returns focus to the trigger, and
+  `Tab` is trapped within the dialog. The routing chooser uses a real
+  `<fieldset>/<legend>` with radio inputs; the tag editor uses labelled
+  checkbox rows and a `role="status"` live region for its status message
+- Mobile layout stacks both dialogs using the existing tokens and
+  breakpoints (full-width action buttons, stacked create row)
 
 ## Questions for approval
 
@@ -159,6 +221,17 @@ obsolete Summary-screen markup and dead selectors are removed.
    5 transcript segments and links to the separate Transcript screen.
    Is that the right bound now that the summary is complete on the same
    page?
+
+5. **Routing trigger placement.** Should the trigger stay next to
+   Transcript/History as prototyped, or sit adjacent to the status
+   panel? If status-adjacent, the interactive control must remain
+   outside `role="status"`.
+
+6. **Custom tag definitions.** Should production move from
+   configuration-owned tag definitions to user-created custom tag
+   definitions (stored per recording, as prototyped), or stay
+   configuration-owned? Custom-tag creation requires this product and
+   backend decision.
 
 ## Current production behaviours preserved (for the proposal)
 
