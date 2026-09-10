@@ -1,8 +1,12 @@
 /* ============================================================
-   Brain UI Prototype — Design System (v3)
+   Brain UI Prototype — Design System (v6)
    ============================================================
    DESIGN PROTOTYPE, not production code.
    Two-row filters, Card/Table toggle, sort-aware grouping.
+   v6: Recording Detail carries the complete summary (variant tabs,
+   utility actions, full document flow, collapsed summary
+   provenance). Transcript and History remain separate screens; the
+   sticky action bar stays gone.
    ============================================================ */
 
 :root {
@@ -415,19 +419,47 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 /* Overview blocks: summary preview + transcript preview */
 .overview-block { margin-bottom: var(--sp-8); }
 .summary-section { margin-bottom: var(--sp-6); }
-.overview-block-title {
-  font-size: var(--fs-md);
-  font-weight: 700;
+.overview-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
   margin-bottom: var(--sp-3);
   padding-bottom: var(--sp-2);
   border-bottom: 1px solid var(--color-border);
 }
+.overview-block-title {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  margin: 0;
+}
 .overview-open { margin-top: var(--sp-4); font-size: var(--fs-sm); }
 .overview-open a { font-weight: 500; }
 
-/* Bounded previews: exactly 3 key points and 2 actions */
-.key-points-preview li { padding-top: var(--sp-2); padding-bottom: var(--sp-2); }
-.action-items-preview li { margin-bottom: var(--sp-2); }
+.page-subtitle { font-size: var(--fs-sm); color: var(--color-text-3); margin: calc(-1 * var(--sp-1)) 0 var(--sp-4); }
+
+/* Markdown-like document flow (full summary on Recording Detail) */
+.doc-flow { font-size: var(--fs-base); line-height: var(--lh-normal); color: var(--color-text-2); }
+.doc-flow > h3 { font-size: var(--fs-sm); font-weight: 700; color: var(--color-text); margin: var(--sp-5) 0 var(--sp-2); }
+.doc-flow > h3:first-child { margin-top: 0; }
+.doc-list { list-style: none; counter-reset: doc-item; margin: var(--sp-2) 0; padding-left: 0; }
+.doc-list > li { counter-increment: doc-item; position: relative; padding-left: var(--sp-8); margin: var(--sp-2) 0; }
+.doc-list > li::before {
+  content: counters(doc-item, ".") ".";
+  position: absolute;
+  left: 0;
+  top: 0;
+  min-width: var(--sp-6);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--color-accent);
+}
+.doc-list > li > .doc-list { margin-top: var(--sp-2); margin-bottom: 0; }
+.doc-bullets { list-style: disc; margin: var(--sp-2) 0; padding-left: var(--sp-6); }
+.doc-bullets > li { margin: var(--sp-2) 0; }
+.doc-meta { display: block; font-size: var(--fs-xs); color: var(--color-text-3); margin-top: 2px; }
 
 /* Native collapsed technical details */
 .technical-details {
@@ -445,21 +477,17 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 }
 .technical-details summary:hover { color: var(--color-text); }
 .technical-details[open] summary { margin-bottom: var(--sp-3); }
-.summary-section-title { font-size: var(--fs-xs); font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-text-3); margin-bottom: var(--sp-2); }
-.summary-overview { font-size: var(--fs-base); line-height: var(--lh-normal); }
 
-.key-points { list-style: none; counter-reset: kp; }
-.key-points li { counter-increment: kp; padding: var(--sp-3) 0; padding-left: var(--sp-8); position: relative; border-bottom: 1px solid var(--color-border); font-size: var(--fs-sm); line-height: var(--lh-normal); }
-.key-points li:last-child { border-bottom: none; }
-.key-points li::before { content: counter(kp); position: absolute; left: 0; top: var(--sp-3); width: 22px; height: 22px; border-radius: 50%; background: var(--color-accent-bg); color: var(--color-accent); font-size: var(--fs-xs); font-weight: 700; display: flex; align-items: center; justify-content: center; }
-
-.action-items { list-style: none; }
-.action-items li { padding: var(--sp-3) var(--sp-4); background: var(--color-surface-2); border-radius: var(--radius-md); margin-bottom: var(--sp-2); font-size: var(--fs-sm); display: flex; align-items: flex-start; gap: var(--sp-3); }
-.action-items li::before { content: "\2610"; font-size: var(--fs-md); color: var(--color-text-3); flex-shrink: 0; line-height: 1; margin-top: 2px; }
-.action-item-meta { font-size: var(--fs-xs); color: var(--color-text-3); margin-top: var(--sp-1); }
-.topic-list { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+/* Summary on Recording Detail: language variants + contextual utility actions */
+.variant-tabs { display: flex; gap: var(--sp-1); flex-wrap: wrap; margin: var(--sp-4) 0 var(--sp-3); border-bottom: 1px solid var(--color-border); }
+.variant-tab { padding: var(--sp-2) var(--sp-3); border: none; border-bottom: 2px solid transparent; background: none; color: var(--color-text-3); font-size: var(--fs-sm); font-weight: 500; cursor: pointer; transition: color var(--transition), border-color var(--transition); }
+.variant-tab:hover { color: var(--color-text); }
+.variant-tab.active { color: var(--color-accent); border-bottom-color: var(--color-accent); font-weight: 600; }
+.variant-note { font-size: var(--fs-xs); color: var(--color-text-3); margin-bottom: var(--sp-4); }
+.summary-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-top: var(--sp-2); }
 
 .transcript-segments { max-width: var(--content-max); }
+.transcript-full { max-width: var(--content-max); }
 .transcript-segment { display: flex; gap: var(--sp-3); padding: var(--sp-3) 0; border-bottom: 1px solid var(--color-border); font-size: var(--fs-sm); line-height: var(--lh-normal); }
 .transcript-segment:last-child { border-bottom: none; }
 .segment-time { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--color-text-3); flex-shrink: 0; min-width: 52px; padding-top: 2px; }
@@ -469,8 +497,17 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 .provenance-grid dt { color: var(--color-text-3); font-weight: 500; }
 .provenance-grid dd { color: var(--color-text-2); font-family: var(--font-mono); word-break: break-all; }
 
-.action-bar { position: sticky; bottom: 0; background: var(--color-surface); border-top: 1px solid var(--color-border); padding: var(--sp-3) var(--sp-6); display: flex; align-items: center; gap: var(--sp-3); z-index: 40; }
-.action-bar .action-bar-label { font-size: var(--fs-xs); color: var(--color-text-3); margin-right: auto; }
+/* ============================================================
+   HISTORY SCREEN — tabular audit data, responsive scroll
+   ============================================================ */
+.history-section { margin-bottom: var(--sp-8); }
+.history-section > h2 { font-size: var(--fs-md); font-weight: 700; margin-bottom: var(--sp-3); padding-bottom: var(--sp-2); border-bottom: 1px solid var(--color-border); }
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.history-table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: var(--fs-sm); }
+.history-table caption { text-align: left; font-size: var(--fs-xs); color: var(--color-text-3); padding-bottom: var(--sp-2); }
+.history-table th { text-align: left; font-size: var(--fs-xs); font-weight: 600; color: var(--color-text-3); padding: var(--sp-2) var(--sp-3); border-bottom: 2px solid var(--color-border); white-space: nowrap; }
+.history-table td { padding: var(--sp-3); border-bottom: 1px solid var(--color-border); color: var(--color-text-2); vertical-align: top; }
+.history-table tbody tr:last-child td { border-bottom: none; }
 
 /* ============================================================
    SECONDARY PAGES
@@ -518,7 +555,6 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   .main-content { padding: var(--sp-4); }
   .detail-title { font-size: var(--fs-xl); }
   .recording-card { padding: var(--sp-4); }
-  .action-bar { padding: var(--sp-3) var(--sp-4); }
   .topbar-right .topbar-btn span.btn-label { display: none; }
   .search-mode-trigger span.trigger-label { display: none; }
 
@@ -537,7 +573,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 }
 
 @media print {
-  .topbar, .action-bar { display: none !important; }
+  .topbar { display: none !important; }
   .main { margin-top: 0; }
   body { background: white; }
 }

@@ -365,9 +365,8 @@
           <span class="meta-item"><span class="status status-transcribed">transcribed</span></span>
         </div>
         <div class="detail-links">
-          <a class="detail-link" href="#" aria-label="Open the full summary">Full summary</a>
-          <a class="detail-link" href="#" aria-label="Open the full transcript">Transcript</a>
-          <a class="detail-link" href="#" aria-label="Open the processing history">History</a>
+          <a class="detail-link" href="#" data-screen="transcript-screen" aria-label="Open the full transcript">Transcript</a>
+          <a class="detail-link" href="#" data-screen="history-screen" aria-label="Open the processing history">History</a>
         </div>
       </div>
 
@@ -380,31 +379,95 @@
 
       <div class="status-panel" role="status">
         <span class="status-panel-label">Status</span>
-        <span class="status-panel-main">Transcribed &middot; Summary current &middot; No pending actions</span>
+        <span class="status-panel-main">Transcribed &middot; Summary current &middot; No action required</span>
       </div>
 
-      <section class="summary-section overview-block" aria-label="Summary preview">
-        <div class="overview-block-title">Summary preview</div>
-        <div class="summary-overview">The team discussed the Q4 product roadmap with a focus on AI-powered features. Key decisions included prioritising local LLM integration for privacy-sensitive use cases, improving on-device speech recognition accuracy, and adopting a hybrid approach where cloud services are optional rather than required. Budget allocation and timeline milestones were agreed upon.</div>
+      <section class="summary-section" aria-labelledby="summary-title">
+        <div class="overview-block-head">
+          <h2 class="overview-block-title" id="summary-title">Summary</h2>
+          <div class="summary-actions">
+            <button class="btn btn-sm" data-copy="#summary-doc">Copy Markdown</button>
+            <a class="btn btn-sm" href="#" download>Download .md</a>
+            <a class="btn btn-sm" href="#" download>Plain text</a>
+            <button class="btn btn-sm btn-ghost" data-confirm>Regenerate summary</button>
+          </div>
+        </div>
 
-        <div class="summary-section-title">Key points</div>
-        <ol class="key-points key-points-preview">
-          <li>Local LLM integration is the top priority for Q4, with a target of running 7B-parameter models on consumer hardware within existing memory constraints.</li>
-          <li>On-device speech recognition should achieve &lt;5% WER for English and &lt;15% for Cantonese by end of Q4 through fine-tuning on domain-specific data.</li>
-          <li>Budget approved: 40% engineering, 30% data collection, 20% testing, 10% documentation.</li>
-        </ol>
+        <nav class="variant-tabs" role="tablist" aria-label="Summary language variants">
+          <button class="variant-tab active" role="tab" aria-selected="true">Default (English)</button>
+          <button class="variant-tab" role="tab" aria-selected="false">Original</button>
+          <button class="variant-tab" role="tab" aria-selected="false">繁體中文</button>
+        </nav>
+        <p class="variant-note">Showing the Default (English) variant &middot; generated 1 Sep 2026, 15:12 &middot; current</p>
 
-        <div class="summary-section-title">Action items</div>
-        <ul class="action-items action-items-preview">
-          <li><div>Draft local LLM integration technical specification<div class="action-item-meta">Owner: Harry &middot; Due: 8 Sep 2026</div></div></li>
-          <li><div>Set up Cantonese speech recognition fine-tuning pipeline<div class="action-item-meta">Owner: Harry &middot; Due: 15 Sep 2026</div></div></li>
-        </ul>
+        <article class="doc-flow summary-doc" id="summary-doc" aria-label="Summary content">
+          <h3>Overview</h3>
+          <p>The team discussed the Q4 product roadmap with a focus on AI-powered features. Key decisions included prioritising local LLM integration for privacy-sensitive use cases, improving on-device speech recognition accuracy, and adopting a hybrid approach where cloud services are optional rather than required. Budget allocation and timeline milestones were agreed upon.</p>
 
-        <p class="overview-open"><a href="#">Open full summary</a></p>
+          <h3>Key points</h3>
+          <ol class="doc-list">
+            <li>Local LLM integration is the top priority for Q4.
+              <ol class="doc-list">
+                <li>Target running 7B-parameter models on consumer hardware within existing memory constraints.</li>
+                <li>Quantise to 4-bit to fit within 8&nbsp;GB of unified memory on M-series chips.</li>
+                <li>Keep cloud services optional, never required, for privacy-sensitive use cases.</li>
+              </ol>
+            </li>
+            <li>On-device speech recognition accuracy should improve substantially by end of Q4.
+              <ol class="doc-list">
+                <li>English target: below 5% WER.</li>
+                <li>Cantonese target: below 15% WER through domain-specific fine-tuning.</li>
+                <li>Collect conversational Cantonese with English code-switching for training.</li>
+              </ol>
+            </li>
+            <li>Budget and timeline were agreed.
+              <ol class="doc-list">
+                <li>40% engineering, 30% data collection, 20% testing, 10% documentation.</li>
+                <li>Prototype by mid-October, beta by late November, release before year end.</li>
+              </ol>
+            </li>
+          </ol>
+
+          <h3>Action items</h3>
+          <ul class="doc-bullets">
+            <li>Draft the local LLM integration technical specification.<span class="doc-meta">Owner: Harry &middot; Due: 8 Sep 2026</span></li>
+            <li>Set up the Cantonese speech recognition fine-tuning pipeline.<span class="doc-meta">Owner: Harry &middot; Due: 15 Sep 2026</span></li>
+            <li>Confirm the beta milestone date with the wider team.<span class="doc-meta">Owner: Sarah &middot; Due: 12 Sep 2026</span></li>
+          </ul>
+
+          <h3>People &amp; organizations</h3>
+          <ul class="doc-bullets">
+            <li><strong>Harry</strong> — recording owner and meeting host.</li>
+            <li><strong>Sarah</strong> — presented the local LLM integration plan.</li>
+            <li><strong>David</strong> — raised hardware and memory constraints.</li>
+          </ul>
+
+          <h3>Topics</h3>
+          <ul class="doc-bullets">
+            <li>Local LLM integration and quantisation.</li>
+            <li>On-device speech recognition and WER targets.</li>
+            <li>Privacy-first architecture.</li>
+            <li>Q4 budget and milestones.</li>
+          </ul>
+        </article>
       </section>
 
-      <section class="overview-block" aria-label="Transcript preview">
-        <div class="overview-block-title">Transcript preview</div>
+      <details class="technical-details">
+        <summary>Summary provenance</summary>
+        <dl class="provenance-grid">
+          <dt>Variant</dt><dd>Default (en)</dd>
+          <dt>Summary model</dt><dd>mlx-community/Llama-3-8B-Instruct</dd>
+          <dt>Summary version</dt><dd>v3</dd>
+          <dt>Generation</dt><dd>chunked (4 chunks, 12,847 chars)</dd>
+          <dt>Generated</dt><dd>1 Sep 2026, 15:12</dd>
+          <dt>Status</dt><dd>current</dd>
+        </dl>
+      </details>
+
+      <section class="overview-block" aria-labelledby="transcript-preview-title">
+        <div class="overview-block-head">
+          <h2 class="overview-block-title" id="transcript-preview-title">Transcript preview</h2>
+        </div>
         <div class="transcript-segments" lang="en">
           <div class="transcript-segment"><span class="segment-time">00:00</span><span class="segment-speaker">Harry:</span><span>Alright, let's get started. I want to go through the AI features roadmap for Q4 and make sure we're aligned on priorities.</span></div>
           <div class="transcript-segment"><span class="segment-time">00:12</span><span class="segment-speaker">Sarah:</span><span>Sounds good. I've prepared the slides on local LLM integration. Should I start there?</span></div>
@@ -412,7 +475,7 @@
           <div class="transcript-segment"><span class="segment-time">00:30</span><span class="segment-speaker">Sarah:</span><span>So the key question is whether we can run a 7B model on consumer hardware. Our tests show that with quantisation to 4-bit, we can fit within 8GB of unified memory on the M-series chips.</span></div>
           <div class="transcript-segment"><span class="segment-time">00:48</span><span class="segment-speaker">David:</span><span>That's the bottleneck for most users. Even on the MacBook Air with 8GB, it should work — but just barely. We need to be careful about context window size.</span></div>
         </div>
-        <p class="overview-open"><a href="#" aria-label="Open the full transcript with all 187 segments">Open transcript — 187 segments</a></p>
+        <p class="overview-open"><a href="#" data-screen="transcript-screen" aria-label="Open the full transcript with all 187 segments">Open transcript — 187 segments</a></p>
       </section>
 
       <details class="technical-details">
@@ -424,17 +487,163 @@
           <dt>Discovered</dt><dd>1 Sep 2026, 14:30</dd>
           <dt>Routing</dt><dd>european profile &middot; auto &middot; verified</dd>
           <dt>Transcription model</dt><dd>parakeet-v3</dd>
-          <dt>Summary model</dt><dd>mlx-community/Llama-3-8B-Instruct</dd>
-          <dt>Summary provenance</dt><dd>v3 &middot; Default (en) &middot; chunked (4 chunks, 12,847 chars)</dd>
           <dt>Created</dt><dd>1 Sep 2026, 15:12</dd>
         </dl>
       </details>
-
-      <div class="action-bar">
-        <span class="action-bar-label">Summary current &middot; No pending actions</span>
-        <button class="btn btn-sm" data-confirm>Regenerate</button>
-      </div>
     </div><!-- /detail screen -->
+
+
+    <!-- =============== SCREEN: TRANSCRIPT =============== -->
+    <div id="transcript-screen" class="screen">
+      <div class="page-header">
+        <a href="#" class="back-btn" data-screen="detail">&larr; Recording overview</a>
+      </div>
+
+      <div class="detail-header">
+        <h1 class="detail-title">Transcript</h1>
+        <p class="page-subtitle">Weekly product sync — AI features roadmap</p>
+        <div class="detail-meta">
+          <span class="meta-item">187 segments</span>
+          <span class="meta-item">42 min</span>
+          <span class="meta-item">parakeet-v3</span>
+          <span class="meta-item">English</span>
+        </div>
+        <div class="summary-actions">
+          <button class="btn btn-sm" data-copy="#transcript-doc">Copy transcript</button>
+          <a class="btn btn-sm" href="#" download>Download .txt</a>
+          <a class="btn btn-sm" href="#" download>Download .srt</a>
+        </div>
+      </div>
+
+      <div class="transcript-segments transcript-full" id="transcript-doc" lang="en">
+        <div class="transcript-segment"><span class="segment-time">00:00</span><span class="segment-speaker">Harry:</span><span>Alright, let's get started. I want to go through the AI features roadmap for Q4 and make sure we're aligned on priorities.</span></div>
+        <div class="transcript-segment"><span class="segment-time">00:12</span><span class="segment-speaker">Sarah:</span><span>Sounds good. I've prepared the slides on local LLM integration. Should I start there?</span></div>
+        <div class="transcript-segment"><span class="segment-time">00:18</span><span class="segment-speaker">Harry:</span><span>Yes, please. I think that's the most critical piece. The whole privacy-first approach depends on getting this right.</span></div>
+        <div class="transcript-segment"><span class="segment-time">00:30</span><span class="segment-speaker">Sarah:</span><span>So the key question is whether we can run a 7B model on consumer hardware. Our tests show that with quantisation to 4-bit, we can fit within 8GB of unified memory on the M-series chips.</span></div>
+        <div class="transcript-segment"><span class="segment-time">00:48</span><span class="segment-speaker">David:</span><span>That's the bottleneck for most users. Even on the MacBook Air with 8GB, it should work — but just barely. We need to be careful about context window size.</span></div>
+        <div class="transcript-segment"><span class="segment-time">01:05</span><span class="segment-speaker">Sarah:</span><span>Right. We could keep the default context window small and let power users raise it. That keeps the common case fast and predictable.</span></div>
+        <div class="transcript-segment"><span class="segment-time">01:22</span><span class="segment-speaker">Harry:</span><span>Good. And the fallback path stays local-only? No silent calls to a remote model?</span></div>
+        <div class="transcript-segment"><span class="segment-time">01:31</span><span class="segment-speaker">Sarah:</span><span>Correct. If the local model is unavailable, we surface that state and ask the user. We never route data off-device automatically.</span></div>
+        <div class="transcript-segment"><span class="segment-time">01:49</span><span class="segment-speaker">David:</span><span>That matches the privacy principle. I'd also like us to log only categories and counts, never the transcript text.</span></div>
+        <div class="transcript-segment"><span class="segment-time">02:04</span><span class="segment-speaker">Harry:</span><span>Agreed. Let's move to speech recognition. Where are we on the WER targets?</span></div>
+        <div class="transcript-segment"><span class="segment-time">02:15</span><span class="segment-speaker">Sarah:</span><span>English is already close to five percent. Cantonese is the harder case — around eighteen percent before fine-tuning.</span></div>
+        <div class="transcript-segment"><span class="segment-time">02:33</span><span class="segment-speaker">David:</span><span>The training data is the issue. We need conversational Cantonese with natural English code-switching, not read speech.</span></div>
+        <div class="transcript-segment"><span class="segment-time">02:51</span><span class="segment-speaker">Harry:</span><span>Let's budget for data collection and set a fifteen percent target for Cantonese by end of quarter.</span></div>
+        <div class="transcript-segment"><span class="segment-time">03:07</span><span class="segment-speaker">Sarah:</span><span>I'll set up the fine-tuning pipeline and bring a first evaluation to the next sync.</span></div>
+        <div class="transcript-segment"><span class="segment-time">03:19</span><span class="segment-speaker">Harry:</span><span>Perfect. Last item: the budget split. Forty percent engineering, thirty data, twenty testing, ten documentation.</span></div>
+        <div class="transcript-segment"><span class="segment-time">03:34</span><span class="segment-speaker">David:</span><span>That works. I'll confirm the beta milestone with the wider team this week.</span></div>
+      </div>
+    </div><!-- /transcript-screen -->
+
+
+    <!-- =============== SCREEN: HISTORY =============== -->
+    <div id="history-screen" class="screen">
+      <div class="page-header">
+        <a href="#" class="back-btn" data-screen="detail">&larr; Recording overview</a>
+      </div>
+
+      <div class="detail-header">
+        <h1 class="detail-title">History</h1>
+        <p class="page-subtitle">Weekly product sync — AI features roadmap</p>
+      </div>
+
+      <section class="history-section" aria-labelledby="history-routing-title">
+        <h2 id="history-routing-title">Routing</h2>
+        <div class="table-scroll">
+          <table class="history-table">
+            <caption>Routing decisions for this recording</caption>
+            <thead>
+              <tr>
+                <th scope="col">When</th>
+                <th scope="col">Profile</th>
+                <th scope="col">Method</th>
+                <th scope="col">Verified</th>
+                <th scope="col">Evidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1 Sep 2026, 14:31</td>
+                <td>european</td>
+                <td>auto</td>
+                <td>yes</td>
+                <td>classifier confidence 0.94</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="history-section" aria-labelledby="history-transcription-title">
+        <h2 id="history-transcription-title">Transcription</h2>
+        <div class="table-scroll">
+          <table class="history-table">
+            <caption>Transcription attempts</caption>
+            <thead>
+              <tr>
+                <th scope="col">Started</th>
+                <th scope="col">Finished</th>
+                <th scope="col">Model</th>
+                <th scope="col">Outcome</th>
+                <th scope="col">Segments</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1 Sep 2026, 14:32</td>
+                <td>1 Sep 2026, 15:10</td>
+                <td>parakeet-v3</td>
+                <td>success</td>
+                <td>187</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="history-section" aria-labelledby="history-summary-title">
+        <h2 id="history-summary-title">Summary</h2>
+        <div class="table-scroll">
+          <table class="history-table">
+            <caption>Summary versions</caption>
+            <thead>
+              <tr>
+                <th scope="col">Generated</th>
+                <th scope="col">Variant</th>
+                <th scope="col">Model</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>1 Sep 2026, 15:12</td>
+                <td>Default (en)</td>
+                <td>Llama-3-8B-Instruct</td>
+                <td>current</td>
+              </tr>
+              <tr>
+                <td>1 Sep 2026, 15:04</td>
+                <td>Default (en)</td>
+                <td>Llama-3-8B-Instruct</td>
+                <td>superseded</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="history-section" aria-labelledby="history-source-title">
+        <h2 id="history-source-title">Source &amp; technical information</h2>
+        <dl class="provenance-grid">
+          <dt>Recording ID</dt><dd>a3f8c2e1-7b4d-4f0e-9a2c-1d8e5b6a4c3f</dd>
+          <dt>SHA-256</dt><dd>a3f8c2e1...b7d4</dd>
+          <dt>Source file</dt><dd>product_sync_20260901.m4a</dd>
+          <dt>Discovered</dt><dd>1 Sep 2026, 14:30</dd>
+          <dt>Audio status</dt><dd>present &middot; unchanged</dd>
+          <dt>Created</dt><dd>1 Sep 2026, 15:12</dd>
+        </dl>
+      </section>
+    </div><!-- /history-screen -->
 
 
     <!-- =============== SCREEN: REVIEW =============== -->

@@ -36,11 +36,12 @@ GET stays supported and read-only), and the **Step 5D Ask with
 Citations** (`workflow/services/ask.py` + the document-level evidence
 surface in `semantic_query.py`, `brain ask QUESTION [--json]`, and the
 `/ask/` GET-form/POST-execution page). The `design/ui-prototype/`
-directory is now **v4**: a design-only prototype of a PROPOSED
-overview-oriented recording detail page (compact header + status/
-next-action panel + bounded summary/transcript previews + native
-collapsed technical details, no tabs/attempts table) using fictional
-data; the production recording detail view/template is unchanged. The
+directory is now **v6**: a design-only prototype of a PROPOSED
+recording detail page containing the complete Markdown-style summary,
+contextual summary actions, a bounded transcript preview, partitioned
+collapsed provenance/technical details, and separate navigable
+Transcript/History screens, using fictional data; the production
+recording detail view/template is unchanged. The
 working tree is independently full-suite verified: **2203 collected
 and 2203 passed** (only the known `audioop` deprecation warning), with
 `manage.py check` and `makemigrations --check` clean. No real-database
@@ -81,9 +82,11 @@ claimed; the work and its tests are in the working tree.
   (keyword POST → bookmarkable GET redirect; semantic/hybrid
   POST-only, query never in a URL), and the
   Step 5D Ask-with-Citations service/CLI/web flow). The
-  `design/ui-prototype/` directory is a v4 DESIGN-ONLY prototype of a
-  proposed overview-oriented recording detail page (fictional data);
-  the production recording detail view/template is unchanged.
+  `design/ui-prototype/` directory is a v6 DESIGN-ONLY prototype of a
+  proposed recording detail page containing the complete document-style
+  summary, contextual actions, a bounded transcript preview, and
+  separate navigable Transcript/History screens (fictional data); the
+  production recording detail view/template is unchanged.
 - Current verification (independently confirmed, CURRENT state): the
   full suite passes — **2203 collected and
   2203 passed** (the Step 5D full-suite state was 2191 — historical;

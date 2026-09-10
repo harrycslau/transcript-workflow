@@ -1,11 +1,13 @@
 /* ============================================================
-   Brain UI Prototype — Interactions (v4)
+   Brain UI Prototype — Interactions (v6)
    ============================================================
    DESIGN PROTOTYPE, not production code.
    View toggle, sort-aware grouping, localStorage, table render.
-   v4: Recording Detail is a single overview page (no Summary/
-   Transcript/History tabs); technical details use a native
-   <details> element — no tab/provenance JS remains.
+   v6: Recording Detail contains the complete summary; language
+   variant tabs, Copy Markdown and Regenerate confirmation work
+   directly on the detail screen. Transcript and History remain
+   separate navigable screens through the shared showScreen
+   navigation; no sticky action bar.
    ============================================================ */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -68,7 +70,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
-  document.querySelectorAll('.topbar-btn[data-screen], .back-btn[data-screen], .topbar-brand[data-screen]').forEach(el => {
+  document.querySelectorAll('[data-screen]').forEach(el => {
     el.addEventListener('click', e => { e.preventDefault(); showScreen(el.dataset.screen); });
   });
 
@@ -357,6 +359,35 @@ document.addEventListener('DOMContentLoaded', () => {
     btn.addEventListener('click', () => {
       const overlay = document.querySelector('.confirm-overlay');
       if (overlay) { overlay.style.visibility = 'hidden'; overlay.style.pointerEvents = 'none'; }
+    });
+  });
+
+  // ---- Summary language variant tabs on Recording Detail (visual state only) ----
+  document.querySelectorAll('.variant-tabs').forEach(tabs => {
+    const note = tabs.parentElement.querySelector('.variant-note');
+    tabs.querySelectorAll('.variant-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        tabs.querySelectorAll('.variant-tab').forEach(t => {
+          const isActive = t === tab;
+          t.classList.toggle('active', isActive);
+          t.setAttribute('aria-selected', String(isActive));
+        });
+        if (note) note.textContent = `Showing the ${tab.textContent.trim()} variant \u00b7 generated 1 Sep 2026, 15:12 \u00b7 current`;
+      });
+    });
+  });
+
+  // ---- Copy buttons (best-effort clipboard for the prototype) ----
+  document.querySelectorAll('[data-copy]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const target = document.querySelector(btn.dataset.copy);
+      if (!target || !navigator.clipboard) return;
+      try {
+        await navigator.clipboard.writeText(target.innerText.trim());
+        const original = btn.textContent;
+        btn.textContent = 'Copied';
+        window.setTimeout(() => { btn.textContent = original; }, 1500);
+      } catch (_) {}
     });
   });
 

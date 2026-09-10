@@ -1,4 +1,4 @@
-# Brain — UI Design Prototype (v4)
+# Brain — UI Design Prototype (v6)
 
 > **This is a design prototype, not production code.**
 > All data is fictional. No real transcripts, recordings, or database content is used.
@@ -15,62 +15,75 @@ open design/ui-prototype/index.html
 - Click filter chips (Work, Personal, etc.) to filter
 - Click the **grid/table icon** toggle in Row 1 to switch between Card and Table views
 - Sort by Newest, Oldest, Title A–Z, Title Z–A, or Duration
-- Click a recording to enter Recording Detail
+- Click a recording to enter Recording Detail, which contains the **complete summary**
+- On Recording Detail, switch **language variant tabs** (visual state only) and use
+  **Copy Markdown**, **Download .md**, **Plain text**, and **Regenerate summary**
+- Open the separate **Transcript** or **History** screens from the detail header
+- Each separate screen has a **Back to Recording overview** control
 - **Back to Library** preserves query, filters, and scroll position
+- **Copy Markdown** / **Copy transcript** use the clipboard when available
+- **Regenerate summary** opens the existing confirmation dialog
 - View preference (Card/Table) is saved to `localStorage`
 - Press `/` to focus search from anywhere
-- **Technical details** on the Recording Detail page collapse/expand with a native `<details>` element (no JavaScript)
+- **Technical details** / **Summary provenance** collapse with native `<details>` elements (no JavaScript)
 
-## What changed from v3
+## What changed from v5
 
-### 1. Recording Detail is now an overview page (proposal)
+### 1. The complete summary lives on Recording Detail
 
-The v3 detail page duplicated the full Summary, Transcript and History
-inside three tabs. v4 replaces the tabs with a **single scannable
-overview** that gets you to status, actions and the full documents in a
-few seconds:
+v5 split the full summary onto its own screen and showed only a bounded
+preview on the overview. Feedback from daily use: the summary is the
+reason to open a recording, so the Recording Detail page itself now
+contains the **complete summary** in a Markdown-like document flow:
 
-1. **Compact header** — title, date, duration, status badge, and
-   explicit links to the **Full summary / Transcript / History** pages.
-2. **Status / next-action panel** — one green panel stating the current
-   health and the single next action ("Transcribed · Summary current ·
-   No pending actions"). Problems (needs review, failed stage, missing
-   audio, pending regeneration) would replace the green panel and name
-   the concrete next step.
-3. **Compact tags** — the active tags plus the add-tag control, kept
-   tight beside the header.
-4. **Summary preview** — the Overview paragraph, exactly **3 key
-   points** and **2 action items**, then "Open full summary". The full
-   variant tabs, copy/export controls and provenance stay on the full
-   summary page.
-5. **Transcript preview** — exactly **5 segments**, then "Open
-   transcript — 187 segments".
-6. **Technical details** — a native collapsed `<details>` block with
-   Recording ID, SHA-256, source file, routing, transcription model,
-   summary model and summary provenance. IDs/hashes are hidden by
-   default so the page reads like a document, not a database row.
-7. **No attempts table and no full history** — History is one link, not
-   a duplicated table. All the historical detail remains reachable.
+- **Overview**, **full nested Key points**, **Action items**,
+  **People &amp; organizations** and **Topics** render as one document,
+  no preview bounds and no "open full" step.
+- **Language variant tabs** and the variant status note sit above the
+  document and switch visual state as before.
+- A contextual utility row next to the Summary heading carries
+  **Copy Markdown**, **Download .md**, **Plain text** and
+  **Regenerate summary** (the existing confirmation dialog).
+- An optional collapsed **Summary provenance** block keeps
+  variant/model/version/generation details available without noise.
 
-The action bar stays sticky at the bottom ("Summary current · No
-pending actions" + Regenerate), so the expensive action is always one
-tap away without scrolling.
+The separate Summary screen markup is removed entirely.
+
+### 2. Transcript and History stay separate
+
+The Transcript and History screens are unchanged in behaviour and keep
+their **Back to Recording overview** controls. The transcript preview
+on Recording Detail stays exactly as before: 5 segments plus a link to
+the separate Transcript screen. History remains one link/screen with
+responsive captioned tables.
+
+### 3. Two native disclosures, no duplicated fields
+
+Recording Detail now has two collapsed `<details>` blocks that partition
+the metadata instead of duplicating it:
+
+- **Technical details** — recording/routing/transcription-specific:
+  Recording ID, SHA-256, source file, discovery, routing profile and
+  transcription model.
+- **Summary provenance** — summary-specific: variant, summary model,
+  summary version, generation, generated timestamp and status.
 
 ## Rationale
 
-- **Decision first.** The detail page's primary job is answering "is
-  this recording OK, and what should I do next?" Tabs force the user to
-  hunt across duplicated content before that question is answered.
-- **One document at a time.** The full Summary and Transcript are
-  already long. Previewing them on the same page as the status
-  duplicates content and doubles the scrolling; links keep every full
-  document one click away.
-- **History is secondary.** Attempts tables matter during debugging, not
-  during daily review. A link preserves access without dominating the
-  page.
+- **Daily usability.** The summary is the document users read most; it
+  belongs on the page they open, not one click away. Removing the
+  preview/full-summary split eliminates a navigation hop for the common
+  case while keeping the page a coherent document.
+- **Contextual actions.** Copy/export/Regenerate sit next to the
+  Summary heading, not pinned to the viewport — no sticky bottom bar.
+- **Long documents stay separate.** Transcript and History are long and
+  audit-oriented; separate screens keep Recording Detail scannable.
+- **History is tabular.** Attempts and versions are audit rows, so a
+  captioned table (with horizontal scroll on small screens) is the
+  right, accessible form.
 - **Technical disclosure without noise.** IDs, hashes and model strings
-  are real privacy/audit data but visually loud. A native collapsed
-  block keeps them available without front-loading them.
+  stay collapsed in native `<details>` blocks, partitioned by concern so
+  no field appears twice.
 
 ## Information architecture (proposal)
 
@@ -84,61 +97,68 @@ Filter area: Row 1 (dates, sort, view toggle) | Row 2 (tags)
 Results: Cards or Table — same data, same filters
               |
               v
-Recording Detail (overview):
-  compact header + Full summary / Transcript / History links
-  status / next-action panel
+Recording Detail:
+  compact header + Transcript / History links
+  status / next-action panel ("No action required")
   compact tags
-  Summary preview (overview + 3 key points + 2 actions → open full)
+  Summary (complete document flow: variant tabs + status, utility
+    actions, overview, nested key points, action items, people &
+    organizations, topics; collapsed Summary provenance)
   Transcript preview (5 segments → open transcript)
   Technical details (native <details>: IDs/hash/source/routing/model)
-  sticky action bar (Regenerate)
+              |
+              +--> Transcript (metadata, exports, fuller transcript)
+              +--> History    (routing/transcription/summary tables, source info)
 ```
-
-Full documents live on their own pages (Summary with variant tabs and
-exports; Transcript with segment pagination; History with attempts).
 
 ## Visual system
 
-Same as v3 — warm, calm, personal palette. The new overview adds only a
-green status panel, a detail-links row and the native technical-details
-block; no new tokens or component styles beyond those.
+Same warm, calm, personal palette as v3/v4/v5. v6 keeps the
+document-flow typography (`.doc-flow`, `.doc-list` counters,
+`.doc-bullets`), the variant-tab and utility-action styles, and the
+responsive history tables. No new tokens or component styles beyond the
+reuse of existing full-screen utilities on Recording Detail; the
+obsolete Summary-screen markup and dead selectors are removed.
 
-## Accessibility considerations (unchanged + v4 additions)
+## Accessibility considerations (v6)
 
 - View toggle uses `role="radiogroup"` with `role="radio"` and `aria-checked`
-- Table rows are keyboard-accessible (native `<tr>` focusability)
 - Filter chips are `<button>` elements, not `<div onclick>`
 - `/` shortcut focuses search; `Escape` closes dropdown
 - Status badges use text + dot (not colour alone)
 - Active filter chips have explicit remove buttons with `aria-label`
-- Detail links carry explicit `aria-label`s ("Open the full summary",
-  "Open the full transcript (187 segments)")
-- Technical details use a native `<details>/<summary>` — keyboard and
-  screen-reader disclosure semantics for free
+- Screen navigation reuses the shared `data-screen` handling
+- Language variant tabs use `role="tablist"` / `role="tab"` with `aria-selected`
+- History tables use `<caption>`, `<th scope="col">` and a horizontally
+  scrollable wrapper on small screens
+- Technical details and summary provenance use native
+  `<details>/<summary>` for keyboard and screen-reader semantics
 - Status panel renders as `role="status"` so screen readers announce it
+- Summary headings use a semantic `<h2>`/`<h3>` hierarchy under the
+  recording `<h1>`, and nested numbering comes from real list
+  semantics, not decorative text
 
 ## Questions for approval
 
-1. **Preview sizes.** The overview shows 3 key points, 2 action items
-   and 5 transcript segments. Are these the right bounds? Should the
-   summary preview include the full overview paragraph, or a clamped
-   version with "more"?
+1. **Complete summary on the detail page.** Is the complete summary (five
+   sections plus variant tabs and utility actions) the right content
+   for Recording Detail, or should any section be collapsed by default
+   while staying on the same page?
 
-2. **Action placement.** The sticky bottom action bar keeps Regenerate
-   one tap away. Should the next-action also appear inside the status
-   panel (e.g. a "Regenerate" button next to "No pending actions")?
-   Or should actions move into the header row?
+2. **Utility action placement.** Copy Markdown, Download .md, Plain
+   text and Regenerate sit in the Summary heading row. Is that the
+   right contextual home, or should the actions live in a toolbar
+   between the variant tabs and the document?
 
-3. **Technical disclosure.** IDs, hashes, model names and routing are
-   collapsed inside a native `<details>` block. Should any field be
-   visible by default (e.g. transcription model in the header meta),
-   and is the summary-provenance summary line the right level of
-   detail?
+3. **Two disclosures vs one.** Does splitting Technical details
+   (recording/routing/transcription) and Summary provenance
+   (summary-specific) read clearly, or should they be merged into a
+   single collapsed block with grouped labels?
 
-4. **Tags.** The overview keeps the full compact tag row with add-tag.
-   Should suggested tags be visually distinct here (as in the Library),
-   and should the "Confirm suggestion" action appear inline on the
-   overview or stay on the full summary page?
+4. **Transcript preview bounds.** The detail page still shows exactly
+   5 transcript segments and links to the separate Transcript screen.
+   Is that the right bound now that the summary is complete on the same
+   page?
 
 ## Current production behaviours preserved (for the proposal)
 
