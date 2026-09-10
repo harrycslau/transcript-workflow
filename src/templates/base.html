@@ -14,9 +14,19 @@
       <span class="topbar-brand-icon">B</span>
       <span class="topbar-brand-name">Brain</span>
     </a>
-    <form class="topbar-search" role="search" method="get" action="{% url 'recordings' %}">
+    <form class="topbar-search" role="search" method="post" action="{% url 'recording-search' %}">
+      {% csrf_token %}
       <span class="search-icon" aria-hidden="true">&#128269;</span>
-      <input type="search" id="global-search" name="q" placeholder="Search transcripts, summaries, metadata" aria-label="Keyword search of transcripts, summaries and metadata" value="{{ search_query|default:'' }}">
+      <input type="search" id="global-search" name="q" placeholder="Search transcripts, summaries, metadata" aria-label="Search transcripts, summaries and metadata" value="{{ search_query|default:'' }}">
+      <label class="visually-hidden" for="global-search-mode">Search mode</label>
+      <select id="global-search-mode" name="mode" aria-label="Search mode">
+        <option value="keyword"{% if search_mode != 'semantic' and search_mode != 'hybrid' %} selected{% endif %}>Keyword</option>
+        <option value="semantic"{% if search_mode == 'semantic' %} selected{% endif %}>Semantic</option>
+        <option value="hybrid"{% if search_mode == 'hybrid' %} selected{% endif %}>Hybrid</option>
+      </select>
+      <button type="submit" class="topbar-search-btn">Search</button>
+      {% if filter_pairs %}{% for name, value in filter_pairs %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}{% endif %}
+      {% if effective_view %}<input type="hidden" name="view" value="{{ effective_view }}">{% endif %}
     </form>
     <div class="topbar-right">
       <a class="topbar-btn" href="{% url 'ask' %}">Ask</a>

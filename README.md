@@ -25,14 +25,17 @@ can:
 - browse recordings, transcripts, summaries, history, tags, and the
   review queue in a local web interface
 
-Keyword search is available on the CLI (`brain search`) and in the
-Library's web UI (`/recordings/`): scoped filters before ranking,
-highlighted `<mark>` snippets and segment jump links
-(Step 5A.4.2 complete). Semantic/hybrid search is available via
-`brain search --mode semantic|hybrid` and the POST-only
-`/recordings/search/` page (Step 5C). Ask with citations is available
-via `brain ask "QUESTION"` and the `/ask/` page (Step 5D): answers
-cite only actually retrieved local transcript segments or summaries.
+Keyword, semantic and hybrid search are available on the CLI
+(`brain search --mode keyword|semantic|hybrid`) and through one unified
+web query input: the global top bar on every page carries a
+Keyword/Semantic/Hybrid selector. Keyword submissions redirect to a
+bookmarkable `/recordings/?q=...` page with scoped filters before
+ranking, highlighted `<mark>` snippets and segment jump links
+(Step 5A.4.2 complete); semantic/hybrid submissions run and navigate
+POST-only and their query never appears in a URL (Step 5C). Ask with
+citations is available via `brain ask "QUESTION"` and the `/ask/` page
+(Step 5D): answers cite only actually retrieved local transcript
+segments or summaries.
 Manual topic splitting, scheduling, and retention deletion are
 planned for Step 6. **The app does not currently delete, move, or
 modify audio files.**
@@ -188,8 +191,8 @@ source filenames, active tags — never paths or secrets).
   wrong-tokenizer FTS table is repaired by a rebuild.
 - The index is kept current automatically (Step 5A.3 post-commit
   per-recording synchronization) and is queried read-only by
-  `brain search` (Step 5A.4.1, below) and by the Library's top-bar
-  keyword search (Step 5A.4.2a/b, below).
+  `brain search` (Step 5A.4.1, below) and by the Library's unified
+  top-bar search (Steps 5A.4.2a/b and 5C, below).
 
 ### Keyword search (Step 5A.4.1)
 
@@ -234,10 +237,25 @@ uv run brain search "budget" --limit 20 --json
 - Exit codes: **0** searched (also with zero results), **1** config or
   missing/broken/stale index, **2** malformed query or bad `--limit`.
 
-### Library keyword search (Step 5A.4.2a/b)
+### Library search — unified top bar (Step 5A.4.2a/b + Step 5C)
 
-The top-bar search field on `/recordings/` runs the same read-only
-engine without leaving the Library:
+The global top bar is the ONLY query input on every page, with a native
+Keyword/Semantic/Hybrid selector and a submit button; it POSTs
+(CSRF-protected) to `/recordings/search/` for all modes. Keyword POSTs
+redirect to the canonical bookmarkable GET `/recordings/?q=...`,
+preserving the active Library filters and view (a blank query keeps the
+filters/view and drops only the query). Semantic/hybrid execute and
+navigate POST-only and their query never enters a URL, redirect, log or
+error. The direct keyword GET (`/recordings/?q=...`) remains supported
+and strictly read-only. On Library contexts the active filters and view
+are carried in hidden top-bar fields; from other pages the search is
+global. The current vector mode is pre-selected on rendered results,
+Keyword otherwise; a failed vector search clears the query everywhere.
+On mobile the fixed header uses two rows — brand + navigation on the
+first, the search form full-width on the second.
+
+Keyword mode runs the same read-only engine without leaving the
+Library:
 
 - One submitted search runs the FULL index integrity sweep EXACTLY
   once (no health cache): a missing, broken or stale index is a
@@ -468,11 +486,11 @@ uv run brain serve --host 127.0.0.1 --port 9000
   Oldest, Title A–Z, Title Z–A) and month headings for chronological
   sorts. Card/Table preference is remembered via a server-owned
   `view=`-overridable cookie; everything works without JavaScript.
-  Keyword search exists on the CLI (`brain search`, Step 5A.4.1) and
-  in the Library itself: the top-bar field runs a keyword search over
-  the same read-only engine, with `<mark>` highlights and transcript
-  jump links (Steps 5A.4.2a/b) — see the Library keyword search
-  section below.
+  Search is the unified global top bar (Keyword/Semantic/Hybrid
+  selector): keyword POSTs redirect to a bookmarkable `/recordings/?q=...`
+  page, semantic/hybrid run and navigate POST-only, all over the same
+  read-only engines with `<mark>` highlights and transcript jump links
+  — see the Library search section below.
 - `GET /status/` — the status page (app version, storage availability,
   MacWhisper/oMLX configuration, selected models, pipeline counts).
   Page loads run only lightweight local checks; they never launch
@@ -505,12 +523,12 @@ network access, or real audio.
 
 ## Current limitations
 
-- The Library's top-bar search is keyword-only (Step 5A.4.2 complete
-  with highlights, jump links and styling/a11y); semantic/hybrid
-  search is the separate POST-only `/recordings/search/` flow
-  (Step 5C), and Ask with citations is its own `/ask/` flow (Step 5D).
-  Keyword
-  matching is substring-style (FTS5
+- Search is the unified global top bar (Keyword/Semantic/Hybrid
+  selector) on every page: Keyword POSTs redirect to a bookmarkable
+  `/recordings/?q=...` page (keeping the active filters and view),
+  while Semantic/Hybrid run and navigate POST-only and their query
+  never enters a URL. Ask with citations is its own `/ask/` flow
+  (Step 5D). Keyword matching is substring-style (FTS5
   trigrams + a Unicode-folded LIKE fallback for 1–2-codepoint terms),
   not stemmed or word-tokenized.
 - No manual topic splitting, scheduling, or retention deletion yet

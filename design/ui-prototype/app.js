@@ -1,8 +1,11 @@
 /* ============================================================
-   Brain UI Prototype — Interactions (v3)
+   Brain UI Prototype — Interactions (v4)
    ============================================================
    DESIGN PROTOTYPE, not production code.
    View toggle, sort-aware grouping, localStorage, table render.
+   v4: Recording Detail is a single overview page (no Summary/
+   Transcript/History tabs); technical details use a native
+   <details> element — no tab/provenance JS remains.
    ============================================================ */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -339,42 +342,6 @@ document.addEventListener('DOMContentLoaded', () => {
     searchInput.value = savedQuery;
     updateView();
     showScreen('library', { restoreScroll: true });
-  });
-
-  // ---- Detail page tabs ----
-  document.querySelectorAll('.detail-nav-tab[data-panel]').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.detail-nav-tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.panel[data-panel]').forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      document.querySelector(`.panel[data-panel="${tab.dataset.panel}"]`)?.classList.add('active');
-    });
-  });
-
-  // ---- Language tabs ----
-  document.querySelectorAll('.lang-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      tab.closest('.lang-tabs').querySelectorAll('.lang-tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-    });
-  });
-
-  // ---- Provenance toggle ----
-  document.querySelectorAll('.provenance-toggle').forEach(btn => {
-    btn.addEventListener('click', () => {
-      btn.classList.toggle('open');
-      btn.nextElementSibling?.classList.toggle('open');
-    });
-  });
-
-  // ---- Copy button ----
-  document.querySelectorAll('.copy-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const orig = btn.textContent;
-      btn.textContent = 'Copied!';
-      btn.classList.add('copied');
-      setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 2000);
-    });
   });
 
   // ---- Confirmation dialog ----

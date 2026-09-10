@@ -38,6 +38,28 @@ from factories import (
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("forbid_external_effects")]
 
+
+def _mobile_media_block(css: str) -> str:
+    """Extract the ``@media (max-width: 40rem)`` block with balanced braces.
+
+    A naive non-greedy regex stops at the first closing brace; the block
+    contains nested rules, so a brace-counting scan is required.
+    """
+    marker = "@media (max-width: 40rem)"
+    start = css.find(marker)
+    assert start != -1, "mobile media block not found"
+    brace_start = css.find("{", start)
+    assert brace_start != -1
+    depth = 0
+    for index in range(brace_start, len(css)):
+        if css[index] == "{":
+            depth += 1
+        elif css[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return css[brace_start + 1 : index]
+    raise AssertionError("unbalanced mobile media block")
+
 # The Library page now carries the POST-only semantic/hybrid form, whose
 # CSRF token is randomized per response; determinism comparisons strip it.
 _CSRF_RE = re.compile(rb'name="csrfmiddlewaretoken" value="[^"]*"')
@@ -388,20 +410,24 @@ class TestLockedControls:
         assert str(needs_review.pk) in content
         assert str(ok.pk) not in content
 
-    def test_search_is_one_enabled_keyword_bar(self, client):
-        """5A.4.2a/Step 5C: the top-bar search field stays a functional
-        keyword GET; the semantic/hybrid form is a separate POST form."""
+    def test_search_is_one_enabled_unified_topbar(self, client):
+        """The unified top bar is the ONE query input (Keyword/Semantic/
+        Hybrid via a native select); no duplicate form remains in Library
+        content."""
         content = client.get("/recordings/").content.decode()
         search_inputs = re.findall(r'<input[^>]*type="search"[^>]*>', content)
-        assert len(search_inputs) == 2
+        assert len(search_inputs) == 1
         topbar = search_inputs[0]
         assert "disabled" not in topbar
         assert 'name="q"' in topbar
         assert "Search coming soon" not in content
         assert 'role="search"' in content
-        # The advanced Library form is POST-only and names local embeddings.
-        assert '<form method="post" action="/recordings/search/"' in content
-        assert "local embeddings" in content
+        # The single top bar is a POST to the dedicated endpoint with the
+        # native mode select and a CSRF token; no Library-content form.
+        assert '<form class="topbar-search" role="search" method="post" action="/recordings/search/">' in content
+        assert 'name="csrfmiddlewaretoken"' in content
+        assert '<select id="global-search-mode" name="mode"' in content
+        assert "vector-search" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -646,11 +672,37 @@ class TestMobileStatusLink:
 
     def test_mobile_css_does_not_hide_nav_button_labels(self):
         css = (Path(__file__).resolve().parent.parent / "src" / "static" / "workflow" / "base.css").read_text()
-        mobile = re.search(r"@media \(max-width: 40rem\)\s*\{(.*?)\}", css, re.S)
-        assert mobile is not None, "mobile media block not found"
-        assert ".topbar-btn .btn-label" not in mobile.group(1), (
+        block = _mobile_media_block(css)
+        assert ".topbar-btn .btn-label" not in block, (
             "mobile rule must not hide the only content of the Status link"
         )
+
+    def test_mobile_css_puts_search_on_its_own_full_width_row(self):
+        """The unified top bar cannot fit on one row at ~320px. The mobile
+        block must wrap the header (brand + navigation first, search on a
+        full-width second row), grow the fixed header/body spacing, and
+        keep the search input, mode select and submit button usable."""
+        css = (Path(__file__).resolve().parent.parent / "src" / "static" / "workflow" / "base.css").read_text()
+        block = _mobile_media_block(css)
+        # Header wraps and grows taller than the desktop 52px; body
+        # spacing tracks the two-row header.
+        assert "flex-wrap: wrap" in block
+        assert "padding-top: 5.75rem" in block
+        # The search form becomes its own full-width second row.
+        assert "flex: 1 1 100%" in block
+        assert "order: 3" in block
+        # The input, mode select and submit button are never hidden or
+        # width-capped into unusability. The only allowed ``display: none``
+        # on mobile is the decorative brand name.
+        assert ".topbar-search" in block
+        assert "#global-search-mode" in block
+        assert ".topbar-search-btn" in block
+        without_brand = re.sub(
+            r"\.topbar-brand-name\s*\{\s*display: none;\s*\}",
+            "",
+            block,
+        )
+        assert "display: none" not in without_brand
 
 
 # ---------------------------------------------------------------------------

@@ -1,18 +1,23 @@
-"""Web Keyword/Semantic/Hybrid modes (Step 5C — Task 6).
+"""Web Keyword/Semantic/Hybrid modes (Step 5C — Task 6 + unified top bar).
 
-Covers the approved contract: the keyword Library search stays an
-unchanged GET at ``/recordings/?q=...``; the dedicated
-``/recordings/search/`` endpoint is POST-only (GET is a 405 with no
-config/health/network/DB work) and CSRF-protected; semantic/hybrid
-delegate to their services with exactly one health sweep, one integrity
-traversal and one localhost embedding request (zero for an empty scope)
-and no keyword preflight; invalid filters reject BEFORE health/network
-instead of widening; the same Recording scope applies before both
-rankings; the query never enters a URL, redirect, log or error; result
-navigation (pagination/sort/filter/view) is POST-only with hidden
-server-validated state; card/table rendering, snippets, provenance and
-segment-link validation are shared with keyword search. All network is
-mocked; no real HTTP.
+Covers the approved contract: the global top bar is the ONLY query
+input and POSTs every mode to the dedicated ``/recordings/search/``
+endpoint (keyword POST redirects to the canonical bookmarkable GET
+``/recordings/?q=...`` preserving active ``filter_pairs`` and the
+effective view; blank keyword redirects to the plain Library);
+semantic/hybrid remain direct POST-only (GET is a 405 with no
+config/health/network/DB work) and their query never enters a URL;
+unknown modes reject with zero embedding; Library contexts ride hidden
+filter/view fields in the top bar while other pages search globally.
+Vector search delegates to its services with exactly one health sweep,
+one integrity traversal and one localhost embedding request (zero for an
+empty scope) and no keyword preflight; invalid filters reject BEFORE
+health/network instead of widening; the same Recording scope applies
+before both rankings; the query never enters a URL, redirect, log or
+error; result navigation (pagination/sort/filter/view) is POST-only
+with hidden server-validated state; card/table rendering, snippets,
+provenance and segment-link validation are shared with keyword search.
+All network is mocked; no real HTTP.
 """
 
 from __future__ import annotations
@@ -574,6 +579,169 @@ class TestPostNavigation:
 
 
 # ---------------------------------------------------------------------------
+# 6b. Unified top bar: one query input, keyword POST redirect, global scope
+# ---------------------------------------------------------------------------
+
+
+class TestUnifiedTopBar:
+    def _plain_config(self, tmp_path, monkeypatch):
+        config = make_config(tmp_path, web=default_web(recordings_per_page=25))
+        monkeypatch.setattr("workflow.views.recordings.get_config", lambda: config)
+        return config
+
+    def test_library_page_has_one_query_input_and_no_middle_section(
+        self, tmp_path, monkeypatch
+    ):
+        self._plain_config(tmp_path, monkeypatch)
+        content = Client().get("/recordings/").content.decode()
+        assert len(re.findall(r'<input[^>]*type="search"', content)) == 1
+        assert "vector-search" not in content
+        # Hidden Library-context fields ride the top bar: view always,
+        # filters only when active.
+        assert '<input type="hidden" name="view" value="cards">' in content
+        assert 'name="tag"' not in content
+
+    def test_keyword_post_redirects_to_canonical_get_with_filters_and_view(
+        self, tmp_path, monkeypatch
+    ):
+        self._plain_config(tmp_path, monkeypatch)
+        response = Client().post(
+            ENDPOINT,
+            {"mode": "keyword", "q": "alpha", "tag": "Project", "view": "table"},
+        )
+        assert response.status_code == 302
+        location = response.headers["Location"]
+        assert location == "/recordings/?q=alpha&tag=project&view=table"
+
+    def test_keyword_post_blank_query_redirects_to_plain_library(
+        self, tmp_path, monkeypatch
+    ):
+        self._plain_config(tmp_path, monkeypatch)
+        for payload in (
+            {"mode": "keyword", "q": "   ", "view": "cards"},
+            {"mode": "keyword", "view": "cards"},
+        ):
+            response = Client().post(ENDPOINT, payload)
+            assert response.status_code == 302
+            assert response.headers["Location"] == "/recordings/?view=cards"
+
+    def test_keyword_post_preserves_filter_pairs_and_effective_view(
+        self, tmp_path, monkeypatch
+    ):
+        self._plain_config(tmp_path, monkeypatch)
+        response = Client().post(
+            ENDPOINT,
+            {
+                "mode": "keyword",
+                "q": "alpha",
+                "from": "2026-08-01",
+                "to": "2026-09-02",
+                "tag": ["Work", "Meeting"],
+                "view": "cards",
+            },
+        )
+        assert response.status_code == 302
+        assert (
+            response.headers["Location"]
+            == "/recordings/?q=alpha&from=2026-08-01&to=2026-09-02&tag=work&tag=meeting&view=cards"
+        )
+
+    def test_keyword_post_followed_get_stays_read_only_keyword(
+        self, tmp_path, monkeypatch
+    ):
+        make_transcribed_recording(["alpha meeting discussion"], sha="kw-follow")
+        si.rebuild_index()
+        config = make_config(tmp_path, web=default_web(recordings_per_page=25))
+        monkeypatch.setattr("workflow.views.recordings.get_config", lambda: config)
+        _forbid_embedding(monkeypatch)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("a keyword GET must never embed")
+
+        monkeypatch.setattr(sq, "semantic_search", forbidden)
+        monkeypatch.setattr(sf, "hybrid_search", forbidden)
+        response = Client().post(
+            ENDPOINT, {"mode": "keyword", "q": "alpha", "view": "cards"}
+        )
+        content = Client().get(response.headers["Location"]).content.decode()
+        assert "search result" in content
+        assert "semantic search result" not in content
+
+    def test_vector_post_does_not_redirect_and_keeps_filters(
+        self, tmp_path, monkeypatch
+    ):
+        build_healthy(tmp_path, monkeypatch)
+        _patch_query_embedder(monkeypatch, keyword_embedder(["alpha", "beta"]))
+        response = Client().post(
+            ENDPOINT,
+            {"mode": "semantic", "q": "alpha", "tag": "Project", "view": "cards"},
+        )
+        assert response.status_code == 200
+        content = response.content.decode()
+        # Filters survive on the POST-only navigation forms...
+        assert 'name="tag" value="project"' in content
+        # ...and the QUERY never enters a URL (the Clear-search link may
+        # legitimately carry filters, exactly as before).
+        assert "?q=" not in content
+        assert "q=alpha" not in content
+
+    def test_vector_results_select_the_current_mode_in_the_top_bar(
+        self, tmp_path, monkeypatch
+    ):
+        build_healthy(tmp_path, monkeypatch)
+        _patch_query_embedder(monkeypatch, keyword_embedder(["alpha", "beta"]))
+        for mode in ("semantic", "hybrid"):
+            content = post(Client(), {"mode": mode, "q": "alpha", "view": "cards"})
+            assert f'<option value="{mode}" selected>' in content
+            assert '<option value="keyword" selected>' not in content
+            assert 'value="alpha"' in content  # echoed input for refinement
+
+    def test_failed_vector_search_clears_the_query_from_the_top_bar(
+        self, tmp_path, monkeypatch
+    ):
+        build_healthy(tmp_path, monkeypatch)
+        canary = "PRIVCANARYTOP"
+
+        def failing(config, texts):
+            raise EmbeddingHTTPError(503)
+
+        _patch_query_embedder(monkeypatch, failing)
+        content = post(Client(), {"mode": "semantic", "q": canary, "view": "cards"})
+        assert canary not in content
+        assert 'value="' + canary + '"' not in content
+        # The failed vector mode still renders its own select selection.
+        assert '<option value="semantic" selected>' in content
+
+    def test_non_library_pages_have_a_global_topbar_without_hidden_filters(
+        self, tmp_path, monkeypatch
+    ):
+        self._plain_config(tmp_path, monkeypatch)
+        from django.urls import reverse
+
+        for url in (reverse("status"), reverse("review"), reverse("ask")):
+            content = Client().get(url).content.decode()
+            assert '<form class="topbar-search" role="search" method="post"' in content
+            assert '<option value="keyword" selected>' in content
+            # No Library-context hidden fields: the search is global there.
+            assert 'name="view" value="' not in content
+            assert 'name="tag"' not in content
+
+    def test_invalid_mode_posts_reject_with_zero_embed_and_no_redirect(
+        self, tmp_path, monkeypatch
+    ):
+        self._plain_config(tmp_path, monkeypatch)
+        _forbid_embedding(monkeypatch)
+        _forbid_health(monkeypatch)
+        response = Client().post(ENDPOINT, {"mode": "bogus", "q": "alpha"})
+        assert response.status_code == 200
+        content = response.content.decode()
+        # The message is fixed text (rendered through template
+        # autoescaping); never an echoed mode or query.
+        assert "Choose a valid search mode" in content
+        assert "bogus" not in content
+
+
+# ---------------------------------------------------------------------------
 # 7. Rendering parity: snippets, marks, provenance, segment links
 # ---------------------------------------------------------------------------
 
@@ -720,15 +888,15 @@ class TestPurityAndPrivacy:
 
 
 class TestAccessibilityAndSafety:
-    def test_advanced_form_has_accessible_labels_and_roles(self, tmp_path, monkeypatch):
+    def test_topbar_has_accessible_labels_and_roles(self, tmp_path, monkeypatch):
         build_healthy(tmp_path, monkeypatch)
         content = Client().get("/recordings/").content.decode()
         assert 'role="search"' in content
-        assert 'for="id_vector_q"' in content
-        assert 'for="id_vector_mode"' in content
-        assert 'aria-label="Semantic or hybrid search query"' in content
-        assert 'aria-label="Semantic or hybrid search mode"' in content
-        assert "local embeddings" in content
+        assert 'for="global-search-mode"' in content
+        assert 'aria-label="Search mode"' in content
+        assert 'aria-label="Search transcripts, summaries and metadata"' in content
+        # The submit button is real markup, never generated HTML.
+        assert '<button type="submit" class="topbar-search-btn">Search</button>' in content
 
     def test_vector_mode_view_toggle_uses_submit_buttons(self, tmp_path, monkeypatch):
         build_healthy(tmp_path, monkeypatch)

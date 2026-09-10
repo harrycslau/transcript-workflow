@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from django.core.paginator import Paginator
 from django.http import Http404
-from django.shortcuts import get_object_or_404, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
 from workflow.models import ProcessingStatus, Recording, Summary, SummaryState, Transcript
@@ -184,18 +184,58 @@ def recording_list(request):
     return response
 
 
+def _keyword_search_redirect(request, config):
+    """Keyword POST → the canonical bookmarkable Library GET.
+
+    A keyword submission from the unified top bar redirects (302) to the
+    ordinary GET ``/recordings/?q=...`` page, preserving the canonical
+    active ``filter_pairs`` and the effective view. A blank/whitespace
+    query drops the query itself but still keeps the submitted filters
+    and view (exactly the GET behaviour where a missing/blank ``q`` is
+    the normal Library listing under those filters). The query text
+    enters the URL only in this keyword case; semantic/hybrid never
+    redirect.
+    """
+    import urllib.parse
+
+    from django.urls import reverse
+
+    raw_q = request.POST.get("q")
+    has_query = raw_q is not None and bool(raw_q.strip())
+    filters = list_filters(
+        request.POST, config.timezone, allow_relevance=has_query
+    )
+    params: dict[str, list[str]] = {}
+    if has_query:
+        params["q"] = [raw_q.strip()]
+    for name, value in filters.as_pairs():
+        params.setdefault(name, []).append(value)
+    params["view"] = [_effective_view(request)]
+    return redirect(
+        reverse("recordings") + "?" + urllib.parse.urlencode(params, doseq=True)
+    )
+
+
 @require_POST
 def recording_search(request):
-    """Dedicated POST-only semantic/hybrid Library search (Step 5C).
+    """Unified POST-only Library search (Step 5C extended).
 
     ``require_POST`` makes every GET a 405 BEFORE any config, health,
-    embedding or database work. The cheap mode/query/filter validation
-    runs before the service (which owns the one health sweep and at most
-    one localhost embedding request); invalid filters REJECT instead of
-    widening to an unscoped search. The response re-renders the ordinary
-    Library results template — no persistence, no redirect, no PRG; a
-    browser refresh deliberately reruns the search. The query never
-    appears in a URL, redirect, log or error.
+    embedding or database work. The unified top bar POSTs every mode here:
+
+    - ``keyword`` redirects to the canonical bookmarkable GET
+      ``/recordings/?q=...`` (preserving active ``filter_pairs`` and the
+      effective view); the query then lives only in that URL.
+    - ``semantic``/``hybrid`` stay direct POST-only: the cheap
+      mode/query/filter validation runs before the service (which owns
+      the one health sweep and at most one localhost embedding request);
+      invalid filters REJECT instead of widening to an unscoped search.
+      The response re-renders the ordinary Library results template — no
+      persistence, no redirect, no PRG; a browser refresh deliberately
+      reruns the search. The query never appears in a URL, redirect, log
+      or error.
+    - any other mode is rejected by the vector service with a fixed
+      message and zero embedding/network work.
     """
     config = get_config()
     view = _effective_view(request)
@@ -203,6 +243,8 @@ def recording_search(request):
     from workflow.services import search_web
 
     mode = (request.POST.get("mode") or "").strip().lower()
+    if mode == search_web.MODE_KEYWORD:
+        return _keyword_search_redirect(request, config)
     raw_q = request.POST.get("q")
     filters = list_filters(request.POST, config.timezone, allow_relevance=True)
     search = search_web.run_web_vector_search(

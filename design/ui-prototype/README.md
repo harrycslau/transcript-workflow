@@ -1,4 +1,4 @@
-# Brain — UI Design Prototype (v3)
+# Brain — UI Design Prototype (v4)
 
 > **This is a design prototype, not production code.**
 > All data is fictional. No real transcripts, recordings, or database content is used.
@@ -19,71 +19,60 @@ open design/ui-prototype/index.html
 - **Back to Library** preserves query, filters, and scroll position
 - View preference (Card/Table) is saved to `localStorage`
 - Press `/` to focus search from anywhere
+- **Technical details** on the Recording Detail page collapse/expand with a native `<details>` element (no JavaScript)
 
-## What changed from v2
+## What changed from v3
 
-### 1. Filter layout: two rows, no caption
+### 1. Recording Detail is now an overview page (proposal)
 
-The `FILTER` label is removed. Controls are self-explanatory in two rows:
+The v3 detail page duplicated the full Summary, Transcript and History
+inside three tabs. v4 replaces the tabs with a **single scannable
+overview** that gets you to status, actions and the full documents in a
+few seconds:
 
-- **Row 1**: From date, To date, Sort by dropdown, Card/Table view toggle
-- **Row 2**: Tags label + tag chips
+1. **Compact header** — title, date, duration, status badge, and
+   explicit links to the **Full summary / Transcript / History** pages.
+2. **Status / next-action panel** — one green panel stating the current
+   health and the single next action ("Transcribed · Summary current ·
+   No pending actions"). Problems (needs review, failed stage, missing
+   audio, pending regeneration) would replace the green panel and name
+   the concrete next step.
+3. **Compact tags** — the active tags plus the add-tag control, kept
+   tight beside the header.
+4. **Summary preview** — the Overview paragraph, exactly **3 key
+   points** and **2 action items**, then "Open full summary". The full
+   variant tabs, copy/export controls and provenance stay on the full
+   summary page.
+5. **Transcript preview** — exactly **5 segments**, then "Open
+   transcript — 187 segments".
+6. **Technical details** — a native collapsed `<details>` block with
+   Recording ID, SHA-256, source file, routing, transcription model,
+   summary model and summary provenance. IDs/hashes are hidden by
+   default so the page reads like a document, not a database row.
+7. **No attempts table and no full history** — History is one link, not
+   a duplicated table. All the historical detail remains reachable.
 
-No bordered card wraps the filters — they sit directly in the content flow with a subtle bottom border separator.
+The action bar stays sticky at the bottom ("Summary current · No
+pending actions" + Regenerate), so the expensive action is always one
+tap away without scrolling.
 
-### 2. Recording count: no sort duplication
+## Rationale
 
-The count reads `24 recordings` (or `1 recording` for singular). The Sort dropdown already communicates the active ordering — the count line does not repeat it.
+- **Decision first.** The detail page's primary job is answering "is
+  this recording OK, and what should I do next?" Tabs force the user to
+  hunt across duplicated content before that question is answered.
+- **One document at a time.** The full Summary and Transcript are
+  already long. Previewing them on the same page as the status
+  duplicates content and doubles the scrolling; links keep every full
+  document one click away.
+- **History is secondary.** Attempts tables matter during debugging, not
+  during daily review. A link preserves access without dominating the
+  page.
+- **Technical disclosure without noise.** IDs, hashes and model strings
+  are real privacy/audit data but visually loud. A native collapsed
+  block keeps them available without front-loading them.
 
-### 3. Month grouping: sort-aware
-
-Month headings (e.g., "September 2026") appear **only** for chronological sorts:
-- Newest first (descending)
-- Oldest first (ascending)
-
-For non-chronological sorts (Title A–Z, Title Z–A, Duration), month headings are hidden and the list renders as a continuous ungrouped sequence.
-
-When a search query is active and sorting by relevance, month headings are not shown.
-
-### 4. Card / Table view toggle
-
-A segmented toggle beside the Sort control switches between:
-
-- **Cards** (default): Rich cards with title, date, duration, excerpt, tags, language dots, and status badge
-- **Table**: Compact rows with columns for Date & time, Title + overview, Duration, Tags, Languages, and Status
-
-Table mode requirements met:
-- Entire row is clickable → Recording Detail
-- Long titles and tags truncate/wrap gracefully
-- Status uses text + colour (not colour alone)
-- Comfortable row height, restrained separators
-- Overview line beneath title (shows matched excerpt when searching)
-- Month group headers shown only for chronological sorts in table mode too
-- On mobile (<768px), table is hidden and cards are shown regardless of preference
-- The selected desktop preference is preserved (not lost on mobile fallback)
-
-View preference is stored in `localStorage` under `brain-view-mode`, not in any database.
-
-### 5. Mobile filter behavior
-
-On mobile:
-- Filter Row 1 (dates, sort, toggle) and Row 2 (tags) are hidden
-- A single "Filters" button opens a drawer with all controls
-- Active filter chips remain visible above the results even when the drawer is closed
-- Clearing filters works from both the drawer and the visible chips
-
-### 6. Prototype coverage
-
-The prototype demonstrates:
-
-1. Cards sorted by Newest — month headings visible (September, August groups)
-2. Cards sorted by Title A–Z — month headings hidden, continuous list
-3. Table sorted by Newest — month group separators in table rows
-4. Table sorted by Title A–Z — no month grouping, alphabetical order
-5. Search results with highlighted excerpts, no month headings
-6. Mobile filter drawer with active chip persistence
-
-## Information architecture
+## Information architecture (proposal)
 
 ```
 Top bar: [Brain] [Search + mode dropdown] [Review badge] [Status]
@@ -95,14 +84,63 @@ Filter area: Row 1 (dates, sort, view toggle) | Row 2 (tags)
 Results: Cards or Table — same data, same filters
               |
               v
-Recording Detail → Summary / Transcript / History tabs
+Recording Detail (overview):
+  compact header + Full summary / Transcript / History links
+  status / next-action panel
+  compact tags
+  Summary preview (overview + 3 key points + 2 actions → open full)
+  Transcript preview (5 segments → open transcript)
+  Technical details (native <details>: IDs/hash/source/routing/model)
+  sticky action bar (Regenerate)
 ```
+
+Full documents live on their own pages (Summary with variant tabs and
+exports; Transcript with segment pagination; History with attempts).
 
 ## Visual system
 
-Same as v2 — warm, calm, personal palette. No changes to tokens, typography, or component styles beyond the filter and table additions.
+Same as v3 — warm, calm, personal palette. The new overview adds only a
+green status panel, a detail-links row and the native technical-details
+block; no new tokens or component styles beyond those.
 
-## Current production behaviours preserved
+## Accessibility considerations (unchanged + v4 additions)
+
+- View toggle uses `role="radiogroup"` with `role="radio"` and `aria-checked`
+- Table rows are keyboard-accessible (native `<tr>` focusability)
+- Filter chips are `<button>` elements, not `<div onclick>`
+- `/` shortcut focuses search; `Escape` closes dropdown
+- Status badges use text + dot (not colour alone)
+- Active filter chips have explicit remove buttons with `aria-label`
+- Detail links carry explicit `aria-label`s ("Open the full summary",
+  "Open the full transcript (187 segments)")
+- Technical details use a native `<details>/<summary>` — keyboard and
+  screen-reader disclosure semantics for free
+- Status panel renders as `role="status"` so screen readers announce it
+
+## Questions for approval
+
+1. **Preview sizes.** The overview shows 3 key points, 2 action items
+   and 5 transcript segments. Are these the right bounds? Should the
+   summary preview include the full overview paragraph, or a clamped
+   version with "more"?
+
+2. **Action placement.** The sticky bottom action bar keeps Regenerate
+   one tap away. Should the next-action also appear inside the status
+   panel (e.g. a "Regenerate" button next to "No pending actions")?
+   Or should actions move into the header row?
+
+3. **Technical disclosure.** IDs, hashes, model names and routing are
+   collapsed inside a native `<details>` block. Should any field be
+   visible by default (e.g. transcription model in the header meta),
+   and is the summary-provenance summary line the right level of
+   detail?
+
+4. **Tags.** The overview keeps the full compact tag row with add-tag.
+   Should suggested tags be visually distinct here (as in the Library),
+   and should the "Confirm suggestion" action appear inline on the
+   overview or stay on the full summary page?
+
+## Current production behaviours preserved (for the proposal)
 
 - Default / Original / English / Traditional Chinese generation
 - Concrete existing variants readable
@@ -115,25 +153,3 @@ Same as v2 — warm, calm, personal palette. No changes to tokens, typography, o
 - Read-only GET pages
 - Processing and failure states
 - localhost-only operation
-
-## Accessibility considerations
-
-- View toggle uses `role="radiogroup"` with `role="radio"` and `aria-checked`
-- Table rows are keyboard-accessible (native `<tr>` focusability)
-- Filter chips are `<button>` elements, not `<div onclick>`
-- `/` shortcut focuses search; `Escape` closes dropdown
-- Month group separators in table use `<td colspan>` for screen reader context
-- Status badges use text + dot (not colour alone)
-- Active filter chips have explicit remove buttons with `aria-label`
-
-## Questions for approval
-
-1. **Table columns**: The prototype shows Date, Title+overview, Duration, Tags, Languages, Status. Should any column be added, removed, or reordered?
-
-2. **Overview line in table**: Each row shows a one-line truncated summary excerpt. In search mode, it highlights matched keywords. Is this useful, or too noisy for a dense table?
-
-3. **Sort options**: The prototype offers Newest, Oldest, Title A–Z, Title Z–A, and Duration. Are these the right set, or should others (e.g., Date discovered, processing status) be added?
-
-4. **Month group separator style**: In table mode, month groups appear as a full-width muted row spanning all columns. Is this the right visual treatment, or would a simpler approach work better?
-
-5. **Filter Row 2 placement**: Tags sit in a second row below dates/sort. Should they instead be inline in Row 1 (compact but potentially crowded), or in a third row?

@@ -868,16 +868,28 @@ Non-negotiable principles:
   - **Modes/CLI/web**: `brain search QUERY --mode keyword|semantic|hybrid`
     (default keyword with byte-for-byte parity; semantic/hybrid own the
     one-sweep/one-embed contract; exit 2 usage before health, exit 1
-    sanitized, no lock/recovery/write). The Library keyword GET
-    (`/recordings/?q=...`) is unchanged and strictly read-only (a forged
-    `mode=` on GET is ignored — GETs never embed/network); semantic/
-    hybrid web search is POST-only at `/recordings/search/` (GET = 405
-    with zero work, CSRF-protected), the query never enters a URL,
-    invalid scope filters REJECT (never widened to unscoped), every
-    service failure is ONE stable `unavailable` state with the query
-    cleared, and navigation (pagination/sort/filter/view) is POST-only
-    with hidden server-validated state; filters, provenance, snippets
-    and segment jump links are shared with keyword search.
+    sanitized, no lock/recovery/write). The web UI has ONE query input:
+    the global top bar carries a native Keyword/Semantic/Hybrid selector
+    and a submit button, and POSTs every mode (with CSRF) to
+    `/recordings/search/`. Keyword POST redirects (302) to the canonical
+    bookmarkable GET `/recordings/?q=...`, preserving the canonical
+    active `filter_pairs` and the effective view on Library contexts (a
+    blank query drops only the query text, keeping filters/view; from
+    non-Library pages the search is global, with no hidden Library
+    state); the direct keyword GET stays supported and strictly
+    read-only (a forged `mode=` on GET is ignored — GETs never
+    embed/network). Semantic/hybrid execute and navigate POST-only at
+    `/recordings/search/` (GET = 405 with zero work, CSRF-protected),
+    their query never enters a URL, redirect, log or error; invalid
+    scope filters REJECT (never widened to unscoped), every service
+    failure is ONE stable `unavailable` state with the query cleared
+    (never leaked back into the top-bar input), and navigation
+    (pagination/sort/filter/view) is POST-only with hidden
+    server-validated state; filters, provenance, snippets and segment
+    jump links are shared with keyword search. The current vector mode
+    is pre-selected in the top bar on rendered results, Keyword
+    otherwise. Mobile uses a two-row fixed header: brand + navigation on
+    the first row and the search form on a full-width second row.
   - **Verification (independently confirmed)**: full suite **2103
     collected and 2103 passed** (the 5B.4 state was 1783; the 5C delta
     is 320 tests — the five new Step 5C test files

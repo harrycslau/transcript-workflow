@@ -1,6 +1,7 @@
-# Project status — implementation handoff (Step 5D delivered)
+# Project status — implementation handoff (unified search top bar + Step 5D delivered)
 
-This file reflects the repository through Step 5D: Step 4, the
+This file reflects the repository through the unified production
+search top bar on top of Step 5D: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
@@ -25,33 +26,50 @@ fixed aggregate failure warning), the **Step 5C semantic and
 hybrid search** (`workflow/services/semantic_query.py` +
 `workflow/services/search_fusion.py`, the shared
 `search_query.CompiledScope`/`compile_scope` orchestration value, the
-`--mode keyword|semantic|hybrid` CLI, and the POST-only
-`/recordings/search/` web endpoint — the keyword Library GET is
-unchanged), and the **Step 5D Ask with Citations**
-(`workflow/services/ask.py` + the document-level evidence surface in
-`semantic_query.py`, `brain ask QUESTION [--json]`, and the `/ask/`
-GET-form/POST-execution page). Step 5D is delivered in the working
-tree and independently full-suite verified: **2191 collected and 2191
-passed** (only the known `audioop` deprecation warning), with
+`--mode keyword|semantic|hybrid` CLI, and the **unified global search
+top bar** — the ONE query input with a native Keyword/Semantic/Hybrid
+selector that POSTs every mode to `/recordings/search/`; keyword POST
+redirects to the canonical bookmarkable GET `/recordings/?q=...`
+preserving the active filters/view, semantic/hybrid run and navigate
+POST-only and never place the query in a URL, and the direct keyword
+GET stays supported and read-only), and the **Step 5D Ask with
+Citations** (`workflow/services/ask.py` + the document-level evidence
+surface in `semantic_query.py`, `brain ask QUESTION [--json]`, and the
+`/ask/` GET-form/POST-execution page). The `design/ui-prototype/`
+directory is now **v4**: a design-only prototype of a PROPOSED
+overview-oriented recording detail page (compact header + status/
+next-action panel + bounded summary/transcript previews + native
+collapsed technical details, no tabs/attempts table) using fictional
+data; the production recording detail view/template is unchanged. The
+working tree is independently full-suite verified: **2203 collected
+and 2203 passed** (only the known `audioop` deprecation warning), with
 `manage.py check` and `makemigrations --check` clean. No real-database
 migration or real embedding/chat network call is claimed. This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
 
-## Handoff audit — 2026-09-10 (updated for Step 5D)
+## Handoff audit — 2026-09-10 (updated for the unified top bar + Step 5D)
 
-Updates the previous audit (the Step 5C state) in place to record
-that the Step 5D Ask-with-Citations flow is now
-implemented in the working tree and independently full-suite verified
-(**2191 passed**). No real-database migration or real embedding/chat
-network call is claimed; the 5D work and its tests are in the working
-tree.
+Updates the previous audits (the Step 5C state and the Step 5D state)
+in place to record that (1) the Step 5D Ask-with-Citations flow is now
+implemented in the working tree, and (2) the production Library search
+was unified into a single global top-bar query input: a native
+Keyword/Semantic/Hybrid selector whose POST goes to
+`/recordings/search/` for every mode, keyword POSTs redirect to the
+canonical bookmarkable GET `/recordings/?q=...` (preserving the active
+filters/view), semantic/hybrid execute and navigate POST-only with the
+query never in a URL, the Library's middle semantic/hybrid section was
+removed, and mobile uses a two-row fixed header. The full suite is
+independently verified at the current state (**2203 passed**). No
+real-database migration or real embedding/chat network call is
+claimed; the work and its tests are in the working tree.
 
 **Observed facts**
 
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
-  configuration; implementation complete through Step 5D (Step 4
+  configuration; implementation complete through the unified search top
+  bar and Step 5D (Step 4
   web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
   with highlights and jump links, the pre-5B stability patch, the
@@ -59,12 +77,23 @@ tree.
   storage foundation: migration 0009 + generation/document models +
   vector codec, the Step 5B.3 embedding index status/rebuild/repair,
   the Step 5B.4 incremental embedding synchronization, the Step 5C
-  semantic/hybrid search with the POST-only web endpoint, and the
-  Step 5D Ask-with-Citations service/CLI/web flow).
-- Step 5D verification (independently confirmed, CURRENT state): the
-  full suite passes — **2191 collected and
-  2191 passed** (the Step 5C full-suite state was 2103 — historical;
-  the 5D delta is 88 tests: the three new Step 5D files
+  semantic/hybrid search with the unified global top-bar web input
+  (keyword POST → bookmarkable GET redirect; semantic/hybrid
+  POST-only, query never in a URL), and the
+  Step 5D Ask-with-Citations service/CLI/web flow). The
+  `design/ui-prototype/` directory is a v4 DESIGN-ONLY prototype of a
+  proposed overview-oriented recording detail page (fictional data);
+  the production recording detail view/template is unchanged.
+- Current verification (independently confirmed, CURRENT state): the
+  full suite passes — **2203 collected and
+  2203 passed** (the Step 5D full-suite state was 2191 — historical;
+  the unified-top-bar delta is **12 tests** — the
+  `TestUnifiedTopBar` class (10) in `tests/test_web_search_modes.py`,
+  `test_topbar_defaults_to_keyword_and_echoes_the_current_query` in
+  `tests/test_web_search.py`, and
+  `test_mobile_css_puts_search_on_its_own_full_width_row` in
+  `tests/test_web_library.py`; the Step 5D delta that reached 2191 is
+  88 tests: the three Step 5D files
   `tests/test_ask_service.py` (60),
   `tests/test_ask_cli.py` (9) and
   `tests/test_web_ask.py` (13) = **82 tests**, plus **5 additions**
@@ -183,7 +212,8 @@ permits metadata).
   All content autoescaped; no mark_safe/SafeString/`|safe`/generated
   HTML/inline JS/style.
 
-**Verification (independently confirmed)**: full suite **2191 collected
+**Verification (historical Step 5D delivery state, independently
+confirmed)**: full suite **2191 collected
 and 2191 passed** (the Step 5C state was 2103 — historical; the 5D delta
 is 88 tests: the three new Step 5D files —
 `tests/test_ask_service.py` (60), `tests/test_ask_cli.py` (9),
@@ -195,6 +225,8 @@ warning; `manage.py check`, `makemigrations --check` (NO migration) and
 `git diff --check` clean. No real network, no real MacWhisper/oMLX, no
 user data, no real embedding/chat network calls; the real
 `config/config.yaml` untouched; no real-database migration is claimed.
+The CURRENT working-tree state is **2203 collected and 2203 passed** —
+see the current audit at the top of this file.
 The next planned work is **Step 6**.
 
 ## Step 5C — Semantic and Hybrid Search (delivered in the working tree)
@@ -205,9 +237,10 @@ on a SEPARATE axis from the document `EMBEDDING_VERSION`) and
 `workflow/services/search_fusion.py` (pure RRF + the one-sweep
 `hybrid_search`), the shared immutable
 `search_query.CompiledScope`/`compile_scope` orchestration value, the
-`--mode keyword|semantic|hybrid` CLI, and the POST-only
-`/recordings/search/` web endpoint. The keyword Library GET stays
-unchanged; web GETs never embed or network.
+`--mode keyword|semantic|hybrid` CLI, and the **unified global search
+top bar** as the web delivery (see "Modes/CLI/web" below). The keyword
+Library GET stays supported and strictly read-only; web GETs never
+embed or network.
 
 - **Deterministic traversal (user correction incorporated)**: the
   complete active-generation corpus is read in deterministic
@@ -259,16 +292,28 @@ unchanged; web GETs never embed or network.
 - **Modes/CLI/web**: `brain search QUERY --mode keyword|semantic|hybrid`
   (default keyword with byte-for-byte parity; semantic/hybrid each own
   the one-sweep/one-embed contract; exit 2 usage before health, exit 1
-  sanitized, no lock/recovery/write). The Library keyword GET
-  (`/recordings/?q=...`) is unchanged and strictly read-only (a forged
-  `mode=` on GET is ignored — GETs never embed/network); semantic/
-  hybrid web search is POST-only at `/recordings/search/` (GET = 405
+  sanitized, no lock/recovery/write). The web UI has ONE query input:
+  the global top bar carries a native Keyword/Semantic/Hybrid selector
+  and a submit button, and POSTs every mode (with CSRF) to
+  `/recordings/search/`. Keyword POST redirects (302) to the canonical
+  bookmarkable GET `/recordings/?q=...`, preserving the canonical
+  active `filter_pairs` and the effective view on Library contexts (a
+  blank query drops only the query text, keeping filters/view; from
+  non-Library pages the search is global, with no hidden Library
+  state); the direct keyword GET stays supported and strictly
+  read-only (a forged `mode=` on GET is ignored — GETs never
+  embed/network). Semantic/hybrid execute and navigate POST-only at
+  `/recordings/search/` (GET = 405
   with zero work, CSRF-protected), the query never enters a URL,
   invalid scope filters REJECT (never widened to unscoped), every
   service failure is ONE stable `unavailable` state with the query
-  cleared, and navigation (pagination/sort/filter/view) is POST-only
+  cleared (never leaked back into the top-bar input), and navigation
+  (pagination/sort/filter/view) is POST-only
   with hidden server-validated state; filters, provenance, snippets
-  and segment jump links are shared with keyword search.
+  and segment jump links are shared with keyword search. The current
+  vector mode is pre-selected in the top bar on rendered results,
+  Keyword otherwise; mobile uses a two-row fixed header with the search
+  form on a full-width second row.
 - **Zero-vector policy (user correction incorporated)**: the shared
   5B.3/5B.4/5C usability layer (`embedding_index._vector_is_zero_norm`)
   classifies a structurally-valid all-zero float32 vector as unusable
@@ -295,7 +340,8 @@ user data, no real embedding network calls; the real
 `config/config.yaml` untouched; no new commit/HEAD or real-database
 migration is claimed — the work and its tests are in the working tree.
 Step 5D (Ask with Citations) is now delivered — see the Step 5D section
-at the top of this file.
+at the top of this file — and the unified global search top bar is
+delivered too — see the current audit at the top of this file.
 
 ## Step 5B.3 — Embedding index status/rebuild/repair (delivered in the working tree)
 
@@ -1822,9 +1868,15 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current (Step 5D tree, independently full-suite verified): the full
-  suite passes — **2191 collected
-  and 2191 passed** (the 5D delta is 88 tests: the three new Step 5D
+- Current (unified-top-bar + Step 5D tree, independently full-suite
+  verified): the full suite passes — **2203 collected
+  and 2203 passed** (the unified-top-bar delta is 12 tests: the
+  `TestUnifiedTopBar` class (10) in
+  `tests/test_web_search_modes.py`, `test_topbar_defaults_to_keyword_and_echoes_the_current_query`
+  in `tests/test_web_search.py`, and
+  `test_mobile_css_puts_search_on_its_own_full_width_row` in
+  `tests/test_web_library.py`; the Step 5D delta that reached 2191 is
+  88 tests: the three new Step 5D
   files — `tests/test_ask_service.py` (60),
   `tests/test_ask_cli.py` (9) and
   `tests/test_web_ask.py` (13) = 82 — plus 5 additions
@@ -1835,7 +1887,8 @@ Production Library UI are delivered.
   secret-hygiene sweeps), with the only warning the known
   `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
   `manage.py check`, `makemigrations --check` (NO migration) and
-  `git diff --check` pass. The historical full-suite states are 2103
+  `git diff --check` pass. The historical full-suite states are 2191
+  (Step 5D), 2103
   (Step 5C), 1783 (Step 5B.4), 1746 (Step 5B.3), 1632 (Step 5B.2),
   1499 (Step 5B.1) and 1404 (pre-5B stability patch).
 - Step 5B.1 full-suite state (historical, delivered and independently
@@ -1906,22 +1959,23 @@ Production Library UI are delivered.
 - `audioop` deprecation (Python 3.13 removal; revisit before upgrade).
 - Parked recordings (missing/out-of-inbox sources) wait for the next
   ingest/run; no proactive notification.
-- **Library web search is keyword-only (Step 5A.4.2 COMPLETE)**:
-  `brain search` remains the CLI entry point and `/recordings/` the
-  web entry; highlights, segment jump links and the search-row
-  styling/a11y polish are delivered. The Step 5B.1 embedding client and
-  the Step 5B.2 embedding storage foundation (generations + documents,
-  vector codec, migration 0009) are delivered; embedding index
-  production (status/rebuild/repair — Step 5B.3) and incremental
-  embedding synchronization (Step 5B.4) are delivered; **Step 5C
-  semantic/hybrid search is delivered** (CLI `--mode` plus the
-  POST-only `/recordings/search/` endpoint); **Step 5D Ask with
+- **Search is the unified global top bar (Step 5A.4.2 + Step 5C)**:
+  one Keyword/Semantic/Hybrid query input on every page — keyword POSTs
+  redirect to a bookmarkable `/recordings/?q=...` page, semantic/hybrid
+  run and navigate POST-only (query never in a URL); the direct keyword
+  GET stays supported and read-only. Highlights, segment jump links and
+  the search-row styling/a11y polish are delivered. The Step 5B.1
+  embedding client and the Step 5B.2 embedding storage foundation
+  (generations + documents, vector codec, migration 0009) are
+  delivered; embedding index production (status/rebuild/repair — Step
+  5B.3) and incremental embedding synchronization (Step 5B.4) are
+  delivered; **Step 5D Ask with
   Citations is delivered** (`brain ask QUESTION [--json]` plus the
   `/ask/` page).
   Keyword matching is substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
-  `brain search`'s full health gate REFUSING to serve (exit 1), with
+  the search health gates REFUSING to serve, with
   `search-index status` as the detailed detector and `rebuild` the
   repair (the sync contract never promises an out-of-band watchdog).
 

@@ -6,9 +6,9 @@ BEFORE limiting/pagination; sorting spans the returned match set;
 invalid-query and index-failure states clear the query (the rejected
 text appears NOWHERE in the response); links persist q/view/filters;
 GET stays strictly read-only with no N+1 growth; the five sort
-fallback rules hold; CJK short terms work end-to-end; the top-bar
-keyword GET form stays unchanged while a separate POST-only advanced
-form for semantic/hybrid lives in Library content (Step 5C).
+fallback rules hold; CJK short terms work end-to-end; the unified top
+bar is the ONE query input POSTing every mode (keyword → canonical
+GET redirect) to the dedicated endpoint (Step 5C + unified top bar).
 """
 
 from __future__ import annotations
@@ -589,30 +589,43 @@ class TestPrivacyAndControls:
         assert "项目" in content
         assert "match-segment" in content
 
-    def test_keyword_topbar_form_unchanged_and_advanced_form_is_post_only(self, client):
+    def test_unified_topbar_is_the_only_query_input(self, client):
         _healthy_corpus(("ctl-1", "budget review"))
         for url in ("/recordings/", "/recordings/?q=budget"):
             content = _page(client, url)
-            # The top-bar keyword form stays an unchanged GET to the
-            # Library (Step 5C never turns it into a POST).
+            # The global top bar is the ONE query input: a single POST
+            # form to the dedicated endpoint carrying the query, a native
+            # Keyword/Semantic/Hybrid select and a submit button.
             assert (
-                '<form class="topbar-search" role="search" method="get" action="/recordings/">'
-                in content
-            )
-            # The Library-content advanced form is a separate POST to the
-            # dedicated endpoint with a CSRF token and an explicit mode
-            # selector; semantic/hybrid are never GET links.
-            assert (
-                '<form method="post" action="/recordings/search/" class="vector-search-form" role="search">'
+                '<form class="topbar-search" role="search" method="post" action="/recordings/search/">'
                 in content
             )
             assert 'name="csrfmiddlewaretoken"' in content
+            assert '<select id="global-search-mode" name="mode"' in content
+            assert '<option value="keyword"' in content
             assert '<option value="semantic"' in content
             assert '<option value="hybrid"' in content
+            assert '<button type="submit" class="topbar-search-btn">Search</button>' in content
             assert 'href="/recordings/search/' not in content
-            # Two search inputs total: the unchanged top-bar keyword one
-            # plus the Library-content semantic/hybrid one.
-            assert len(re.findall(r'<input[^>]*type="search"', content)) == 2
+            # No duplicate query input remains in Library content: exactly
+            # one search input on the whole page.
+            assert len(re.findall(r'<input[^>]*type="search"', content)) == 1
+            # No semantic/hybrid section in Library content any more.
+            assert "vector-search" not in content
+
+    def test_topbar_defaults_to_keyword_and_echoes_the_current_query(self, client):
+        _healthy_corpus(("ctl-2", "budget review"))
+        # Plain Library: Keyword selected, empty input.
+        content = _page(client, "/recordings/")
+        assert '<option value="keyword" selected>' in content
+        assert '<option value="semantic">' in content
+        assert '<option value="hybrid">' in content
+        # Keyword GET results: Keyword stays selected and the input echoes
+        # the active query for refinement.
+        content = _page(client, "/recordings/?q=budget")
+        assert '<option value="keyword" selected>' in content
+        m = re.search(r'<input[^>]*name="q"[^>]*>', content)
+        assert 'value="budget"' in m.group(0)
 
     def test_invalid_and_index_pages_clear_the_top_bar_input(self, client):
         _healthy_corpus(("bar-1", "budget review"))

@@ -71,27 +71,6 @@
   {% endif %}
 </section>
 
-<section class="vector-search-area" aria-label="Semantic and hybrid search">
-  <form method="post" action="{% url 'recording-search' %}" class="vector-search-form" role="search">
-    {% csrf_token %}
-    <input type="hidden" name="view" value="{{ effective_view }}">
-    {% for name, value in filter_pairs %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
-    <div class="vector-search-field">
-      <label class="filter-group-label" for="id_vector_q">Semantic search</label>
-      <input type="search" id="id_vector_q" name="q" value="{% if vector_mode %}{{ search_query|default:'' }}{% endif %}" placeholder="Describe what you are looking for" aria-label="Semantic or hybrid search query">
-    </div>
-    <div class="vector-search-field">
-      <label class="filter-group-label" for="id_vector_mode">Mode</label>
-      <select id="id_vector_mode" name="mode" aria-label="Semantic or hybrid search mode">
-        <option value="semantic" {% if search_mode != 'hybrid' %}selected{% endif %}>Semantic</option>
-        <option value="hybrid" {% if search_mode == 'hybrid' %}selected{% endif %}>Hybrid</option>
-      </select>
-    </div>
-    <button type="submit" class="apply-btn">Search with local embeddings</button>
-    <span class="vector-search-hint muted">Semantic and hybrid search use local embeddings; the query is submitted by POST and never appears in the URL.</span>
-  </form>
-</section>
-
 {% if filter_errors %}
   <div class="messages" aria-live="polite">
     {% for error in filter_errors %}
