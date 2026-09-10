@@ -1,0 +1,18 @@
+{% if page.paginator.num_pages > 1 %}
+<nav class="pagination" aria-label="Pages">
+  <form method="post" action="{% url 'recording-search' %}" class="pagination-form">
+    {% csrf_token %}
+    <input type="hidden" name="mode" value="{{ search_mode }}">
+    <input type="hidden" name="q" value="{{ search_query|default:'' }}">
+    <input type="hidden" name="view" value="{{ effective_view }}">
+    {% for name, value in filter_pairs %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    {% if page.has_previous %}
+      <button type="submit" name="page" value="{{ page.previous_page_number }}" aria-label="Previous page">&laquo; Previous</button>
+    {% endif %}
+    <span class="muted">Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+    {% if page.has_next %}
+      <button type="submit" name="page" value="{{ page.next_page_number }}" aria-label="Next page">Next &raquo;</button>
+    {% endif %}
+  </form>
+</nav>
+{% endif %}

@@ -38,6 +38,14 @@ from factories import (
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("forbid_external_effects")]
 
+# The Library page now carries the POST-only semantic/hybrid form, whose
+# CSRF token is randomized per response; determinism comparisons strip it.
+_CSRF_RE = re.compile(rb'name="csrfmiddlewaretoken" value="[^"]*"')
+
+
+def _without_csrf(content: bytes) -> bytes:
+    return _CSRF_RE.sub(b'name="csrfmiddlewaretoken"', content)
+
 
 def _local(naive, tz_name="Europe/Helsinki"):
     return naive.replace(tzinfo=ZoneInfo(tz_name))
@@ -148,7 +156,7 @@ class TestSort:
             _summarize(rec, t, s, title="Same title", output_language="en")
         first = client.get("/recordings/?sort=title_az").content
         second = client.get("/recordings/?sort=title_az").content
-        assert first == second
+        assert _without_csrf(first) == _without_csrf(second)
 
     def test_invalid_sort_falls_back_to_newest_with_error(self, client):
         response = client.get("/recordings/?sort=banana")
@@ -381,18 +389,19 @@ class TestLockedControls:
         assert str(ok.pk) not in content
 
     def test_search_is_one_enabled_keyword_bar(self, client):
-        """5A.4.2a: the single top-bar search field is functional and
-        keyword-only. Semantic/Hybrid controls must not exist yet —
-        nothing may pretend to work."""
+        """5A.4.2a/Step 5C: the top-bar search field stays a functional
+        keyword GET; the semantic/hybrid form is a separate POST form."""
         content = client.get("/recordings/").content.decode()
         search_inputs = re.findall(r'<input[^>]*type="search"[^>]*>', content)
-        assert len(search_inputs) == 1
-        assert "disabled" not in search_inputs[0]
-        assert 'name="q"' in search_inputs[0]
+        assert len(search_inputs) == 2
+        topbar = search_inputs[0]
+        assert "disabled" not in topbar
+        assert 'name="q"' in topbar
         assert "Search coming soon" not in content
-        assert "Semantic" not in content
-        assert "Hybrid" not in content
         assert 'role="search"' in content
+        # The advanced Library form is POST-only and names local embeddings.
+        assert '<form method="post" action="/recordings/search/"' in content
+        assert "local embeddings" in content
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +574,7 @@ class TestUnicodeSort:
             _summarize(rec, t, s, "Same title", "en")
         first = client.get("/recordings/?sort=title_az").content
         second = client.get("/recordings/?sort=title_az").content
-        assert first == second
+        assert _without_csrf(first) == _without_csrf(second)
 
     def test_unicode_title_pagination_is_database_sorted(self, client):
         for index in range(30):

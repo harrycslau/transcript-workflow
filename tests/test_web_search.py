@@ -6,8 +6,9 @@ BEFORE limiting/pagination; sorting spans the returned match set;
 invalid-query and index-failure states clear the query (the rejected
 text appears NOWHERE in the response); links persist q/view/filters;
 GET stays strictly read-only with no N+1 growth; the five sort
-fallback rules hold; CJK short terms work end-to-end; no
-Semantic/Hybrid controls exist yet.
+fallback rules hold; CJK short terms work end-to-end; the top-bar
+keyword GET form stays unchanged while a separate POST-only advanced
+form for semantic/hybrid lives in Library content (Step 5C).
 """
 
 from __future__ import annotations
@@ -588,13 +589,30 @@ class TestPrivacyAndControls:
         assert "项目" in content
         assert "match-segment" in content
 
-    def test_no_semantic_or_hybrid_controls_anywhere(self, client):
+    def test_keyword_topbar_form_unchanged_and_advanced_form_is_post_only(self, client):
         _healthy_corpus(("ctl-1", "budget review"))
         for url in ("/recordings/", "/recordings/?q=budget"):
             content = _page(client, url)
-            assert "Semantic" not in content
-            assert "Hybrid" not in content
-            assert len(re.findall(r'<input[^>]*type="search"', content)) == 1
+            # The top-bar keyword form stays an unchanged GET to the
+            # Library (Step 5C never turns it into a POST).
+            assert (
+                '<form class="topbar-search" role="search" method="get" action="/recordings/">'
+                in content
+            )
+            # The Library-content advanced form is a separate POST to the
+            # dedicated endpoint with a CSRF token and an explicit mode
+            # selector; semantic/hybrid are never GET links.
+            assert (
+                '<form method="post" action="/recordings/search/" class="vector-search-form" role="search">'
+                in content
+            )
+            assert 'name="csrfmiddlewaretoken"' in content
+            assert '<option value="semantic"' in content
+            assert '<option value="hybrid"' in content
+            assert 'href="/recordings/search/' not in content
+            # Two search inputs total: the unchanged top-bar keyword one
+            # plus the Library-content semantic/hybrid one.
+            assert len(re.findall(r'<input[^>]*type="search"', content)) == 2
 
     def test_invalid_and_index_pages_clear_the_top_bar_input(self, client):
         _healthy_corpus(("bar-1", "budget review"))

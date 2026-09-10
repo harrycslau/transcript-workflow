@@ -32,7 +32,8 @@ Non-negotiable principles:
   - `src/workflow/` — Django app: `models.py`, `services/` (ingest,
     routing, transcription, summarize, chunking, rendering, tags,
     audiosamples, statemachine, pipeline, pipeline_lock, search_index,
-    search_sync, search_query, search_web, library_metadata,
+    search_sync, search_query, search_web, semantic_query,
+    search_fusion, library_metadata,
     variant_state, variant_view, web_actions, languages, langresolve,
     llm, tempcleanup, review), a `views/` package
     (`recordings.py`, `actions.py`, `exports.py`, `review.py`,
@@ -41,7 +42,8 @@ Non-negotiable principles:
     `context_processors.py`, `sqlite_unicode.py`, `templatetags/`,
     `migrations/`, and the Step-4/5A web templates under
     `src/templates/workflow/`. The full web UI (Step 4) plus the
-    Step 5A.1 Library and 5A.4.2 keyword search are delivered.
+    Step 5A.1 Library, 5A.4.2 keyword search and the Step 5C
+    semantic/hybrid search (POST-only endpoint) are delivered.
   - `src/manage.py` — conventional entry point only; the CLI is
     `brain` (`brainlib.cli:main`).
 
@@ -549,7 +551,8 @@ Non-negotiable principles:
   status/rebuild/repair) and 5B.4 (incremental synchronization) were
   NOT implemented and no `search_index`/`search_sync`/CLI/web changes
   were made (5B.3 has since been delivered — see the 5B.3 bullet
-  below). Verification (historical 5B.2 state): the full suite then
+  below; Step 5C has since been delivered too — see the Step 5C
+  bullet below). Verification (historical 5B.2 state): the full suite then
   passed — **1632 collected and 1632 passed** (the Step 5B.1
   full-suite state was 1499; the 5B.2 delta is the 133 new
   5B.2 tests below), with the only warning the known `audioop`
@@ -603,6 +606,10 @@ Non-negotiable principles:
   batches (no N+1, no unbounded accumulation). Malicious oversized
   vector BLOBs are classified by SQLite `length()` FIRST; only exact
   `dimensions*4`-byte blobs are fetched/decoded, in bounded chunks.
+  A structurally-valid but zero-norm (all-zero finite float32) vector is
+  a usability-layer `invalid_vector` (exact component-wise zero test —
+  no tolerance, never a threshold; a tiny nonzero subnormal stays
+  usable) — fail closed, never skipped or approximated.
   Active-only integrity determines usability: failed/building/superseded
   generations are counted but their documents never make a healthy
   active generation unhealthy. There is NO configured dimensions value:
@@ -639,7 +646,9 @@ Non-negotiable principles:
   fixed non-sensitive `SYNTHETIC_DIMENSION_PROBE` and creates an empty
   building generation (documented/tested). One HTTP request per batch,
   no retries; exact client cardinality/text pairing and one consistent
-  returned dimension across every batch are validated; vectors encoded
+  returned dimension across every batch are validated; a zero-norm
+  returned vector is rejected with one fixed sanitized error BEFORE any
+  write (never persisted, never promoted); vectors encoded
   with the codec. Each persisted batch is ONE bounded short transaction
   that rechecks every source key/content_hash before inserting
   (changed/missing source aborts/fails the generation — never false
@@ -653,8 +662,8 @@ Non-negotiable principles:
   snapshot, so boundary-shifted/unicode/delimiter values cannot
   collide. Before promotion: a fresh complete source health sweep
   PLUS complete current SearchDocument key/hash snapshot equality PLUS
-  target generation integrity (exact key/hash set and vector
-  dimensions/finiteness) in bounded reads. The final-validation →
+  target generation integrity (exact key/hash set and usable vectors —
+  dimensions, finiteness and nonzero norm) in bounded reads. The final-validation →
   promotion race (including unlocked web-tag/SearchDocument commits) is
   closed with `PRAGMA data_version`: capture before final validation,
   and in the SHORT promotion transaction acquire the SQLite write
@@ -700,10 +709,13 @@ Non-negotiable principles:
   building/failed/superseded/incompatible generation is never chosen);
   no remote dimension probe when no embedding work is needed. Reconciles
   the active generation against the current SearchDocuments via the same
-  bounded two-stream merge: missing/stale/invalid current keys are
+  bounded two-stream merge: missing/stale/invalid current keys (invalid
+  now includes stored zero-norm vectors) are
   re-embedded at most once (HTTP outside transactions; returned
   dimensions must equal the active generation's or the batch fails
-  requiring rebuild BEFORE any write) and active-generation orphans are
+  requiring rebuild BEFORE any write, and a zero-norm returned vector is
+  rejected with one fixed sanitized error BEFORE any write — it never
+  replaces an existing vector) and active-generation orphans are
   deleted in bounded pages with an in-transaction absence recheck. Each
   short write transaction re-reads source key/hash AND active-generation
   compatibility before the upsert; changed rows remain unresolved and
@@ -742,11 +754,10 @@ Non-negotiable principles:
   embedding storage (generations + documents + vector codec + migration
   0009); **5B.3 (delivered)** bounded embedding-index
   status/rebuild/repair (above); **5B.4 (delivered — see the dedicated
-  bullet below)** incremental embedding synchronization. Still NOT
-  implemented: **Step 5C semantic/hybrid retrieval** (the next work) —
-  explicitly no semantic retrieval, no web/GET changes, no
-  Ask-with-citations. Do not add semantic-search UI or Ask-with-citations
-  in this phase.
+  bullet below)** incremental embedding synchronization. **Step 5C
+  semantic/hybrid retrieval is now delivered too** (see the Step 5C
+  bullet below) — the still-NOT-implemented next work is **Step 5D
+  Ask-with-citations**; do not add Ask-with-citations in this phase.
 - **Step 5B.4 — Incremental embedding synchronization (delivered)**:
   `workflow/services/embedding_sync.py` is the ONLY incremental
   `EmbeddingDocument` writer; `embedding_index.py` keeps the explicit
@@ -770,12 +781,15 @@ Non-negotiable principles:
   current SearchDocuments in deterministic `document_key` keyset pages
   no larger than the validated `embedding.batch_size` (hard max 128),
   classifies correct/missing/stale/invalid per page with the SHARED
-  5B.3 length-first vector validation, embeds ONLY missing/stale/invalid
+  5B.3 length-first vector validation (invalid includes zero-norm
+  vectors), embeds ONLY missing/stale/invalid
   rows (one HTTP request per non-empty batch, outside all DB
   transactions) and upserts through the shared short-transaction batch
   writer that re-reads every source key/hash and the same active
   generation identity — concurrent source change or active promotion
-  produces no false provenance/write. Config is loaded FRESH inside the
+  produces no false provenance/write; a zero-norm endpoint vector is
+  rejected with the shared fixed sanitized error before any upsert
+  (the existing vector stays). Config is loaded FRESH inside the
   callback via `brainlib.config.load_config` (only when an active
   generation exists); no active generation or an incompatible active
   generation is a normal no-op (zero network/DML/log; status/rebuild is
@@ -796,15 +810,92 @@ Non-negotiable principles:
   warning; `manage.py check`, `makemigrations --check` (no migration)
   and `git diff --check` clean. No commit, real-database migration, or
   real embedding network call is claimed; all tests are mocked/network-free.
-- **Step 5C — Semantic and Hybrid Search**: bounded semantic retrieval
-  plus deterministic keyword/semantic fusion; retain per-Recording
-  deduplication, date/tag scope filters, provenance, and explicit stale/
-  unavailable states. Add Keyword/Semantic/Hybrid modes to CLI and web.
+- **Step 5C — Semantic and Hybrid Search (delivered)**: the read-only
+  engines are `workflow/services/semantic_query.py` (pure query
+  validation/`prepare_query_text`, `SEMANTIC_QUERY_VERSION="1"` on a
+  SEPARATE axis from the document `EMBEDDING_VERSION`, numerically-safe
+  cosine, the exact grouped per-recording top-K primitive
+  `select_semantic_winners`, and the scoped `semantic_search` engine
+  plus the reusable `semantic_rank`/`SemanticSnapshot`/`embed_query_vector`
+  snapshot entry points) and `workflow/services/search_fusion.py`
+  (pure RRF + the one-sweep `hybrid_search`), with
+  `search_query.CompiledScope`/`compile_scope` as the shared immutable
+  compiled-scope value. Strictly read-only: SELECT/PRAGMA plus EXACTLY
+  ONE localhost embedding request, no lock/rebuild/repair/sync, no
+  logs, no retries, no keyword-only fallback.
+  - **Deterministic traversal**: the complete active-generation corpus
+    is read in deterministic `(recording_id, document_key)` order
+    (keyset-paged, exact `.only()` projection, title/body/aux TextFields
+    never loaded), in-scope documents are scored, and ONE Recording's
+    best document (per-recording comparator: cosine desc, doc-type rank
+    summary<recording<segment, document_key, recording id) is finished
+    BEFORE its single provenance-only winner enters the global top-K
+    heap (≤ 200) — the best-last regression (a Recording's best
+    document sorted LAST inside its group decides K membership) is
+    proven. Brute-force corpus-linear but bounded-memory: every in-scope
+    vector decoded exactly once (shared `embedding_index._classify_active_page`,
+    length-first), the heap/results retain metadata only (never K
+    vectors), excerpts are a winner-only bounded SUBSTR fetch.
+  - **Integrity/concurrency**: exactly ONE complete source health sweep
+    (`search_index.build_status_report`) + ONE global active-generation
+    integrity traversal + ONE query embedding per search (ZERO for an
+    empty scope/corpus), `PRAGMA data_version` guarded before/after, and
+    a final complete active-identity re-read; ANY mismatch or ANY global
+    integrity defect (missing/stale/orphan/wrong-length/non-finite/zero
+    — in-scope or out) fails closed with a fixed sanitized error and no
+    partial results; requires exactly one compatible ACTIVE generation
+    (exact model/`EMBEDDING_VERSION`/`INDEX_VERSION`). Zero-norm STORED
+    vectors fail closed as the role-appropriate `invalid_document_vector`
+    in queries and are `invalid_vector` in `embedding-index status`/
+    repair; a zero QUERY vector is `invalid_query_vector`.
+  - **Hybrid fusion**: exactly ONE source health sweep, ONE integrity
+    traversal and ONE query embedding with a SHARED
+    `CompiledScope`/`SemanticSnapshot` (the Recording scope QuerySet is
+    compiled EXACTLY ONCE via the exact keyword compiler; both
+    components consume the SAME immutable value, and the keyword
+    component calls `search_recordings(compiled_scope=...)` directly —
+    never `preflight_full_health`, no keyword re-gate). Both components
+    run at depth 200 (`HYBRID_DEPTH`); fusion is pure RRF (k=60,
+    one-based ranks, `1/(60+rank)` over PRESENT components — absence is
+    returned-depth, never a corpus nonmatch), deterministic order RRF
+    desc, presence count desc, min present rank, max present rank,
+    canonical recording id; `truncated` = either component truncated;
+    `more_recordings_matched` is exact `len(fused)-final_count` ONLY
+    when both component populations are proved complete, else null; no
+    weights/raw-score normalization; presentation prefers keyword
+    evidence (highlights preserved) with an `evidence` block
+    (keyword_rank/semantic_rank/semantic_cosine/rrf_score).
+  - **Modes/CLI/web**: `brain search QUERY --mode keyword|semantic|hybrid`
+    (default keyword with byte-for-byte parity; semantic/hybrid own the
+    one-sweep/one-embed contract; exit 2 usage before health, exit 1
+    sanitized, no lock/recovery/write). The Library keyword GET
+    (`/recordings/?q=...`) is unchanged and strictly read-only (a forged
+    `mode=` on GET is ignored — GETs never embed/network); semantic/
+    hybrid web search is POST-only at `/recordings/search/` (GET = 405
+    with zero work, CSRF-protected), the query never enters a URL,
+    invalid scope filters REJECT (never widened to unscoped), every
+    service failure is ONE stable `unavailable` state with the query
+    cleared, and navigation (pagination/sort/filter/view) is POST-only
+    with hidden server-validated state; filters, provenance, snippets
+    and segment jump links are shared with keyword search.
+  - **Verification (independently confirmed)**: full suite **2103
+    collected and 2103 passed** (the 5B.4 state was 1783; the 5C delta
+    is 320 tests — the five new Step 5C test files
+    `tests/test_semantic_query.py` (69), `tests/test_semantic_search.py`
+    (42), `tests/test_search_fusion.py` (43),
+    `tests/test_search_cli_modes.py` (32) and `tests/test_web_search_modes.py`
+    (40) = 310 tests, plus 10 additions across
+    `tests/test_embedding_index_service.py`, `tests/test_embedding_index_sync.py`
+    and `tests/test_migration_readiness.py`), only the known `audioop`
+    warning; `manage.py check`, `makemigrations --check` (no migration)
+    and `git diff --check` clean. No commit, real-database migration, or
+    real embedding network call is claimed; all tests are mocked/network-free.
 - **Step 5D — Ask with Citations**: bounded retrieval into the local LLM
   with citations that resolve only to actually retrieved transcript
   segments or summaries, including transcript jump links. Never invent
   citations; report insufficient evidence. Initial CLI/web delivery
   does not persist question/answer history unless separately approved.
+  **NOT implemented — next work** (do not add in this phase).
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (deletion only after successful
   processing + retention delay), launchd scheduling.

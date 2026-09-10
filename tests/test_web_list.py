@@ -15,6 +15,7 @@ Proves (per the approved plan):
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -39,6 +40,14 @@ from workflow.query import ListFilters, recording_list_queryset
 from factories import make_summary_version, make_tag, make_tag_assignment, make_transcribed_recording
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("forbid_external_effects")]
+
+# The Library page now carries the POST-only semantic/hybrid form, whose
+# CSRF token is randomized per response; determinism comparisons strip it.
+_CSRF_RE = re.compile(rb'name="csrfmiddlewaretoken" value="[^"]*"')
+
+
+def _without_csrf(content: bytes) -> bytes:
+    return _CSRF_RE.sub(b'name="csrfmiddlewaretoken"', content)
 
 
 def _local(naive, tz_name="Europe/Helsinki"):
@@ -88,7 +97,9 @@ class TestOrdering:
         b, _t2, _s2 = _make_recording(2, recorded_at=same_time)
         first_response = client.get("/recordings/")
         second_response = client.get("/recordings/")
-        assert first_response.content == second_response.content
+        assert _without_csrf(first_response.content) == _without_csrf(
+            second_response.content
+        )
 
 
 class TestDateFilters:

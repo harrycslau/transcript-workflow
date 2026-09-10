@@ -850,6 +850,72 @@ class TestFailureSafety:
             "category=embedding_index_sync_failed count=1"
         ]
 
+    def test_zero_endpoint_vector_rejected_no_upsert(self, tmp_path, monkeypatch):
+        # Direct-API focused regression: a zero vector returned by the
+        # endpoint during incremental sync is rejected with the fixed
+        # sanitized error and never upserted over the existing vector.
+        rec, transcript, config = self._fresh_stale_work(
+            tmp_path, monkeypatch, sha="emb-sync-zero"
+        )
+        gen = active_generation()
+        key = f"segment:{transcript.pk}:0"
+        old_blob = EmbeddingDocument.objects.get(
+            generation=gen, document_key=key
+        ).vector_blob
+
+        def zero_embedder(config, texts):
+            return [
+                EmbeddingBatch(text=t, embedding=tuple([0.0] * gen.dimensions))
+                for t in texts
+            ]
+
+        assert embedding_sync.capture_removed_key_snapshot(rec.pk) is True
+        with pytest.raises(ei.EmbeddingIndexError, match="zero-norm vector"):
+            embedding_sync.sync_recording_embeddings(rec.pk, embedder=zero_embedder)
+        # the zero replacement was never upserted; the row stays stale
+        assert (
+            EmbeddingDocument.objects.get(generation=gen, document_key=key).vector_blob
+            == old_blob
+        )
+        assert ei.build_embedding_status_report(config)["healthy"] is False
+
+    def test_zero_endpoint_vector_callback_nonfatal_fixed_warning(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        # Through the real post-commit callback the zero-vector rejection
+        # stays nonfatal and keeps the fixed aggregate warning contract
+        # unchanged (no ids/values/exception text in the log).
+        rec, transcript, config = self._fresh_stale_work(
+            tmp_path, monkeypatch, sha="emb-sync-zero-cb"
+        )
+        gen = active_generation()
+        key = f"segment:{transcript.pk}:0"
+        old_blob = EmbeddingDocument.objects.get(
+            generation=gen, document_key=key
+        ).vector_blob
+
+        def zero_embedder(config, texts):
+            return [
+                EmbeddingBatch(text=t, embedding=tuple([0.0] * gen.dimensions))
+                for t in texts
+            ]
+
+        monkeypatch.setattr(
+            "workflow.services.embedding_index.embed_texts", zero_embedder
+        )
+        with caplog.at_level(logging.WARNING):
+            schedule_via_atomic(rec.pk)
+        assert (
+            EmbeddingDocument.objects.get(generation=gen, document_key=key).vector_blob
+            == old_blob
+        )
+        messages = embed_warning_messages(caplog)
+        assert messages == [
+            "embedding index post-commit sync failed "
+            "category=embedding_index_sync_failed count=1"
+        ]
+        assert search_warning_messages(caplog) == []
+
     def test_malformed_response_no_false_write(self, tmp_path, monkeypatch, caplog):
         rec, transcript, config = self._fresh_stale_work(
             tmp_path, monkeypatch, sha="emb-sync-malformed"

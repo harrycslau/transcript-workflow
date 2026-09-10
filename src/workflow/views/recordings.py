@@ -10,6 +10,7 @@ from __future__ import annotations
 from django.core.paginator import Paginator
 from django.http import Http404
 from django.shortcuts import get_object_or_404, render
+from django.views.decorators.http import require_POST
 
 from workflow.models import ProcessingStatus, Recording, Summary, SummaryState, Transcript
 from workflow.query import (
@@ -30,8 +31,11 @@ VIEW_COOKIE_MAX_AGE = 31536000  # one year
 
 def _effective_view(request) -> str:
     """Explicit valid ``view=`` wins; otherwise the validated cookie;
-    otherwise cards. Invalid values fall back safely, never an error."""
-    view = (request.GET.get("view") or "").strip().lower()
+    otherwise cards. Invalid values fall back safely, never an error.
+    Reads the POST body for POST-only vector searches and the query
+    string for ordinary GET requests."""
+    source = request.POST if request.method == "POST" else request.GET
+    view = (source.get("view") or "").strip().lower()
     if view in VALID_VIEWS:
         return view
     cookie = (request.COOKIES.get(VIEW_COOKIE) or "").strip().lower()
@@ -40,12 +44,69 @@ def _effective_view(request) -> str:
     return "cards"
 
 
+def _request_view_value(request):
+    """The explicit ``view=`` value from the request's own method body,
+    or ``None`` when absent/invalid (used only for the cookie decision)."""
+    source = request.POST if request.method == "POST" else request.GET
+    view = (source.get("view") or "").strip().lower()
+    return view if view in VALID_VIEWS else None
+
+
+def _search_result_context(*, search, filters, view, configured_tags):
+    """Shared render context for keyword GET and vector POST results.
+
+    Keyword results keep their GET ``search_qs``/``base_qs`` navigation;
+    vector results carry ``filter_pairs``/``search_mode`` so the template
+    renders POST-only navigation (the query never enters a URL)."""
+    from workflow.services import search_web
+
+    filter_messages = list(filters.errors)
+    if filters.sort_error:
+        filter_messages.append(filters.sort_error)
+    search_qs = ""
+    if not search.is_vector and search.echo_query:
+        import urllib.parse
+
+        search_qs = urllib.parse.urlencode({"q": search.echo_query})
+    filters_qs = filters.as_querystring()
+    if search.is_vector:
+        # No GET navigation for vector results: the query is never
+        # encoded into a URL; every control is a POST form.
+        base_qs = ""
+    else:
+        base_parts = [part for part in (search_qs, filters_qs) if part]
+        base_qs = "&".join(base_parts + [f"view={view}"])
+    return {
+        "searching": True,
+        "search": search,
+        # None on invalid/index/unavailable states: the rejected query is
+        # never echoed anywhere in the response.
+        "search_query": search.echo_query,
+        "search_qs": search_qs,
+        "note_unscoped": (
+            search_web.NOTE_UNSCOPED_FILTERS if search.unscoped_filters else ""
+        ),
+        "filters": filters,
+        "filter_errors": filter_messages,
+        "filters_qs": filters_qs,
+        "filter_pairs": filters.as_pairs(),
+        "base_qs": base_qs,
+        "effective_view": view,
+        "vector_mode": search.is_vector,
+        "search_mode": search.mode,
+        "show_month_headings": filters.sort in ("newest", "oldest"),
+        "configured_tags": configured_tags,
+    }
+
+
 def recording_list(request):
     config = get_config()
     raw_q = request.GET.get("q")
     # A missing or blank/whitespace q is the NORMAL Library: no
     # validation, no health gate, no engine call — never an
-    # "invalid query" state.
+    # "invalid query" state. A forged ``mode=semantic|hybrid`` on a GET
+    # is IGNORED: GET stays strictly read-only keyword/library, with zero
+    # embedding or network calls.
     searching = raw_q is not None and bool(raw_q.strip())
     # Search mode extends the sort contract (relevance default/fallback
     # through the structured sort_error channel); Library mode is the
@@ -67,42 +128,19 @@ def recording_list(request):
             segments_per_page=config.web.transcript_segments_per_page,
         )
 
-    filters_qs = filters.as_querystring()
-    search_qs = ""
-    if search is not None and search.echo_query:
-        import urllib.parse
-
-        search_qs = urllib.parse.urlencode({"q": search.echo_query})
-
     if search is not None:
         # Search results REPLACE the normal Library list on this same
         # page. The engine already applied filters, truncation flags
         # and ranking; sorting/pagination happened in the service —
         # this branch only renders.
-        filter_messages = list(filters.errors)
-        if filters.sort_error:
-            filter_messages.append(filters.sort_error)
-        base_parts = [part for part in (search_qs, filters_qs) if part]
-        base_qs = "&".join(base_parts + [f"view={view}"])
-        context = {
-            "searching": True,
-            "search": search,
-            # None on invalid/index states: the rejected query is never
-            # echoed anywhere in the response.
-            "search_query": search.echo_query,
-            "search_qs": search_qs,
-            "note_unscoped": (
-                search_web.NOTE_UNSCOPED_FILTERS if search.unscoped_filters else ""
-            ),
-            "filters": filters,
-            "filter_errors": filter_messages,
-            "filters_qs": filters_qs,
-            "base_qs": base_qs,
-            "effective_view": view,
-            "show_month_headings": filters.sort in ("newest", "oldest"),
-            "configured_tags": Tag.objects.filter(is_configured=True).order_by("name"),
-        }
+        context = _search_result_context(
+            search=search,
+            filters=filters,
+            view=view,
+            configured_tags=Tag.objects.filter(is_configured=True).order_by("name"),
+        )
     else:
+        filters_qs = filters.as_querystring()
         queryset = recording_list_queryset()
         if filters.valid:
             queryset = apply_filters(queryset, filters, config.timezone)
@@ -120,19 +158,75 @@ def recording_list(request):
             "filters": filters,
             "filter_errors": filters.errors,
             "filters_qs": filters_qs,
+            "filter_pairs": filters.as_pairs(),
             "base_qs": base_qs,
             "effective_view": view,
+            "vector_mode": False,
+            "search_mode": "",
             "show_month_headings": filters.sort in ("newest", "oldest"),
             "configured_tags": Tag.objects.filter(is_configured=True).order_by("name"),
         }
 
     response = render(request, "workflow/recording_list.html", context)
-    if request.GET.get("view") in VALID_VIEWS:
+    explicit_view = _request_view_value(request)
+    if explicit_view is not None:
         # Server-owned preference; explicit query param always wins over
         # the cookie, and a valid explicit value refreshes it.
         response.set_cookie(
             VIEW_COOKIE,
-            view,
+            explicit_view,
+            max_age=VIEW_COOKIE_MAX_AGE,
+            samesite="Lax",
+            path="/",
+            httponly=True,
+            secure=request.is_secure(),
+        )
+    return response
+
+
+@require_POST
+def recording_search(request):
+    """Dedicated POST-only semantic/hybrid Library search (Step 5C).
+
+    ``require_POST`` makes every GET a 405 BEFORE any config, health,
+    embedding or database work. The cheap mode/query/filter validation
+    runs before the service (which owns the one health sweep and at most
+    one localhost embedding request); invalid filters REJECT instead of
+    widening to an unscoped search. The response re-renders the ordinary
+    Library results template — no persistence, no redirect, no PRG; a
+    browser refresh deliberately reruns the search. The query never
+    appears in a URL, redirect, log or error.
+    """
+    config = get_config()
+    view = _effective_view(request)
+    from workflow.models import Tag
+    from workflow.services import search_web
+
+    mode = (request.POST.get("mode") or "").strip().lower()
+    raw_q = request.POST.get("q")
+    filters = list_filters(request.POST, config.timezone, allow_relevance=True)
+    search = search_web.run_web_vector_search(
+        mode=mode,
+        raw_query=raw_q,
+        filters=filters,
+        timezone_name=config.timezone,
+        page_number=request.POST.get("page"),
+        per_page=config.web.recordings_per_page,
+        config=config,
+        segments_per_page=config.web.transcript_segments_per_page,
+    )
+    context = _search_result_context(
+        search=search,
+        filters=filters,
+        view=view,
+        configured_tags=Tag.objects.filter(is_configured=True).order_by("name"),
+    )
+    response = render(request, "workflow/recording_list.html", context)
+    explicit_view = _request_view_value(request)
+    if explicit_view is not None:
+        response.set_cookie(
+            VIEW_COOKIE,
+            explicit_view,
             max_age=VIEW_COOKIE_MAX_AGE,
             samesite="Lax",
             path="/",

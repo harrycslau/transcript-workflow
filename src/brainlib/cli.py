@@ -10,11 +10,12 @@ Commands:
   brain summarize [ID] [--regenerate]
   brain summaries ID | brain summary ID [--format markdown|text|json]
   brain tags [--sync]        Summarization, rendering, and tag commands (Step 3).
-  brain search "QUERY" [--limit N]
-                             Read-only keyword search (no lock, never
-                             rebuilds; exit 1 when the index is missing,
-                             broken or stale; 2 on malformed query; --json;
-                             --limit up to 200, default 50).
+  brain search "QUERY" [--mode keyword|semantic|hybrid] [--limit N]
+                             Read-only search (no lock, never rebuilds;
+                             keyword is the default mode; exit 1 when the
+                             index/embedding generation is missing, broken,
+                             stale or unavailable; 2 on malformed query;
+                             --json; --limit up to 200, default 50).
   brain search-index status  Read-only search index health (no lock; exit 1
                              when the index is not built, stale, inconsistent
                              or the FTS table is missing/broken).
@@ -700,7 +701,9 @@ def _decorate_snippet(snippet: dict) -> str:
     text = snippet["text"]
     parts: list[str] = []
     position = 0
-    for match in snippet["matches"]:
+    # Keyword snippets carry offset ranges; semantic snippets are plain
+    # unmarked text (``matches`` absent). Both render safely.
+    for match in snippet.get("matches") or []:
         parts.append(text[position : match["start"]])
         parts.append(f"\u00ab{text[match['start'] : match['end']]}\u00bb")
         position = match["end"]
@@ -720,17 +723,47 @@ def _search_source_label(match: dict) -> str:
     return "metadata"
 
 
-def _print_search_human(payload: dict) -> None:
+def _evidence_suffix(evidence) -> str:
+    """Compact component-rank suffix for a hybrid result, e.g.
+    ``  (kw #1, sem #2)``. Missing/absent component ranks are omitted;
+    nothing but integer ranks is ever printed (no vectors or scores)."""
+    if not isinstance(evidence, dict):
+        return ""
+    parts: list[str] = []
+    keyword_rank = evidence.get("keyword_rank")
+    semantic_rank = evidence.get("semantic_rank")
+    if isinstance(keyword_rank, int) and not isinstance(keyword_rank, bool):
+        parts.append(f"kw #{keyword_rank}")
+    if isinstance(semantic_rank, int) and not isinstance(semantic_rank, bool):
+        parts.append(f"sem #{semantic_rank}")
+    if not parts:
+        return ""
+    return "  (" + ", ".join(parts) + ")"
+
+
+def _print_search_human(payload: dict, *, mode: str = "keyword", evidence: bool = False) -> None:
+    """Human search output.
+
+    The default ``mode="keyword"`` rendering is byte-for-byte identical
+    to the historical Step 5A.4.1 output. Semantic/hybrid runs get the
+    same provenance labels plus a concise ``[mode]`` header; semantic
+    snippets are plain (unmarked) text, and hybrid rows may carry compact
+    component ranks.
+    """
     query = payload["query"]
     results = payload["results"]
+    suffix = "" if mode == "keyword" else f" [{mode}]"
     if not results:
-        print(f'no results for "{query}"')
+        print(f'no results for "{query}"{suffix}')
         return
-    print(f'{payload["result_count"]} result(s) for "{query}"')
+    print(f'{payload["result_count"]} result(s) for "{query}"{suffix}')
     for item in results:
         title = item["title"] or "(untitled)"
         label = _search_source_label(item["match"])
-        print(f'{item["rank"]}. {title}  [{label}]')
+        line = f'{item["rank"]}. {title}  [{label}]'
+        if evidence:
+            line += _evidence_suffix(item.get("evidence"))
+        print(line)
         snippet = item["snippet"]
         if snippet is not None:
             print(f"   {_decorate_snippet(snippet)}")
@@ -742,11 +775,15 @@ def _print_search_human(payload: dict) -> None:
 
 
 def cmd_search(args) -> int:
-    """``brain search QUERY`` (Step 5A.4.1) — strictly read-only.
+    """``brain search QUERY`` (Step 5A.4.1 / Step 5C) — strictly read-only.
 
-    Order: config/Django/schema preflight -> input validation (exit 2)
-    -> the FULL read-only health preflight EXACTLY once (exit 1: missing,
-    broken or stale index; never rebuilds) -> the query engine. Never
+    Order: config/Django/schema preflight -> cheap mode-appropriate input
+    validation (exit 2, before any health/network work) -> the query
+    engine. ``keyword`` (default) runs the FULL read-only health preflight
+    EXACTLY once and then ``search_recordings`` (no embedding config or
+    network). ``semantic``/``hybrid`` delegate to their services, which
+    each run exactly one source health sweep and one embedding request
+    through the shared contract — the CLI adds no second sweep. Never
     takes the pipeline lock, never synchronizes or writes.
     """
     from brainlib.config import ConfigError, load_config
@@ -765,23 +802,79 @@ def cmd_search(args) -> int:
 
     from workflow.services import search_query
 
-    # ALL user-input validation BEFORE the health gate: usage errors
-    # exit 2 without paying (or depending on) the integrity sweep.
-    try:
-        query = search_query.validate_query(args.query, args.limit)
-    except search_query.SearchQueryInputError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
+    mode = getattr(args, "mode", "keyword") or "keyword"
+
+    # ALL cheap user-input validation BEFORE any health/network work:
+    # usage errors exit 2 without paying (or depending on) the integrity
+    # sweep. Each mode uses its own validator; the hybrid validator is
+    # the public sweep-free entry point, never a full hybrid search.
+    if mode == "semantic":
+        from workflow.services import semantic_query
+
+        try:
+            query = semantic_query.validate_semantic_query(args.query, args.limit)
+        except semantic_query.SemanticQueryInputError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    elif mode == "hybrid":
+        from workflow.services import search_fusion
+
+        try:
+            query = search_fusion.validate_hybrid_query(args.query, args.limit)
+        except search_fusion.HybridSearchInputError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            query = search_query.validate_query(args.query, args.limit)
+        except search_query.SearchQueryInputError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     try:
-        search_query.preflight_full_health()
-        payload = search_query.search_recordings(query, limit=args.limit)
+        if mode == "semantic":
+            # The service owns the exactly-one source health sweep,
+            # integrity traversal and embedding request contract. The
+            # production embedder is resolved from its module at call time.
+            from workflow.services import embedding_client
+            from workflow.services import semantic_query
+
+            payload = semantic_query.semantic_search(
+                query,
+                limit=args.limit,
+                config=config,
+                embedder=embedding_client.embed_texts,
+            )
+        elif mode == "hybrid":
+            # The fusion service owns the exact one/one/one contract; the
+            # keyword component never calls ``preflight_full_health``.
+            from workflow.services import embedding_client
+            from workflow.services import search_fusion
+
+            payload = search_fusion.hybrid_search(
+                query,
+                limit=args.limit,
+                config=config,
+                embedder=embedding_client.embed_texts,
+            )
+        else:
+            # Keyword path: full health once, then the engine. No
+            # embedding configuration, imports or network are involved.
+            search_query.preflight_full_health()
+            payload = search_query.search_recordings(query, limit=args.limit)
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
     if args.json:
+        # Keyword JSON is the engine payload unchanged (no synthetic
+        # ``mode`` key); semantic/hybrid payloads already carry their
+        # mode/evidence metadata.
         print(json.dumps(payload, indent=2, default=str))
+    elif mode == "semantic":
+        _print_search_human(payload, mode="semantic")
+    elif mode == "hybrid":
+        _print_search_human(payload, mode="hybrid", evidence=True)
     else:
         _print_search_human(payload)
     return 0
@@ -886,9 +979,15 @@ def main(argv: list[str] | None = None) -> int:
 
     search_cmd = subparsers.add_parser(
         "search",
-        help="Keyword-search transcripts, summaries and metadata (read-only)",
+        help="Search transcripts, summaries and metadata (read-only)",
     )
-    search_cmd.add_argument("query", help="Plain-text keywords (words combine with AND)")
+    search_cmd.add_argument("query", help="Plain-text query (keywords combine with AND)")
+    search_cmd.add_argument(
+        "--mode",
+        choices=["keyword", "semantic", "hybrid"],
+        default="keyword",
+        help="Search mode (default keyword; semantic/hybrid use local embeddings)",
+    )
     search_cmd.add_argument(
         "--limit",
         type=int,

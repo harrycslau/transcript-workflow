@@ -1,4 +1,5 @@
-"""Read-only web keyword-search orchestration (Step 5A.4.2a/b).
+"""Read-only web keyword-search orchestration (Step 5A.4.2a/b) plus the
+POST-only semantic/hybrid web orchestration (Step 5C).
 
 The one home of the Library search flow: parse → validate → FULL
 health gate EXACTLY once per submitted search (no cache — a cached
@@ -9,6 +10,17 @@ SCOPE (filters apply to the candidate population BEFORE result limiting
 and pagination) → deterministic sorting → pagination over the returned
 match set → one bounded prefetch-contracted card fetch for the page
 window.
+
+Keyword search stays the historical GET flow (``run_web_search``,
+unchanged). Step 5C adds ``run_web_vector_search`` for the dedicated
+POST-only endpoint: mode allowlist → cheap query validation → invalid
+scope filters REJECT (never widened) → the same valid Recording scope →
+``semantic_query.semantic_search`` / ``search_fusion.hybrid_search``
+(each owns exactly one source health sweep, one integrity traversal and
+at most one localhost embedding request; this layer adds none) → the
+SAME shared sorting/pagination/bounded card fetch. Every service failure
+is one stable ``unavailable`` outcome with a fixed sanitized message and
+the query cleared.
 
 Step 5A.4.2b adds the display-safe rendering contract ON TOP of the
 same flow — still zero new queries beyond ONE bounded batch validation
@@ -87,6 +99,26 @@ SORT_RELEVANCE = "relevance"
 STATE_OK = "ok"
 STATE_INVALID = "invalid"
 STATE_INDEX = "index"
+# Step 5C vector modes: every service failure (source index, embedding
+# schema/generation, endpoint/timeout/http, concurrent change, generic)
+# is ONE stable unavailable state with the service's fixed sanitized
+# message — never a partial/fallback result and never an echoed query.
+STATE_UNAVAILABLE = "unavailable"
+
+# Search modes (Step 5C web). Keyword is the historical GET mode; the
+# vector modes are POST-only (dedicated endpoint) and NEVER fall back to
+# keyword.
+MODE_KEYWORD = "keyword"
+MODE_SEMANTIC = "semantic"
+MODE_HYBRID = "hybrid"
+VECTOR_MODES = (MODE_SEMANTIC, MODE_HYBRID)
+
+# Fixed sanitized web messages — never interpolate query, filters, codes
+# or underlying exception text.
+INVALID_MODE_MESSAGE = "Choose a valid search mode: 'semantic' or 'hybrid'."
+INVALID_VECTOR_FILTERS_MESSAGE = (
+    "The submitted filters are invalid; adjust them and try again."
+)
 
 # Exact approved wordings — scoped-honest, never corpus-wide claims.
 NOTE_TRUNCATED = (
@@ -269,6 +301,26 @@ def _match_label(match: dict) -> str:
     return "recording metadata"
 
 
+def _evidence_label(evidence) -> str:
+    """Plain-text hybrid component-rank suffix (``kw #1 · sem #2``).
+
+    Only exact integer ranks (never bools) are rendered; missing/absent
+    component ranks are omitted. Returns an exact built-in ``str`` built
+    from fixed text and integers — no raw scores, no vectors, no
+    generated HTML. Non-dict evidence yields the empty string.
+    """
+    if not isinstance(evidence, dict):
+        return ""
+    parts: list[str] = []
+    keyword_rank = evidence.get("keyword_rank")
+    semantic_rank = evidence.get("semantic_rank")
+    if isinstance(keyword_rank, int) and not isinstance(keyword_rank, bool):
+        parts.append(f"kw #{keyword_rank}")
+    if isinstance(semantic_rank, int) and not isinstance(semantic_rank, bool):
+        parts.append(f"sem #{semantic_rank}")
+    return " · ".join(parts)
+
+
 def build_notes(payload: dict, sort: str, scan_limit: int = WEB_SCAN_LIMIT) -> list[str]:
     """Scope-honest notes derived ONLY from engine-proven facts.
 
@@ -309,6 +361,8 @@ class SearchRow:
     # both stay None and the chip renders as a plain label.
     link_page: int | None = None
     link_anchor: str | None = None
+    # Hybrid only: a plain-text component-rank suffix (empty otherwise).
+    evidence_label: str = ""
 
 
 @dataclass
@@ -323,6 +377,7 @@ class SearchOutcome:
     result_count: int = 0
     notes: list[str] = field(default_factory=list)
     unscoped_filters: bool = False
+    mode: str = MODE_KEYWORD
 
     @property
     def searching(self) -> bool:
@@ -331,6 +386,11 @@ class SearchOutcome:
     @property
     def echo_query(self) -> str | None:
         return self.query if self.echo_allowed else None
+
+    @property
+    def is_vector(self) -> bool:
+        """Whether this outcome belongs to a POST-only vector mode."""
+        return self.mode in VECTOR_MODES
 
 
 def _ordered_winner_ids(winner_ids: list[str], sort: str) -> list[str]:
@@ -423,6 +483,7 @@ def _build_rows(
                 fragments=fragments,
                 link_page=None if link is None else link[0],
                 link_anchor=None if link is None else link[1],
+                evidence_label=_evidence_label(result.get("evidence")),
             )
         )
     return rows
@@ -502,12 +563,14 @@ def run_web_search(
 
     # 5. Sorting across the returned match set, THEN pagination —
     #    never the other way around.
-    ordered_ids = _ordered_winner_ids(winner_ids, sort)
-    paginator = Paginator(ordered_ids, max(1, int(per_page)))
-    page = paginator.get_page(page_number)
-    page_ids = list(page.object_list)
-
-    rows = _build_rows(page_ids, result_by_id, segments_per_page)
+    rows, page, result_count = _finish_results(
+        result_by_id,
+        winner_ids,
+        sort=sort,
+        page_number=page_number,
+        per_page=per_page,
+        segments_per_page=segments_per_page,
+    )
 
     return SearchOutcome(
         state=STATE_OK,
@@ -516,7 +579,161 @@ def run_web_search(
         sort=sort,
         rows=rows,
         page=page,
-        result_count=len(ordered_ids),
+        result_count=result_count,
         notes=build_notes(payload, sort, scan_limit=WEB_SCAN_LIMIT),
         unscoped_filters=unscoped,
+        mode=MODE_KEYWORD,
+    )
+
+
+def _finish_results(
+    result_by_id: dict[str, dict],
+    winner_ids: list[str],
+    *,
+    sort: str,
+    page_number,
+    per_page: int,
+    segments_per_page: int,
+):
+    """Shared tail for keyword and vector modes: order the returned winner
+    set, paginate it, then ONE prefetch-contracted card fetch for the page
+    window (plus the one bounded segment-link validation SELECT). Returns
+    ``(rows, page, result_count)``. Relevance order is the engine's
+    comparator output untouched; the Library sorts re-order the SAME
+    returned winner set in the database before pagination."""
+    ordered_ids = _ordered_winner_ids(winner_ids, sort)
+    paginator = Paginator(ordered_ids, max(1, int(per_page)))
+    page = paginator.get_page(page_number)
+    page_ids = list(page.object_list)
+    rows = _build_rows(page_ids, result_by_id, segments_per_page)
+    return rows, page, len(ordered_ids)
+
+
+def run_web_vector_search(
+    *,
+    mode: str,
+    raw_query: str | None,
+    filters: ListFilters,
+    timezone_name: str,
+    page_number,
+    per_page: int,
+    config,
+    segments_per_page: int = DEFAULT_SEGMENTS_PER_PAGE,
+    using: str = "default",
+    embedder=None,
+) -> SearchOutcome:
+    """One submitted POST-only Library semantic/hybrid search.
+
+    Order (single source of truth): mode allowlist → cheap query
+    validation → invalid-scope-filter REJECTION (never widened to an
+    unscoped search) → the same valid Recording scope as keyword search →
+    the mode's service (which owns EXACTLY one source health sweep, one
+    integrity traversal and at most one localhost embedding request; this
+    layer adds NO sweep, NO embedding and NO fallback) → the shared
+    sorting/pagination/bounded card fetch.
+
+    Every service failure (source index, embedding schema/generation,
+    endpoint/timeout/http, concurrent change, generic) is ONE stable
+    ``unavailable`` outcome carrying the service's fixed sanitized
+    message with the query cleared (``echo_allowed=False``), so the
+    rejected text appears NOWHERE in the response and never in a URL.
+    Keyword :func:`run_web_search` is untouched.
+    """
+    sort = filters.sort if filters.sort else SORT_RELEVANCE
+    try:
+        segments_per_page = max(1, int(segments_per_page))
+    except (TypeError, ValueError):
+        segments_per_page = DEFAULT_SEGMENTS_PER_PAGE
+
+    # 1. Mode allowlist (never silently keyword, never network).
+    if mode not in VECTOR_MODES:
+        return SearchOutcome(
+            state=STATE_INVALID, query=None, echo_allowed=False,
+            message=INVALID_MODE_MESSAGE, sort=sort, mode=MODE_KEYWORD,
+        )
+
+    # 2. Cheap input validation BEFORE health/network (mirrors the CLI).
+    #    Imported lazily so the keyword GET path never touches the
+    #    embedding services.
+    from workflow.services import search_fusion, semantic_query
+
+    try:
+        if mode == MODE_SEMANTIC:
+            query = semantic_query.validate_semantic_query(raw_query, WEB_SCAN_LIMIT)
+        else:
+            query = search_fusion.validate_hybrid_query(raw_query, WEB_SCAN_LIMIT)
+    except (semantic_query.SemanticQueryInputError, search_fusion.HybridSearchInputError) as exc:
+        return SearchOutcome(
+            state=STATE_INVALID, query=None, echo_allowed=False,
+            message=str(exc), sort=sort, mode=mode,
+        )
+
+    # 3. Invalid scope filters REJECT (never widen to an unscoped search)
+    #    BEFORE any health/network work.
+    if not filters.scope_valid:
+        return SearchOutcome(
+            state=STATE_INVALID, query=None, echo_allowed=False,
+            message=INVALID_VECTOR_FILTERS_MESSAGE, sort=sort, mode=mode,
+        )
+
+    # 4. The same valid Recording scope the keyword engine uses.
+    scope = search_scope_queryset(filters, timezone_name)
+
+    # 5. Delegate: the service owns the one-sweep/one-embed contract.
+    try:
+        if mode == MODE_SEMANTIC:
+            payload = semantic_query.semantic_search(
+                query,
+                limit=WEB_SCAN_LIMIT,
+                using=using,
+                scope=scope,
+                config=config,
+                embedder=embedder,
+            )
+        else:
+            payload = search_fusion.hybrid_search(
+                query,
+                limit=WEB_SCAN_LIMIT,
+                using=using,
+                scope=scope,
+                config=config,
+                embedder=embedder,
+            )
+    except ConfigError as exc:
+        # Every service failure is already a fixed sanitized message
+        # (SemanticQueryError / HybridSearchError / shared ConfigError);
+        # never a raw code, path or traceback.
+        return SearchOutcome(
+            state=STATE_UNAVAILABLE, query=None, echo_allowed=False,
+            message=str(exc), sort=sort, mode=mode,
+        )
+
+    results = payload.get("results", [])
+    result_by_id: dict[str, dict] = {}
+    winner_ids: list[str] = []
+    for result in results:
+        key = _norm_id(result["recording_id"])
+        result_by_id[key] = result
+        winner_ids.append(key)
+
+    rows, page, result_count = _finish_results(
+        result_by_id,
+        winner_ids,
+        sort=sort,
+        page_number=page_number,
+        per_page=per_page,
+        segments_per_page=segments_per_page,
+    )
+
+    return SearchOutcome(
+        state=STATE_OK,
+        query=query,
+        echo_allowed=True,
+        sort=sort,
+        rows=rows,
+        page=page,
+        result_count=result_count,
+        notes=build_notes(payload, sort, scan_limit=WEB_SCAN_LIMIT),
+        unscoped_filters=False,
+        mode=mode,
     )

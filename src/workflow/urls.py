@@ -16,6 +16,10 @@ urlpatterns = [
     path("health/", views.health, name="health"),
 
     path("recordings/", recordings.recording_list, name="recordings"),
+    # Dedicated POST-only semantic/hybrid Library search (Step 5C). GET is
+    # a 405 with no config/health/network/DB work; the query never enters
+    # a URL.
+    path("recordings/search/", recordings.recording_search, name="recording-search"),
     path("recordings/<uuid:recording_id>/", recordings.recording_detail, name="recording-detail"),
     path("recordings/<uuid:recording_id>/summary/", recordings.recording_summary, name="recording-summary"),
     path(

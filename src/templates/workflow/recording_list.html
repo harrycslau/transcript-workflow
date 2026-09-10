@@ -4,9 +4,16 @@
 {% block content %}
 
 <section class="filter-area" aria-label="Library filters">
+  {% if vector_mode %}
+  <form method="post" action="{% url 'recording-search' %}" class="filter-form">
+    {% csrf_token %}
+    <input type="hidden" name="mode" value="{{ search_mode }}">
+    <input type="hidden" name="q" value="{{ search_query|default:'' }}">
+  {% else %}
   <form method="get" action="{% url 'recordings' %}" class="filter-form">
     <input type="hidden" name="view" value="{{ effective_view }}">
     {% if search_qs %}<input type="hidden" name="q" value="{{ search_query }}">{% endif %}
+  {% endif %}
     <div class="filter-row-1">
       <div class="filter-group">
         <label class="filter-group-label" for="id_from">From</label>
@@ -27,11 +34,15 @@
           <option value="title_za" {% if filters.sort == 'title_za' %}selected{% endif %}>Title Z–A</option>
         </select>
       </div>
+      {% if vector_mode %}
+      <button type="submit" name="view" value="{{ effective_view }}" class="apply-btn">Apply</button>
+      {% else %}
       <div class="view-toggle" aria-label="View mode">
         <a class="view-toggle-btn{% if effective_view == 'cards' %} active{% endif %}" href="{% url 'recordings' %}?view=cards{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}{% if search_qs %}&amp;{{ search_qs }}{% endif %}" aria-label="Card view" title="Card view"{% if effective_view == 'cards' %} aria-current="true"{% endif %}>Cards</a>
         <a class="view-toggle-btn{% if effective_view == 'table' %} active{% endif %}" href="{% url 'recordings' %}?view=table{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}{% if search_qs %}&amp;{{ search_qs }}{% endif %}" aria-label="Table view" title="Table view"{% if effective_view == 'table' %} aria-current="true"{% endif %}>Table</a>
       </div>
       <button type="submit" class="apply-btn">Apply</button>
+      {% endif %}
     </div>
     <div class="filter-row-2">
       <span class="filter-group-label" id="tags-label">Tags</span>
@@ -43,8 +54,41 @@
       {% empty %}
         <span class="muted">No configured tags.</span>
       {% endfor %}
-      {% if filters_qs or search_qs %}<a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}">Clear all</a>{% endif %}
+      {% if filters_qs or search_qs or search_query %}<a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}">Clear all</a>{% endif %}
     </div>
+  </form>
+  {% if vector_mode %}
+  <form method="post" action="{% url 'recording-search' %}" class="view-toggle-form">
+    {% csrf_token %}
+    <input type="hidden" name="mode" value="{{ search_mode }}">
+    <input type="hidden" name="q" value="{{ search_query|default:'' }}">
+    {% for name, value in filter_pairs %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    <div class="view-toggle" role="group" aria-label="View mode">
+      <button type="submit" name="view" value="cards" class="view-toggle-btn{% if effective_view == 'cards' %} active{% endif %}" aria-label="Card view" title="Card view"{% if effective_view == 'cards' %} aria-current="true"{% endif %}>Cards</button>
+      <button type="submit" name="view" value="table" class="view-toggle-btn{% if effective_view == 'table' %} active{% endif %}" aria-label="Table view" title="Table view"{% if effective_view == 'table' %} aria-current="true"{% endif %}>Table</button>
+    </div>
+  </form>
+  {% endif %}
+</section>
+
+<section class="vector-search-area" aria-label="Semantic and hybrid search">
+  <form method="post" action="{% url 'recording-search' %}" class="vector-search-form" role="search">
+    {% csrf_token %}
+    <input type="hidden" name="view" value="{{ effective_view }}">
+    {% for name, value in filter_pairs %}<input type="hidden" name="{{ name }}" value="{{ value }}">{% endfor %}
+    <div class="vector-search-field">
+      <label class="filter-group-label" for="id_vector_q">Semantic search</label>
+      <input type="search" id="id_vector_q" name="q" value="{% if vector_mode %}{{ search_query|default:'' }}{% endif %}" placeholder="Describe what you are looking for" aria-label="Semantic or hybrid search query">
+    </div>
+    <div class="vector-search-field">
+      <label class="filter-group-label" for="id_vector_mode">Mode</label>
+      <select id="id_vector_mode" name="mode" aria-label="Semantic or hybrid search mode">
+        <option value="semantic" {% if search_mode != 'hybrid' %}selected{% endif %}>Semantic</option>
+        <option value="hybrid" {% if search_mode == 'hybrid' %}selected{% endif %}>Hybrid</option>
+      </select>
+    </div>
+    <button type="submit" class="apply-btn">Search with local embeddings</button>
+    <span class="vector-search-hint muted">Semantic and hybrid search use local embeddings; the query is submitted by POST and never appears in the URL.</span>
   </form>
 </section>
 
@@ -58,7 +102,7 @@
 
 {% if searching %}
 
-  {% if search.state == 'invalid' or search.state == 'index' %}
+  {% if search.state == 'invalid' or search.state == 'index' or search.state == 'unavailable' %}
     <div class="messages" aria-live="polite">
       <div class="message message-error" role="status">{{ search.message }}</div>
     </div>
@@ -67,7 +111,7 @@
 
   {% elif search.rows %}
     <div class="results-header" role="status">
-      <span class="results-count">{{ search.result_count }} search result{{ search.result_count|pluralize }} for &ldquo;{{ search.echo_query }}&rdquo;</span>
+      <span class="results-count">{{ search.result_count }} {% if search.mode == 'semantic' %}semantic {% elif search.mode == 'hybrid' %}hybrid {% endif %}search result{{ search.result_count|pluralize }} for &ldquo;{{ search.echo_query }}&rdquo;</span>
       <a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}">Clear search</a>
     </div>
     {% if note_unscoped %}<p class="search-note muted">{{ note_unscoped }}</p>{% endif %}
@@ -98,7 +142,7 @@
                 <td data-label="Duration">{{ row.card.recording.duration_seconds|duration }}</td>
                 <td data-label="Tags">{% for assignment in row.card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
                 <td data-label="Languages">{% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
-                <td data-label="Match">{% include "workflow/_search_provenance.html" %}</td>
+                <td data-label="Match">{% include "workflow/_search_provenance.html" %}{% if row.evidence_label %}<span class="evidence-chip">{{ row.evidence_label }}</span>{% endif %}</td>
               </tr>
             {% endfor %}
           </tbody>
@@ -116,6 +160,7 @@
               <span>{{ row.card.effective_at_label }} {{ row.card.effective_at|local_time }}</span>
               <span>{{ row.card.recording.duration_seconds|duration }}</span>
               {% include "workflow/_search_provenance.html" %}
+              {% if row.evidence_label %}<span class="evidence-chip">{{ row.evidence_label }}</span>{% endif %}
             </div>
             {% if row.snippet_text %}<p class="search-snippet">{% include "workflow/_search_snippet.html" %}</p>{% endif %}
             <div class="recording-card-footer">
@@ -127,11 +172,15 @@
       </ul>
     {% endif %}
 
-    {% include "workflow/_pagination.html" with page=search.page %}
+    {% if vector_mode %}
+      {% include "workflow/_pagination_post.html" with page=search.page %}
+    {% else %}
+      {% include "workflow/_pagination.html" with page=search.page %}
+    {% endif %}
 
   {% else %}
     <div class="results-header" role="status">
-      <span class="results-count">No search results for &ldquo;{{ search.echo_query }}&rdquo;</span>
+      <span class="results-count">No {% if search.mode == 'semantic' %}semantic {% elif search.mode == 'hybrid' %}hybrid {% endif %}search results for &ldquo;{{ search.echo_query }}&rdquo;</span>
       <a class="clear-filters" href="{% url 'recordings' %}?view={{ effective_view }}{% if filters_qs %}&amp;{{ filters_qs }}{% endif %}">Clear search</a>
     </div>
     {% if note_unscoped %}<p class="search-note muted">{{ note_unscoped }}</p>{% endif %}

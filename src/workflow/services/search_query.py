@@ -92,6 +92,7 @@ echoed anywhere).
 from __future__ import annotations
 
 import unicodedata
+from dataclasses import dataclass
 
 from django.db import connections
 
@@ -163,6 +164,16 @@ _WINDOW_UNSUPPORTED_ERROR = (
 )
 _SCOPE_TYPE_ERROR = (
     "the search scope must be an unsliced queryset of Recordings"
+)
+_COMPILED_SCOPE_TYPE_ERROR = (
+    "the compiled search scope must be a CompiledScope value produced by compile_scope"
+)
+_SCOPE_AMBIGUOUS_ERROR = (
+    "the search scope must be supplied either as a Recording queryset or "
+    "as a precompiled scope, never both"
+)
+_SCOPE_ALIAS_ERROR = (
+    "the compiled search scope was built for a different database connection"
 )
 _QUERY_FAILED_ERROR = (
     "the keyword-search index could not be queried; inspect with: "
@@ -359,6 +370,41 @@ def _compile_scope(scope, *, using: str) -> tuple[str, list]:
     except Exception:
         raise SearchIndexError(_QUERY_FAILED_ERROR) from None
     return sql, list(params)
+
+
+@dataclass(frozen=True)
+class CompiledScope:
+    """Immutable compiled Recording-scope value for trusted orchestration.
+
+    Produced ONCE by :func:`compile_scope` from the exact
+    ``_compile_scope`` logic (same validation, same-DB alias, empty-scope
+    behaviour, innermost-WHERE placement and sanitized SQL/params — never
+    forked). A hybrid orchestrator compiles the QuerySet exactly once,
+    stores this SAME value in its semantic snapshot and passes it to
+    ``search_recordings(compiled_scope=...)`` so the keyword engine never
+    recompiles. ``sql`` is the compiled subquery (never echoed anywhere),
+    ``params`` the bound parameters and ``using`` the database alias the
+    scope was compiled against. Frozen: fields are never mutated.
+    """
+
+    sql: str
+    params: tuple
+    using: str
+
+
+def compile_scope(scope, *, using: str) -> CompiledScope:
+    """Compile an unsliced ``Recording`` QuerySet into an immutable
+    :class:`CompiledScope` via the EXACT ``_compile_scope`` logic.
+
+    Validation, same-DB alias, empty-scope behaviour and sanitized
+    failures are never forked: this is a thin wrapper that captures the
+    compiled SQL + parameters in an immutable value so a trusted
+    orchestrator can compile once and share the result between the
+    keyword engine and the semantic snapshot. ``scope`` may never be
+    ``None`` — use the value only when a scope is supplied.
+    """
+    sql, params = _compile_scope(scope, using=using)
+    return CompiledScope(sql=sql, params=tuple(params), using=using)
 
 
 # Mirrors _DOC_TYPE_RANKS: within one Recording the per-recording
@@ -722,6 +768,7 @@ def search_recordings(
     max_scored_documents: int = MAX_SCORED_DOCUMENTS,
     per_recording_candidates: int = PER_RECORDING_CANDIDATES,
     scope=None,
+    compiled_scope: CompiledScope | None = None,
 ) -> dict:
     """Run one read-only keyword search against the existing index.
 
@@ -739,6 +786,17 @@ def search_recordings(
     in-scope Recording can never be evicted by out-of-scope matches.
     With ``scope=None`` the SQL and results are byte-identical to the
     unscoped engine (parity-tested).
+
+    ``compiled_scope`` is the trusted-orchestration alternative: an
+    immutable :class:`CompiledScope` produced ONCE by :func:`compile_scope`
+    (which wraps the exact ``_compile_scope`` logic, so validation,
+    same-DB alias, empty-scope behaviour and sanitized errors are never
+    forked). When supplied, the engine uses it VERBATIM and never
+    recompiles — the scope must have been compiled on the SAME database
+    alias (``using``) or the call is rejected. Supplying BOTH ``scope``
+    and ``compiled_scope`` is ambiguous and rejected with a fixed
+    sanitized usage error. The QuerySet ``scope=`` path is unchanged and
+    byte-identical to the historical behavior.
     """
     normalized = normalize_query(query)
     _validate_limit(limit)
@@ -749,7 +807,16 @@ def search_recordings(
 
     _require_queryable_index(using=using)
 
-    if scope is not None:
+    if scope is not None and compiled_scope is not None:
+        raise SearchQueryInputError(_SCOPE_AMBIGUOUS_ERROR)
+    if compiled_scope is not None:
+        if type(compiled_scope) is not CompiledScope:
+            raise SearchQueryInputError(_COMPILED_SCOPE_TYPE_ERROR)
+        if compiled_scope.using != using:
+            raise SearchQueryInputError(_SCOPE_ALIAS_ERROR)
+        scope_sql = compiled_scope.sql
+        scope_params = list(compiled_scope.params)
+    elif scope is not None:
         scope_sql, scope_params = _compile_scope(scope, using=using)
     else:
         scope_sql = scope_params = None

@@ -359,6 +359,61 @@ a.match-chip:hover {
 }
 
 /* ============================================================
+   SEMANTIC / HYBRID LIBRARY SEARCH (Step 5C, POST-only)
+   ============================================================ */
+.vector-search-area {
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+}
+.vector-search-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+.vector-search-field { display: flex; align-items: center; gap: 0.4rem; }
+.vector-search-field input[type="search"] {
+  padding: 2px 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+  min-width: 240px;
+}
+.vector-search-field select {
+  padding: 2px 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.vector-search-hint { font-size: 0.75rem; }
+.evidence-chip {
+  display: inline-block;
+  margin-left: 0.35rem;
+  font-size: 0.7rem;
+  color: var(--color-text-3);
+  white-space: nowrap;
+}
+.pagination-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.pagination-form button {
+  font-size: 0.75rem;
+  padding: 0.15rem 0.6rem;
+}
+.view-toggle-form {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 0.5rem;
+}
+
+/* ============================================================
    DATE GROUP HEADERS
    ============================================================ */
 .date-group-header {

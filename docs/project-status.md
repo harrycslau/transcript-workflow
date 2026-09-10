@@ -1,6 +1,6 @@
-# Project status — implementation handoff (Step 5B.4 delivered)
+# Project status — implementation handoff (Step 5C delivered)
 
-This file reflects the repository through Step 5B.4: Step 4, the
+This file reflects the repository through Step 5C: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
@@ -16,57 +16,62 @@ models, migration 0009 and the pure-stdlib float32 vector codec), the
 (`workflow/services/embedding_index.py`, `EMBEDDING_VERSION`, the
 read-only status report, the atomic rebuild with `PRAGMA data_version`
 promotion guard, the active-generation repair, and the
-`brain embedding-index status|rebuild|repair` CLI), and the
+`brain embedding-index status|rebuild|repair` CLI), the
 **Step 5B.4 incremental embedding synchronization**
 (`workflow/services/embedding_sync.py` — the ONLY incremental
 `EmbeddingDocument` writer, driven by the same post-commit callback as
 Step 5A.3 with a pre-reconcile removed-key snapshot and a separate
-fixed aggregate failure warning). Step 5B.4 is delivered in the working
-tree and independently full-suite verified: **1783 collected and 1783
+fixed aggregate failure warning), and the **Step 5C semantic and
+hybrid search** (`workflow/services/semantic_query.py` +
+`workflow/services/search_fusion.py`, the shared
+`search_query.CompiledScope`/`compile_scope` orchestration value, the
+`--mode keyword|semantic|hybrid` CLI, and the POST-only
+`/recordings/search/` web endpoint — the keyword Library GET is
+unchanged). Step 5C is delivered in the working
+tree and independently full-suite verified: **2103 collected and 2103
 passed** (only the known `audioop` deprecation warning), with
 `manage.py check` and `makemigrations --check` clean. No new
 commit/HEAD, real-database migration, or real embedding network call is
 claimed. This file is a snapshot, not a durable instruction file;
 `AGENTS.md` holds the standing rules.
 
-## Handoff audit — 2026-09-09 (updated for Step 5B.4)
+## Handoff audit — 2026-09-10 (updated for Step 5C)
 
-Updates the previous audit (the Step 5B.3 state) in place to record
-that the Step 5B.4 incremental embedding synchronization is now
+Updates the previous audit (the Step 5B.4 state) in place to record
+that the Step 5C semantic/hybrid search is now
 implemented in the working tree and independently full-suite verified
-(**1783 passed**). No new
+(**2103 passed**). No new
 commit/HEAD, real-database migration, or real embedding network call is
-claimed; the 5B.4 work and its tests are in the working tree.
+claimed; the 5C work and its tests are in the working tree.
 
 **Observed facts**
 
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
-  configuration; implementation complete through Step 5B.4 (Step 4
+  configuration; implementation complete through Step 5C (Step 4
   web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
   with highlights and jump links, the pre-5B stability patch, the
   Step 5B.1 local /embeddings client, the Step 5B.2 embedding
   storage foundation: migration 0009 + generation/document models +
   vector codec, the Step 5B.3 embedding index status/rebuild/repair,
-  and the Step 5B.4 incremental embedding synchronization).
-- Step 5B.4 verification (independently confirmed): the full suite
-  passes — **1783 collected and
-  1783 passed** (the Step 5B.3 full-suite state was 1746 — historical;
-  the 5B.4 delta is the 37 tests in `tests/test_embedding_index_sync.py`),
-  with the only warning the known `audioop` DeprecationWarning
-  (Python 3.12, removal slated for 3.13); `manage.py check`,
-  `makemigrations --check` (NO migration) and `git diff --check` pass.
-  Focused run: `tests/test_search_index_sync.py` +
-  `tests/test_tags_contention_retry.py` +
-  `tests/test_embedding_index_service.py` +
-  `tests/test_embedding_index_cli.py` +
-  `tests/test_embedding_index_sync.py` + `tests/test_config.py` +
-  `tests/test_web_tags.py` = **293 passed**. The embedding test files
-  run with `django_db(transaction=True)` because the 5B.3 public
-  rebuild/repair and the real on_commit callbacks require real commits
-  (autocommit); the schema-mutating status/CLI tests restore the
-  dropped tables/FTS afterwards.
+  the Step 5B.4 incremental embedding synchronization, and the Step 5C
+  semantic/hybrid search with the POST-only web endpoint).
+- Step 5C verification (independently confirmed): the full suite
+  passes — **2103 collected and
+  2103 passed** (the Step 5B.4 full-suite state was 1783 — historical;
+  the 5C delta is the five new Step 5C test files
+  `tests/test_semantic_query.py` (69),
+  `tests/test_semantic_search.py` (42),
+  `tests/test_search_fusion.py` (43),
+  `tests/test_search_cli_modes.py` (32) and
+  `tests/test_web_search_modes.py` (40) = **310 tests** plus **10
+  additions** across `tests/test_embedding_index_service.py`,
+  `tests/test_embedding_index_sync.py` and
+  `tests/test_migration_readiness.py`), with the only warning the
+  known `audioop` DeprecationWarning (Python 3.12, removal slated for
+  3.13); `manage.py check`, `makemigrations --check` (NO migration) and
+  `git diff --check` pass.
 - Observed cleanup debt (not fixed here): the unreachable `return
   None` after `return "first"` in
   `workflow/services/web_actions.py:summarize_mode`, and the noted
@@ -74,13 +79,111 @@ claimed; the 5B.4 work and its tests are in the working tree.
 
 **Inference / next steps**
 
-- Next is **Step 5C — semantic/hybrid search** (the next work;
-  explicitly NOT implemented in this working tree: no semantic
-  retrieval, no web/GET changes, no Ask-with-citations), then Step 5D
-  Ask-with-citations, and Step 6.
+- Next is **Step 5D — Ask with Citations** (the next work; explicitly
+  NOT implemented in this working tree: no question/answer history, no
+  citation generation), then Step 6.
 - No claim is made here about the real user database's migration state
   (`0007`–`0009` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
+
+## Step 5C — Semantic and Hybrid Search (delivered in the working tree)
+
+**Scope delivered** (durable contract in `AGENTS.md`): the read-only
+engines `workflow/services/semantic_query.py` (`SEMANTIC_QUERY_VERSION`
+on a SEPARATE axis from the document `EMBEDDING_VERSION`) and
+`workflow/services/search_fusion.py` (pure RRF + the one-sweep
+`hybrid_search`), the shared immutable
+`search_query.CompiledScope`/`compile_scope` orchestration value, the
+`--mode keyword|semantic|hybrid` CLI, and the POST-only
+`/recordings/search/` web endpoint. The keyword Library GET stays
+unchanged; web GETs never embed or network.
+
+- **Deterministic traversal (user correction incorporated)**: the
+  complete active-generation corpus is read in deterministic
+  `(recording_id, document_key)` order (keyset-paged, exact `.only()`
+  projection — title/body/aux TextFields never loaded), in-scope
+  documents are scored, and ONE Recording's best document
+  (per-recording comparator: cosine desc, doc-type rank
+  summary<recording<segment, document_key, recording id) is finished
+  BEFORE its single provenance-only winner enters the global top-K
+  heap (≤ 200) — the best-last regression (a Recording's best document
+  sorted LAST inside its group decides K membership) is proven by
+  `test_best_document_last_determines_top_k_membership`. Brute-force
+  corpus-linear but bounded-memory: every in-scope vector decoded
+  exactly once (shared `embedding_index._classify_active_page`,
+  length-first), the heap/results retain provenance metadata only
+  (never K vectors), excerpts are a winner-only bounded SUBSTR fetch.
+- **Integrity/concurrency (user correction incorporated)**: exactly ONE
+  complete source health sweep (`search_index.build_status_report`) +
+  ONE global active-generation integrity traversal + ONE query
+  embedding per search (ZERO for an empty scope/corpus), a `PRAGMA
+  data_version` guard before/after, and a final complete
+  active-identity re-read; ANY mismatch or ANY global integrity defect
+  (missing/stale/orphan/wrong-length/non-finite/zero — in-scope or
+  out) fails closed with a fixed sanitized error and no partial
+  results; requires exactly one compatible ACTIVE generation (exact
+  model/`EMBEDDING_VERSION`/`INDEX_VERSION`). Zero-norm STORED vectors
+  fail closed as the role-appropriate `invalid_document_vector` in
+  queries and are `invalid_vector` in `embedding-index status`/repair;
+  a zero QUERY vector is `invalid_query_vector` (never
+  skipped/approximated).
+- **Hybrid fusion (user correction incorporated)**: exactly ONE source
+  health sweep, ONE integrity traversal and ONE query embedding with a
+  SHARED `CompiledScope`/`SemanticSnapshot` — the Recording scope
+  QuerySet is compiled EXACTLY ONCE via the exact keyword compiler and
+  both components consume the SAME immutable value; the keyword
+  component calls `search_recordings(compiled_scope=...)` directly and
+  NEVER re-runs `preflight_full_health` (no keyword re-gate). Both
+  components run at depth 200 (`HYBRID_DEPTH`); fusion is pure RRF
+  (k=60, one-based ranks, `1/(60+rank)` over PRESENT components —
+  absence is returned-depth, never a corpus nonmatch), deterministic
+  order RRF desc, presence count desc, min present rank, max present
+  rank, canonical recording id; `truncated` is true if either
+  component says truncated; `more_recordings_matched` is exact
+  `len(fused)-final_count` ONLY when both component populations are
+  proved complete, else null. No weights/raw-score normalization, no
+  keyword-only fallback; presentation prefers keyword evidence
+  (highlights preserved) with an `evidence` block
+  (keyword_rank/semantic_rank/semantic_cosine/rrf_score).
+- **Modes/CLI/web**: `brain search QUERY --mode keyword|semantic|hybrid`
+  (default keyword with byte-for-byte parity; semantic/hybrid each own
+  the one-sweep/one-embed contract; exit 2 usage before health, exit 1
+  sanitized, no lock/recovery/write). The Library keyword GET
+  (`/recordings/?q=...`) is unchanged and strictly read-only (a forged
+  `mode=` on GET is ignored — GETs never embed/network); semantic/
+  hybrid web search is POST-only at `/recordings/search/` (GET = 405
+  with zero work, CSRF-protected), the query never enters a URL,
+  invalid scope filters REJECT (never widened to unscoped), every
+  service failure is ONE stable `unavailable` state with the query
+  cleared, and navigation (pagination/sort/filter/view) is POST-only
+  with hidden server-validated state; filters, provenance, snippets
+  and segment jump links are shared with keyword search.
+- **Zero-vector policy (user correction incorporated)**: the shared
+  5B.3/5B.4/5C usability layer (`embedding_index._vector_is_zero_norm`)
+  classifies a structurally-valid all-zero float32 vector as unusable
+  with an EXACT component-wise zero test (no tolerance, no threshold):
+  `embedding-index status`/repair report it as `invalid_vector`,
+  rebuild/repair/sync reject a zero-norm ENDPOINT vector with one fixed
+  sanitized error BEFORE any write, and the semantic/hybrid engines
+  fail closed on it (`invalid_document_vector`); a zero QUERY vector
+  is `invalid_query_vector`.
+
+**Verification (independently confirmed)**: full suite **2103 collected
+and 2103 passed** (the
+5B.4 state was 1783 — historical; the 5C delta is 320 tests: the five
+new Step 5C test files — `tests/test_semantic_query.py` (69),
+`tests/test_semantic_search.py` (42), `tests/test_search_fusion.py`
+(43), `tests/test_search_cli_modes.py` (32) and
+`tests/test_web_search_modes.py` (40) = 310 — plus 10 additions across
+`tests/test_embedding_index_service.py`,
+`tests/test_embedding_index_sync.py` and
+`tests/test_migration_readiness.py`), only the known `audioop` warning;
+`manage.py check`, `makemigrations --check` (NO migration) and
+`git diff --check` clean. No real network, no real MacWhisper/oMLX, no
+user data, no real embedding network calls; the real
+`config/config.yaml` untouched; no new commit/HEAD or real-database
+migration is claimed — the work and its tests are in the working tree.
+Step 5D (Ask with Citations) is the next, NOT-implemented work.
 
 ## Step 5B.3 — Embedding index status/rebuild/repair (delivered in the working tree)
 
@@ -1605,22 +1708,23 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current (Step 5B.4 tree, independently full-suite verified): the full
-  suite passes — **1783 collected
-  and 1783 passed** (the 5B.4 delta is the 37 new 5B.4 tests in
-  `tests/test_embedding_index_sync.py`; the historical 5B.3 state was
-  1746 — 109 5B.3 tests in
-  `tests/test_embedding_index_service.py` and
-  `tests/test_embedding_index_cli.py` plus 5 migration-readiness
-  command-inventory additions), with the only warning the known
+- Current (Step 5C tree, independently full-suite verified): the full
+  suite passes — **2103 collected
+  and 2103 passed** (the 5C delta is 320 tests: the five new Step 5C
+  test files — `tests/test_semantic_query.py` (69),
+  `tests/test_semantic_search.py` (42),
+  `tests/test_search_fusion.py` (43),
+  `tests/test_search_cli_modes.py` (32) and
+  `tests/test_web_search_modes.py` (40) = 310 — plus 10 additions
+  across `tests/test_embedding_index_service.py`,
+  `tests/test_embedding_index_sync.py` and
+  `tests/test_migration_readiness.py`; the historical 5B.4 state was
+  1783), with the only warning the known
   `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
   `manage.py check`, `makemigrations --check` (NO migration) and
-  `git diff --check` pass. Supporting focused detail: the 5B.4 focused
-  set (37 passed) plus the search-index-sync/tag-contention-retry/
-  embedding-service/embedding-cli/config/web-tag regressions
-  (**293 passed**). The historical full-suite states are 1746
-  (Step 5B.3), 1632 (Step 5B.2), 1499 (Step 5B.1) and 1404 (pre-5B
-  stability patch).
+  `git diff --check` pass. The historical full-suite states are 1783
+  (Step 5B.4), 1746 (Step 5B.3), 1632 (Step 5B.2), 1499 (Step 5B.1)
+  and 1404 (pre-5B stability patch).
 - Step 5B.1 full-suite state (historical, delivered and independently
   full-suite verified at that time): **1499 tests passing** — the
   historical 1404-test pre-5B stability patch
@@ -1696,9 +1800,10 @@ Production Library UI are delivered.
   the Step 5B.2 embedding storage foundation (generations + documents,
   vector codec, migration 0009) are delivered; embedding index
   production (status/rebuild/repair — Step 5B.3) and incremental
-  embedding synchronization (Step 5B.4) are delivered; semantic/hybrid
-  search (Step 5C) and Ask-with-citations (Step 5D) remain later
-  **Step 5C–5D** work.
+  embedding synchronization (Step 5B.4) are delivered; **Step 5C
+  semantic/hybrid search is delivered** (CLI `--mode` plus the
+  POST-only `/recordings/search/` endpoint); **Ask-with-citations
+  (Step 5D) remains later work**.
   Keyword matching is substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
@@ -1735,10 +1840,11 @@ Production Library UI are delivered.
   search-sync no-auto-retry policy are untouched). **Step 5B.1 (the
   local /embeddings client), Step 5B.2 (embedding storage
   foundation: generation/document models, vector codec, migration 0009),
-  Step 5B.3 (embedding index status/rebuild/repair) and Step 5B.4
-  (incremental embedding synchronization) are delivered;
-  Step 5C — semantic/hybrid retrieval — is
-  next.** Step 5C (semantic retrieval) is explicitly NOT implemented.
+  Step 5B.3 (embedding index status/rebuild/repair), Step 5B.4
+  (incremental embedding synchronization) and Step 5C
+  (semantic/hybrid search) are all delivered** (see the sections at
+  the top of this file); **Step 5D — Ask-with-citations — is
+  next** (not implemented).
 - **Step 5B — Local Embeddings Foundation**: **5B.1 delivered** — the
   bounded local /embeddings client
   (`workflow/services/embedding_client.py`) plus the embedding config
@@ -1747,15 +1853,15 @@ Production Library UI are delivered.
   source content hash/index version): `EmbeddingGeneration` +
   `EmbeddingDocument` + migration 0009 (schema-only, reversible) + the
   pure-stdlib `vector_codec.py` float32 codec (see the Step 5B.2
-  section at the top of this file). **NOT yet implemented**: 5B.3
-  bounded status/rebuild/repair commands and 5B.4 incremental
-  synchronization (the next work). Keep this phase to index production
-  and integrity — no semantic-search UI or Ask feature yet.
-- **Step 5C — Semantic and Hybrid Search**: implement bounded semantic
-  retrieval and deterministic keyword+semantic fusion, preserving
-  recording deduplication, tag/date scope, provenance and stale/index-
-  unavailable states; expose Keyword/Semantic/Hybrid modes in CLI and
-  the Library web UI.
+  section at the top of this file). **5B.3 and 5B.4 are delivered**
+  (status/rebuild/repair and incremental synchronization; see the
+  sections at the top of this file), as is Step 5C.
+- **Step 5C — Semantic and Hybrid Search**: delivered in the working
+  tree — bounded semantic retrieval and deterministic keyword+semantic
+  fusion preserving recording deduplication, tag/date scope,
+  provenance and stale/index-unavailable states, exposed as
+  Keyword/Semantic/Hybrid modes in the CLI and the POST-only Library
+  web endpoint (see the Step 5C section at the top of this file).
 - **Step 5D — Ask with Citations**: retrieve bounded local evidence,
   call only the local LLM, and produce answers whose citations map to
   real retrieved transcript segments or summaries (including working

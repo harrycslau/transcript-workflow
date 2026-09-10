@@ -97,8 +97,8 @@ from workflow.services.embedding_client import (
 from workflow.services.vector_codec import (
     MAX_DIMENSION,
     VectorCodecError,
+    decode_vector,
     encode_vector,
-    validate_vector_blob,
 )
 
 # The FULL production embedding mapping contract: deterministic text
@@ -175,6 +175,7 @@ _PROMOTION_RACE = (
 )
 _PROMOTION_FAILED = "the generation could not be promoted"
 _VECTOR_ERROR = "embedding vectors could not be encoded"
+_ZERO_VECTOR_ERROR = "the embedding endpoint returned a zero-norm vector"
 _DB_ERROR = "the embedding index database operation failed"
 _REPAIR_NOT_CONVERGED = (
     "the embedding index is not fully healthy after repair; run "
@@ -351,13 +352,40 @@ def _iter_active_document_pages(
         last = page[-1].document_key
 
 
-def _active_page_invalid(page: list[EmbeddingDocument], dimensions: int, using: str) -> set[int]:
-    """Pks of an active-document page whose vector blob is malformed
-    (wrong byte length or non-finite) WITHOUT loading oversized blobs:
-    SQLite ``length()`` classifies first, and only exact-length blobs
-    are fetched/decoded, in bounded chunks."""
+def _vector_is_zero_norm(values) -> bool:
+    """Exact zero-norm test for a finite float32 vector (usability layer).
+
+    A finite IEEE-754 vector has zero Euclidean norm if and only if every
+    component is exactly zero: the squares of non-zero finite values are
+    strictly positive, so the exact component-wise equality is
+    numerically safe — no tolerance, no model-dependent threshold, and
+    no sum-of-squares underflow can misclassify a tiny non-zero vector.
+    The generic ``vector_codec`` format contract is untouched: an
+    all-zero finite float32 vector remains structurally decodable; THIS
+    embedding-index usability layer decides that it is unusable.
+    """
+    return all(value == 0.0 for value in values)
+
+
+def _classify_active_page(
+    page: list[EmbeddingDocument], dimensions: int, using: str
+) -> dict[int, tuple]:
+    """Length-first classify ONE page of active-generation rows.
+
+    Returns ``{pk: ("ok", values)}`` for usable vectors (exact length,
+    finite, NONZERO), ``{pk: ("zero", None)}`` for structurally-valid
+    but zero-norm vectors, and ``{pk: ("invalid", None)}`` for anything
+    else (wrong byte length or non-finite) — WITHOUT loading oversized
+    blobs: SQLite ``length()`` classifies first, and only exact
+    ``dimensions*4``-byte blobs are fetched and decoded, in bounded
+    chunks. The generic ``vector_codec`` format contract is untouched —
+    this embedding-index usability layer decides usability (see
+    :func:`_vector_is_zero_norm`). SHARED by the status/rebuild/repair
+    helpers (via :func:`_decode_active_page`) and the Step 5C semantic
+    traversal, so a corpus is never blob-decoded twice.
+    """
     if not page:
-        return set()
+        return {}
     ids = [d.pk for d in page]
     table = EmbeddingDocument._meta.db_table
     lengths: dict[int, int] = {}
@@ -369,7 +397,9 @@ def _active_page_invalid(page: list[EmbeddingDocument], dimensions: int, using: 
         )
         lengths = dict(cursor.fetchall())
     expected = dimensions * 4
-    invalid = {pk for pk in ids if lengths.get(pk) != expected}
+    result: dict[int, tuple] = {
+        pk: ("invalid", None) for pk in ids if lengths.get(pk) != expected
+    }
     ok_ids = [pk for pk in ids if lengths.get(pk) == expected]
     for chunk in _chunks(ok_ids, _BLOB_CHECK_CHUNK):
         with connections[using].cursor() as cursor:
@@ -380,10 +410,49 @@ def _active_page_invalid(page: list[EmbeddingDocument], dimensions: int, using: 
             )
             for pk, blob in cursor.fetchall():
                 try:
-                    validate_vector_blob(blob, dimensions=dimensions)
+                    values = decode_vector(blob, dimensions=dimensions)
                 except VectorCodecError:
-                    invalid.add(pk)
-    return invalid
+                    result[pk] = ("invalid", None)
+                else:
+                    if _vector_is_zero_norm(values):
+                        result[pk] = ("zero", None)
+                    else:
+                        result[pk] = ("ok", values)
+    return result
+
+
+def _decode_active_page(
+    page: list[EmbeddingDocument], dimensions: int, using: str
+) -> dict[int, tuple[float, ...] | None]:
+    """Length-first decode of ONE page of active-generation rows.
+
+    Returns ``{pk: values}`` where ``values`` is the decoded finite
+    NONZERO vector tuple for usable rows and ``None`` for unusable ones
+    (wrong byte length, non-finite, or zero-norm) WITHOUT loading
+    oversized blobs: SQLite ``length()`` classifies first, and only
+    exact ``dimensions*4``-byte blobs are fetched and decoded, in
+    bounded chunks. Thin wrapper over the SHARED
+    :func:`_classify_active_page` — status/rebuild/repair and the Step
+    5C semantic traversal never blob-decode a corpus twice.
+    """
+    return {
+        pk: (values if kind == "ok" else None)
+        for pk, (kind, values) in _classify_active_page(page, dimensions, using).items()
+    }
+
+
+def _active_page_invalid(page: list[EmbeddingDocument], dimensions: int, using: str) -> set[int]:
+    """Pks of an active-document page whose vector blob is unusable
+    (wrong byte length, non-finite, or zero-norm) WITHOUT loading
+    oversized blobs: SQLite ``length()`` classifies first, and only
+    exact-length blobs are fetched/decoded, in bounded chunks. Thin
+    wrapper over the SHARED :func:`_decode_active_page` (both never
+    blob-decode a corpus twice)."""
+    return {
+        pk
+        for pk, values in _decode_active_page(page, dimensions, using).items()
+        if values is None
+    }
 
 
 def _iter_classified(active: EmbeddingGeneration, using: str, page_size: int) -> Iterator[tuple]:
@@ -396,7 +465,8 @@ def _iter_classified(active: EmbeddingGeneration, using: str, page_size: int) ->
     - ``("work", category, current_row)`` with ``category`` one of
       ``missing_document`` (current key with no active vector),
       ``stale_content`` (active ``source_content_hash`` differs) or
-      ``invalid_vector`` (matched active vector is malformed).
+      ``invalid_vector`` (matched active vector is malformed or has
+      zero norm).
 
     Memory is bounded by the page size on both streams; exact counts
     are accumulated by the consumer without any unbounded set.
@@ -511,10 +581,10 @@ def build_embedding_status_report(config, *, using: str = "default") -> dict:
     configured expected model / EMBEDDING_VERSION / INDEX_VERSION
     compatibility, and EXACT counts of the active generation versus all
     current SearchDocuments: missing keys, stale ``source_content_hash``,
-    orphan keys and invalid vectors (wrong byte length or non-finite,
-    classified without loading oversized blobs). Failed/building/
-    superseded generations are counted but their documents never make a
-    healthy active generation unhealthy. There is no configured
+    orphan keys and invalid vectors (wrong byte length, non-finite or
+    zero-norm, classified without loading oversized blobs). Failed/
+    building/superseded generations are counted but their documents never
+    make a healthy active generation unhealthy. There is no configured
     dimensions value, so a same-name server dimension change is NOT
     detectable here — active dimensions are validated by the DB bounds
     and the vector blobs. Healthy iff the source index is healthy, the
@@ -895,11 +965,13 @@ def _probe_dimensions(embedded) -> int:
 
 
 def _persist_batch(generation, page, embedded, dimensions: int, using: str) -> None:
-    """Validate exact client cardinality/text pairing and one consistent
-    returned dimension, encode with the vector codec, then persist ONE
-    bounded short transaction that rechecks each source key/content_hash
-    before inserting — a changed/missing source aborts the generation
-    instead of writing false provenance."""
+    """Validate exact client cardinality/text pairing, one consistent
+    returned dimension and a NONZERO returned vector (a zero-norm
+    endpoint vector is rejected with one fixed sanitized error before
+    any write), encode with the vector codec, then persist ONE bounded
+    short transaction that rechecks each source key/content_hash before
+    inserting — a changed/missing source aborts the generation instead
+    of writing false provenance."""
     if len(page) != len(embedded):
         raise EmbeddingIndexError(_PAIRING_ERROR)
     payload: dict[str, tuple[str, bytes]] = {}
@@ -908,6 +980,8 @@ def _persist_batch(generation, page, embedded, dimensions: int, using: str) -> N
             raise EmbeddingIndexError(_PAIRING_ERROR)
         if len(batch.embedding) != dimensions:
             raise EmbeddingIndexError(_DIMENSION_ERROR)
+        if _vector_is_zero_norm(batch.embedding):
+            raise EmbeddingIndexError(_ZERO_VECTOR_ERROR)
         try:
             blob = encode_vector(batch.embedding, dimensions=dimensions)
         except VectorCodecError:
@@ -945,8 +1019,9 @@ def _validate_before_promotion(
 ) -> None:
     """Fresh complete source health sweep, complete current
     SearchDocument key/hash snapshot equality, and target generation
-    integrity (exact key/hash set plus vector dimensions/finiteness) —
-    all in bounded reads, no network, no full-scan accumulation."""
+    integrity (exact key/hash set plus usable vectors — dimensions,
+    finiteness and nonzero norm) — all in bounded reads, no network, no
+    full-scan accumulation."""
     source_report = search_index.build_status_report(using=using)
     if not source_report.get("healthy"):
         raise EmbeddingIndexError(_SOURCE_INDEX_UNHEALTHY)
@@ -1167,11 +1242,14 @@ def _active_is_compatible(active: EmbeddingGeneration, using: str) -> bool:
 def _persist_repair_batch(
     active: EmbeddingGeneration, rows, embedded, dimensions: int, using: str
 ) -> None:
-    """Validate pairing and that the returned dimension equals the ACTIVE
-    generation's (mismatch fails requiring rebuild BEFORE any write),
-    then ONE short transaction that re-reads source key/hash and active
-    compatibility and upserts exactly the target rows — changed rows
-    remain unresolved and never receive false provenance."""
+    """Validate pairing, that the returned dimension equals the ACTIVE
+    generation's (mismatch fails requiring rebuild BEFORE any write) and
+    that every returned vector is NONZERO (a zero-norm endpoint vector
+    fails with one fixed sanitized error BEFORE any write and never
+    replaces an existing vector), then ONE short transaction that
+    re-reads source key/hash and active compatibility and upserts
+    exactly the target rows — changed rows remain unresolved and never
+    receive false provenance."""
     if len(rows) != len(embedded):
         raise EmbeddingIndexError(_PAIRING_ERROR)
     payload: dict[str, tuple[str, bytes]] = {}
@@ -1180,6 +1258,8 @@ def _persist_repair_batch(
             raise EmbeddingIndexError(_PAIRING_ERROR)
         if len(batch.embedding) != dimensions:
             raise EmbeddingIndexError(_DIMENSION_CHANGED_REQUIRES_REBUILD)
+        if _vector_is_zero_norm(batch.embedding):
+            raise EmbeddingIndexError(_ZERO_VECTOR_ERROR)
         try:
             blob = encode_vector(batch.embedding, dimensions=dimensions)
         except VectorCodecError:

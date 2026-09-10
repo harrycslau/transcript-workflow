@@ -318,8 +318,9 @@ def _classify_page(
 ) -> list[SearchDocument]:
     """Bounded query of the page's matching active rows; classify each
     current row as correct (skip), missing (no active vector), stale
-    (``source_content_hash`` differs) or invalid (malformed vector blob,
-    classified via the shared 5B.3 length-first/chunked helper)."""
+    (``source_content_hash`` differs) or invalid (malformed or zero-norm
+    vector blob, classified via the shared 5B.3 length-first/chunked
+    helper)."""
     keys = [row.document_key for row in page]
     existing_rows = list(
         EmbeddingDocument.objects.using(using)

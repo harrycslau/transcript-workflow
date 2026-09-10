@@ -395,34 +395,47 @@ class ListFilters:
         """
         return not self.errors
 
+    def as_pairs(self) -> list[tuple[str, str]]:
+        """Canonical ordered ``(name, value)`` pairs (without ``page``).
+
+        The single serialization source: ``as_querystring()`` URL-encodes
+        these pairs and the POST-only vector forms render them as hidden
+        inputs, so GET links and POST bodies can never diverge. The
+        ``sort`` pair is omitted iff it equals the mode default.
+        """
+        pairs: list[tuple[str, str]] = []
+        if self.date:
+            pairs.append(("date", self.date.isoformat()))
+        if self.date_from:
+            pairs.append(("from", self.date_from.isoformat()))
+        if self.date_to:
+            pairs.append(("to", self.date_to.isoformat()))
+        for tag in self.tags:
+            pairs.append(("tag", tag))
+        if self.tag_match != "all":
+            pairs.append(("tag_match", self.tag_match))
+        if self.status:
+            pairs.append(("status", self.status))
+        if self.summary:
+            pairs.append(("summary", self.summary))
+        if self.review:
+            pairs.append(("review", "1"))
+        if self.audio:
+            pairs.append(("audio", self.audio))
+        if self.has_summary is not None:
+            pairs.append(("has_summary", "1" if self.has_summary else "0"))
+        if self.sort != self.sort_default:
+            pairs.append(("sort", self.sort))
+        return pairs
+
     def as_querystring(self) -> str:
         """Canonical query string (without the page parameter) so filters
         persist across pagination links."""
         import urllib.parse
 
         params: dict[str, list[str]] = {}
-        if self.date:
-            params["date"] = [self.date.isoformat()]
-        if self.date_from:
-            params["from"] = [self.date_from.isoformat()]
-        if self.date_to:
-            params["to"] = [self.date_to.isoformat()]
-        if self.tags:
-            params["tag"] = self.tags
-        if self.tag_match != "all":
-            params["tag_match"] = [self.tag_match]
-        if self.status:
-            params["status"] = [self.status]
-        if self.summary:
-            params["summary"] = [self.summary]
-        if self.review:
-            params["review"] = ["1"]
-        if self.audio:
-            params["audio"] = [self.audio]
-        if self.has_summary is not None:
-            params["has_summary"] = ["1" if self.has_summary else "0"]
-        if self.sort != self.sort_default:
-            params["sort"] = [self.sort]
+        for name, value in self.as_pairs():
+            params.setdefault(name, []).append(value)
         return urllib.parse.urlencode(params, doseq=True)
 
 

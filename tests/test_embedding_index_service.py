@@ -655,6 +655,48 @@ class TestStatusCategories:
         assert report["categories"]["invalid_vector"] == 1
         assert report["healthy"] is False
 
+    def test_invalid_vector_zero_norm(self, tmp_path):
+        # An exact all-zero stored blob is still structurally decodable
+        # by the codec, but the embedding-index usability layer must
+        # classify it as invalid_vector and the status as unhealthy.
+        config = self._setup(tmp_path)
+        gen = active_generation()
+        doc = EmbeddingDocument.objects.filter(generation=gen).first()
+        EmbeddingDocument.objects.filter(pk=doc.pk).update(
+            vector_blob=encode_vector(
+                [0.0] * gen.dimensions, dimensions=gen.dimensions
+            )
+        )
+        report = ei.build_embedding_status_report(config)
+        assert report["categories"]["invalid_vector"] == 1
+        assert report["keys"]["invalid_vector"] == [doc.document_key]
+        assert report["counts"]["invalid_vector"] == 1
+        assert report["healthy"] is False
+
+    def test_zero_norm_test_is_exact_no_tolerance(self, tmp_path):
+        # The zero-norm test must be EXACT: a tiny nonzero vector (the
+        # smallest float32 subnormal) must NOT be flagged, and an
+        # all-negative-zero vector (zero norm) MUST be flagged.
+        config = self._setup(tmp_path)
+        gen = active_generation()
+        doc = EmbeddingDocument.objects.filter(generation=gen).first()
+        EmbeddingDocument.objects.filter(pk=doc.pk).update(
+            vector_blob=encode_vector(
+                [1e-45] + [0.0] * (gen.dimensions - 1), dimensions=gen.dimensions
+            )
+        )
+        report = ei.build_embedding_status_report(config)
+        assert report["categories"]["invalid_vector"] == 0
+        assert report["healthy"] is True
+        EmbeddingDocument.objects.filter(pk=doc.pk).update(
+            vector_blob=encode_vector(
+                [-0.0] * gen.dimensions, dimensions=gen.dimensions
+            )
+        )
+        report = ei.build_embedding_status_report(config)
+        assert report["categories"]["invalid_vector"] == 1
+        assert report["healthy"] is False
+
     def test_oversized_blob_classified_via_length_without_decode(self, tmp_path):
         config = self._setup(tmp_path)
         gen = active_generation()
@@ -1021,6 +1063,28 @@ class TestRebuild:
 
         with pytest.raises(ei.EmbeddingIndexError, match="batch_size"):
             ei.rebuild_embedding_index(config, embedder=forbidden)
+
+    def test_rebuild_rejects_zero_endpoint_vector(self, tmp_path):
+        build_source(recordings=1, segments=2)
+        config = emb_config(tmp_path)
+        dim = 4
+
+        def zero_embedder(config, texts):
+            return [
+                EmbeddingBatch(text=t, embedding=tuple([0.0] * dim)) for t in texts
+            ]
+
+        with pytest.raises(ei.EmbeddingIndexError, match="zero-norm vector"):
+            ei.rebuild_embedding_index(config, embedder=zero_embedder)
+        # Nothing was promoted: no active generation, and the aborted
+        # build is marked failed WITHOUT persisting any zero vector.
+        assert not EmbeddingGeneration.objects.filter(
+            state=EmbeddingGenerationState.ACTIVE
+        ).exists()
+        failed = EmbeddingGeneration.objects.get(state=EmbeddingGenerationState.FAILED)
+        assert failed.failed_at is not None
+        assert EmbeddingDocument.objects.filter(generation=failed).count() == 0
+        assert ei.build_embedding_status_report(config)["healthy"] is False
 
     def test_unexpected_embedder_failure_sanitized_and_generation_failed(self, tmp_path):
         build_source(recordings=2, segments=2)
@@ -1431,6 +1495,65 @@ class TestRepair:
             for d in EmbeddingDocument.objects.filter(generation=gen)
         )
         assert after == before  # nothing written with the wrong dimension
+
+    def test_repair_reembeds_zero_vector_and_converges(self, tmp_path):
+        # A stored zero vector is invalid_vector work: repair re-embeds
+        # it and converges when the replacement is nonzero.
+        config = self._build(tmp_path)
+        gen = active_generation()
+        victim = EmbeddingDocument.objects.filter(generation=gen).first()
+        EmbeddingDocument.objects.filter(pk=victim.pk).update(
+            vector_blob=encode_vector(
+                [0.0] * gen.dimensions, dimensions=gen.dimensions
+            )
+        )
+        result = ei.repair_embedding_index(config, embedder=make_embedder())
+        assert result["result"] == "repaired"
+        assert result["embedded"] == 1
+        assert result["healthy"] is True
+        victim.refresh_from_db()
+        assert victim.vector_blob == encode_vector(
+            [0.1] * gen.dimensions, dimensions=gen.dimensions
+        )
+        assert ei.build_embedding_status_report(config)["healthy"] is True
+
+    def test_repair_rejects_zero_replacement(self, tmp_path):
+        # A zero vector RETURNED BY THE ENDPOINT during repair must never
+        # be persisted as a successful replacement: fail safely with a
+        # fixed sanitized error, keep the old vector, and never report
+        # healthy.
+        config = self._build(tmp_path)
+        rec, transcript, _s = make_transcribed_recording(
+            ["zero repair"], sha="zero-repair"
+        )
+        si.rebuild_index()
+        ei.rebuild_embedding_index(config, embedder=make_embedder())
+        gen = active_generation()
+        TranscriptSegment.objects.filter(transcript=transcript, ordinal=0).update(
+            text="zero repair EDITED"
+        )
+        si.rebuild_index()
+        key = f"segment:{transcript.pk}:0"
+        old_blob = EmbeddingDocument.objects.get(generation=gen, document_key=key).vector_blob
+
+        def zero_embedder(config, texts):
+            return [
+                EmbeddingBatch(text=t, embedding=tuple([0.0] * gen.dimensions))
+                for t in texts
+            ]
+
+        with pytest.raises(ei.EmbeddingIndexError, match="zero-norm vector"):
+            ei.repair_embedding_index(config, embedder=zero_embedder)
+        # the old vector was never overwritten with the zero replacement
+        assert (
+            EmbeddingDocument.objects.get(generation=gen, document_key=key).vector_blob
+            == old_blob
+        )
+        assert gen.state == EmbeddingGenerationState.ACTIVE  # active semantics retained
+        # the row is still stale: repair never falsely reports healthy
+        report = ei.build_embedding_status_report(config)
+        assert report["healthy"] is False
+        assert report["categories"]["stale_content"] == 1
 
     def test_concurrent_source_change_not_falsely_updated(self, tmp_path):
         config = self._build(tmp_path)
