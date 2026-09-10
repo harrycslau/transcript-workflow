@@ -2,11 +2,27 @@
 {% load workflow_extras %}
 {% block title %}Transcript — Brain{% endblock %}
 {% block content %}
-<h1>Transcript</h1>
 <p class="breadcrumb muted">
-  <a href="{% url 'recording-detail' recording.pk %}">Back to recording</a> ·
+  <a href="{% url 'recording-detail' recording.pk %}">&larr; Recording overview</a> ·
   <a href="{% url 'recording-history' recording.pk %}">History</a>
 </p>
+
+<div class="detail-header">
+  <h1 class="detail-title">Transcript</h1>
+  <p class="page-subtitle">{{ recording_title }}</p>
+  <div class="detail-meta">
+    <span class="meta-item">{{ segment_count }} segments</span>
+    {% if transcript_duration %}<span class="meta-item">{{ transcript_duration|duration }}</span>{% endif %}
+    {% if transcript_model %}<span class="meta-item">model: {{ transcript_model }}</span>{% endif %}
+    {% if transcript_language %}<span class="meta-item">language: {{ transcript_language }}</span>{% endif %}
+    <span class="meta-item">version: #{{ transcript.pk }}</span>
+  </div>
+  <div class="summary-actions">
+    <button type="button" class="copy-button btn-sm" data-copy-url="{% url 'transcript-export' recording.pk %}?format=text{{ version_query }}">Copy plain text</button>
+    <a class="btn-sm" href="{% url 'transcript-export' recording.pk %}?format=text{{ version_query }}">Plain text</a>
+    <a class="btn-sm" href="{% url 'transcript-export' recording.pk %}?format=timestamped{{ version_query }}">Timestamped text</a>
+  </div>
+</div>
 
 {% if is_active_version %}
   <p class="current-banner">This is the active transcript.</p>
@@ -15,12 +31,6 @@
     This is a HISTORICAL transcript version (<code>{{ transcript.pk }}</code>), not the active one.
   </p>
 {% endif %}
-
-<p class="muted">
-  {{ segment_count }} segments · created {{ transcript.created_at|local_time }} ·
-  <a href="{% url 'transcript-export' recording.pk %}?format=text{% if not is_active_version %}&amp;version={{ transcript.pk }}{% endif %}">plain text</a> ·
-  <a href="{% url 'transcript-export' recording.pk %}?format=timestamped{% if not is_active_version %}&amp;version={{ transcript.pk }}{% endif %}">timestamped</a>
-</p>
 
 <div class="transcript">
   {% for segment in page_obj.object_list %}

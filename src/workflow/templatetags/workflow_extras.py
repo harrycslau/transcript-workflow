@@ -88,3 +88,16 @@ def key_point_lines(value):
     from workflow.services.rendering import key_point_lines as render_lines
 
     return render_lines(value)
+
+
+@register.filter
+def key_point_tree(value):
+    """Nested ordered-list tree for structured summary key points.
+
+    Consumes the pure :func:`workflow.services.rendering.key_point_nodes`
+    tree and returns plain ``{"text", "children"}`` dicts; the recursive
+    ``_key_points.html`` partial renders real ``<ol>/<li>`` nesting.
+    """
+    from workflow.services.rendering import key_point_nodes
+
+    return key_point_nodes(value)

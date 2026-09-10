@@ -386,6 +386,31 @@ Non-negotiable principles:
   remains the minimal status page.
 - **Step 4**: full web interface, review queue, transcript/summary
   views, tag editing, manual routing controls.
+- **Step 4 v6 Recording Detail / Transcript / History redesign
+  (delivered)**: the approved v6 document-oriented production redesign
+  is implemented (`design/ui-prototype/` remains the approved design
+  source). Detail: stable default-language `RecordingCard.title` h1
+  (variants change summary content, never page identity), one composite
+  read-only status/next-action panel, compact tag chips with a native
+  `<details>` editor, complete selected summary with contextual
+  copy/export actions plus a collapsed Summary-provenance disclosure,
+  EXACTLY five active-transcript preview segments plus the accurate
+  total/open link, and a collapsed Technical-details disclosure; the
+  recent-attempts table is removed (History owns audit data). Transcript:
+  back-to-overview, title/context metadata, copy/plain/timestamped
+  downloads via the existing export URLs, retained pagination,
+  `id="segment-<ordinal>"` anchors and `?v=` historical versions
+  (`select_related("attempt")`). History: captioned responsive tables
+  (routing, processing attempts, transcript versions, summary versions,
+  source info); every collection bounded by `HISTORY_LIMIT = 100`
+  (limit+1 sentinel) with visible truncation notices and no N+1; routing
+  rows project ONLY allowlisted fields (never raw `evidence`); attempts
+  stay sanitized via `attempt_summary_for_display`; sources show safe
+  original filenames only (never paths); audio status is
+  present/missing only. All GETs remain strictly read-only; the
+  standalone summary route and historical summary/transcript routes
+  stay operational; multilingual generation semantics, tags and exports
+  are unchanged.
 - **Step 5**: FTS5 keyword search, local embeddings, semantic/hybrid
   search, Ask-with-citations. **5A.2 (delivered)**: persistent
   `SearchDocument` registry + FTS5 trigram table, reversible migration

@@ -8,11 +8,20 @@ JSON) are never loaded on the list page.
 from __future__ import annotations
 
 from django.core.paginator import Paginator
+from django.db.models import Count
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
-from workflow.models import ProcessingStatus, Recording, Summary, SummaryState, Transcript
+from workflow.models import (
+    AttemptStage,
+    AudioStatus,
+    ProcessingStatus,
+    Recording,
+    Summary,
+    SummaryState,
+    Transcript,
+)
 from workflow.query import (
     ListFilters,
     RecordingCard,
@@ -27,6 +36,12 @@ from workflow.services.web_actions import attempt_summary_for_display
 VIEW_COOKIE = "brain_view_pref"
 VALID_VIEWS = ("cards", "table")
 VIEW_COOKIE_MAX_AGE = 31536000  # one year
+
+# v6 detail/history bounds: exactly five active-transcript preview
+# segments on the detail page; every potentially long History collection
+# is capped at one local constant with a visible truncation notice.
+DETAIL_PREVIEW_SEGMENTS = 5
+HISTORY_LIMIT = 100
 
 
 def _effective_view(request) -> str:
@@ -316,22 +331,169 @@ def _action_availability(config, recording) -> dict:
     }
 
 
+def _status_panel(recording: Recording, routing_decision) -> dict:
+    """Composite read-only status/next-action presentation (v6).
+
+    Pure function over persisted state — SELECTs only, never writes,
+    never touches files/network. Returns a ``{level, label, detail}``
+    dict where ``level`` is one of ``ok``/``warn``/``danger``/
+    ``running``/``neutral`` and drives the single status panel on the
+    recording detail page.
+    """
+    from workflow.services.web_actions import unfinished_attempt_stage
+
+    stage = unfinished_attempt_stage(recording)
+    if stage is not None:
+        return {
+            "level": "running",
+            "label": "Running",
+            "detail": f"A {stage} attempt is currently running.",
+        }
+    if recording.processing_status in (
+        ProcessingStatus.HASHING,
+        ProcessingStatus.ROUTING,
+        ProcessingStatus.TRANSCRIBING,
+    ):
+        return {
+            "level": "running",
+            "label": "Running",
+            "detail": "A pipeline stage is currently running.",
+        }
+    if recording.processing_status == ProcessingStatus.FAILED:
+        return {
+            "level": "danger",
+            "label": "Failed",
+            "detail": "Routing or transcription failed — retry is available.",
+        }
+    if recording.retranscription_failed:
+        return {
+            "level": "warn",
+            "label": "Retranscription failed",
+            "detail": "The existing transcript stays active — retry is available.",
+        }
+    if recording.processing_status == ProcessingStatus.NEEDS_REVIEW:
+        return {
+            "level": "warn",
+            "label": "Routing needs review",
+            "detail": "Confirm the routing profile or route manually before transcription.",
+        }
+    if recording.processing_status == ProcessingStatus.READY_TO_TRANSCRIBE:
+        return {
+            "level": "warn",
+            "label": "Ready to transcribe",
+            "detail": "Transcription has not started yet.",
+        }
+    if recording.processing_status == ProcessingStatus.DISCOVERED:
+        return {
+            "level": "neutral",
+            "label": "Discovered",
+            "detail": "Waiting for the next pipeline run to route it.",
+        }
+    if recording.summary_status == SummaryState.FAILED:
+        return {
+            "level": "danger",
+            "label": "Summary failed",
+            "detail": "The last summarization attempt failed — retry is available.",
+        }
+    if recording.resummarization_failed:
+        return {
+            "level": "warn",
+            "label": "Re-summarization failed",
+            "detail": "The current summary was kept — retry is available.",
+        }
+    if recording.audio_status == AudioStatus.MISSING:
+        return {
+            "level": "warn",
+            "label": "Audio missing",
+            "detail": "The source audio file is no longer present.",
+        }
+    if recording.summary_status == SummaryState.MISSING:
+        return {
+            "level": "warn",
+            "label": "Summary not generated",
+            "detail": "An active transcript exists but the current summary is missing.",
+        }
+    if (
+        recording.processing_status == ProcessingStatus.TRANSCRIBED
+        and routing_decision is not None
+        and not routing_decision.routing_verified
+    ):
+        return {
+            "level": "warn",
+            "label": "Transcribed — routing unverified",
+            "detail": "Confirm the automatic routing decision.",
+        }
+    return {
+        "level": "ok",
+        "label": "Transcribed",
+        "detail": "Summary current — no action required.",
+    }
+
+
+def _format_confidence(value) -> str | None:
+    """Two-decimal label for a routing confidence score, or None when
+    absent/unusable. Safe bounded formatting — never raw evidence."""
+    if value is None:
+        return None
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _routing_rows_for_display(recording: Recording, limit: int) -> tuple[list[dict], bool]:
+    """Allowlisted routing-history rows (v6).
+
+    Exposes ONLY safe fields: timestamp, profile, method, verification,
+    model, a bounded confidence label and the stable reason code. The
+    query projects exactly those allowlisted columns via ``.only(...)``
+    so the raw ``evidence`` JSON is never loaded, and the adapter never
+    renders it.
+    """
+    decisions = list(
+        recording.routing_decisions.order_by("-ordinal")
+        .only(
+            # "recording" (the FK column) must be loaded: a deferred FK
+            # triggers a refresh_from_db per row during iteration.
+            "recording",
+            "created_at",
+            "profile_name",
+            "method",
+            "routing_verified",
+            "model_id",
+            "confidence",
+            "reason_code",
+        )[: limit + 1]
+    )
+    truncated = len(decisions) > limit
+    rows = [
+        {
+            "created_at": decision.created_at,
+            "profile_name": decision.profile_name,
+            "method": decision.method,
+            "verified_label": "yes" if decision.routing_verified else "no",
+            "model_id": decision.model_id,
+            "confidence": _format_confidence(decision.confidence),
+            "reason_code": decision.reason_code,
+        }
+        for decision in decisions[:limit]
+    ]
+    return rows, truncated
+
+
 def recording_detail(request, recording_id):
     config, recording, card = _detail_base(request, recording_id)
     transcript = recording.transcripts.filter(is_active=True).first()
-    transcript_segment_count = transcript.segments.count() if transcript is not None else 0
-    per_page = config.web.transcript_segments_per_page
-    segments = []
-    segment_pages = 0
+    transcript_segment_count = 0
+    preview_segments: list = []
     if transcript is not None:
-        paginator = Paginator(transcript.segments.order_by("ordinal"), per_page)
-        first_page = paginator.get_page(1)
-        segments = list(first_page.object_list)
-        segment_pages = paginator.num_pages
-    summaries = recording.summaries.order_by("-ordinal").only(
-        "id", "recording", "transcript", "ordinal", "title", "is_active", "created_at",
-        "transcript", "section",
-    )
+        transcript_segment_count = transcript.segments.count()
+        # Exactly DETAIL_PREVIEW_SEGMENTS active-transcript segments; the
+        # accurate total and the full-transcript link are rendered around
+        # them (the transcript page owns pagination and anchors).
+        preview_segments = list(
+            transcript.segments.order_by("ordinal")[:DETAIL_PREVIEW_SEGMENTS]
+        )
     from workflow.models import Tag
 
     tag_choices = Tag.objects.filter(is_configured=True).order_by("name")
@@ -353,17 +515,15 @@ def recording_detail(request, recording_id):
         "recording": recording,
         "transcript": transcript,
         "transcript_segment_count": transcript_segment_count,
-        "segments": segments,
-        "segment_pages": segment_pages,
-        "summaries": summaries,
+        "preview_segments": preview_segments,
         "variant": variant,
         # The displayed summary is the SELECTED variant's summary —
         # never an arbitrary active row.
         "current_summary": variant.summary,
         "default_summary": variant.default_summary,
-        "attempts": attempt_summary_for_display(recording, limit=8),
         "actions": _action_availability(config, recording),
         "routing_decision": card.active_route,
+        "status": _status_panel(recording, card.active_route),
         "tag_choices": tag_choices,
         "retired_tag_choices": retired_tag_choices,
         "default_output_language": variant.default_language,
@@ -421,42 +581,84 @@ def summary_detail(request, recording_id, summary_id):
 def recording_transcript(request, recording_id):
     config, recording, card = _detail_base(request, recording_id)
     version = request.GET.get("v")
+    # Metadata rendering (model, language, ...) reads the attempt row, so
+    # the transcript is fetched with select_related("attempt") on BOTH the
+    # active and the historical (?v=) path — no incidental lazy query.
+    transcripts_qs = recording.transcripts.select_related("attempt")
     if version:
         try:
-            transcript = recording.transcripts.get(pk=version)
+            transcript = transcripts_qs.get(pk=version)
         except (Transcript.DoesNotExist, ValueError):
             raise Http404("Transcript version not found for this recording") from None
     else:
-        transcript = recording.transcripts.filter(is_active=True).first()
+        transcript = transcripts_qs.filter(is_active=True).first()
         if transcript is None:
             raise Http404("No active transcript for this recording")
     paginator = Paginator(transcript.segments.order_by("ordinal"), config.web.transcript_segments_per_page)
     page = paginator.get_page(request.GET.get("page"))
+    model_id = transcript.attempt.model_id if transcript.attempt_id is not None else ""
     context = {
         "card": card,
         "recording": recording,
+        "recording_title": card.title,
         "transcript": transcript,
         "is_active_version": transcript.is_active,
         "page_obj": page,
         "segment_count": paginator.count,
+        "transcript_model": model_id,
+        "transcript_language": transcript.language_observed,
+        "transcript_duration": recording.duration_seconds,
+        # Export URL fragment preserving the historical version (the
+        # active transcript uses the plain export URL). ``&`` is
+        # autoescaped in the template, decoded by browsers/JS.
+        "version_query": f"&version={transcript.pk}" if not transcript.is_active else "",
     }
     return render(request, "workflow/recording_transcript.html", context)
 
 
 def recording_history(request, recording_id):
     config, recording, card = _detail_base(request, recording_id)
-    from django.db.models import Count
 
-    transcripts = recording.transcripts.order_by("-created_at").annotate(
-        segment_count=Count("segments")
+    # Bounded queries: every potentially long collection is fetched with
+    # a limit+1 sentinel row so the truncation notice is exact without
+    # separate count queries, and there is no N+1 (segment counts come
+    # from ONE annotated query; attempt rows are pre-sanitized).
+    transcripts = list(
+        recording.transcripts.order_by("-created_at")
+        .annotate(segment_count=Count("segments"))[: HISTORY_LIMIT + 1]
     )
-    summaries = recording.summaries.order_by("-ordinal").select_related("transcript", "section")
-    attempts = attempt_summary_for_display(recording, limit=20)
+    transcripts_truncated = len(transcripts) > HISTORY_LIMIT
+    transcripts = transcripts[:HISTORY_LIMIT]
+
+    summaries = list(
+        recording.summaries.order_by("-ordinal")
+        .select_related("transcript", "section")[: HISTORY_LIMIT + 1]
+    )
+    summaries_truncated = len(summaries) > HISTORY_LIMIT
+    summaries = summaries[:HISTORY_LIMIT]
+
+    attempts = attempt_summary_for_display(recording, limit=HISTORY_LIMIT)
+    attempts_truncated = recording.attempts.count() > HISTORY_LIMIT
+    # One-pass segment counts for transcription attempts (from the
+    # already-fetched transcript rows — never a per-attempt query).
+    segments_by_attempt = {t.attempt_id: t.segment_count for t in transcripts}
+    for row in attempts:
+        if row["stage"] == AttemptStage.TRANSCRIPTION:
+            row["segment_count"] = segments_by_attempt.get(row["id"])
+
+    routing_rows, routing_truncated = _routing_rows_for_display(recording, HISTORY_LIMIT)
+
     context = {
         "card": card,
         "recording": recording,
         "transcripts": transcripts,
+        "transcripts_truncated": transcripts_truncated,
         "summaries": summaries,
+        "summaries_truncated": summaries_truncated,
         "attempts": attempts,
+        "attempts_truncated": attempts_truncated,
+        "routing_rows": routing_rows,
+        "routing_truncated": routing_truncated,
+        "history_limit": HISTORY_LIMIT,
     }
     return render(request, "workflow/recording_history.html", context)

@@ -2,90 +2,190 @@
 {% load workflow_extras %}
 {% block title %}History — Brain{% endblock %}
 {% block content %}
-<h1>History</h1>
-<p class="breadcrumb muted"><a href="{% url 'recording-detail' recording.pk %}">Back to recording</a></p>
+<p class="breadcrumb muted"><a href="{% url 'recording-detail' recording.pk %}">&larr; Recording overview</a></p>
 
-<section>
-  <h2>Transcript versions</h2>
-  {% if transcripts %}
-    <table>
-      <thead><tr><th>Created</th><th>State</th><th>Segments</th><th>Parser</th><th>Attempt</th></tr></thead>
-      <tbody>
-        {% for transcript in transcripts %}
+<div class="detail-header">
+  <h1 class="detail-title">History</h1>
+  <p class="page-subtitle">{{ card.title }}</p>
+</div>
+
+<section class="history-section" aria-labelledby="history-routing-title">
+  <h2 id="history-routing-title">Routing</h2>
+  {% if routing_rows %}
+    <div class="table-scroll">
+      <table class="history-table">
+        <caption>Routing decisions for this recording</caption>
+        <thead>
           <tr>
-            <td>{{ transcript.created_at|local_time }}</td>
-            <td>
-              {% if transcript.is_active %}<span class="current-banner-inline">active</span>
-              {% else %}superseded{% if transcript.superseded_at %} {{ transcript.superseded_at|local_time }}{% endif %}{% endif %}
-            </td>
-            <td>{{ transcript.segment_count }}</td>
-            <td>v{{ transcript.parser_version }}</td>
-            <td><code>{{ transcript.attempt_id|default:"—" }}</code></td>
+            <th scope="col">When</th>
+            <th scope="col">Profile</th>
+            <th scope="col">Method</th>
+            <th scope="col">Verified</th>
+            <th scope="col">Model</th>
+            <th scope="col">Confidence</th>
+            <th scope="col">Reason</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for decision in routing_rows %}
+            <tr>
+              <td>{{ decision.created_at|local_time }}</td>
+              <td>{{ decision.profile_name }}</td>
+              <td>{{ decision.method }}</td>
+              <td>{{ decision.verified_label }}</td>
+              <td>{{ decision.model_id }}</td>
+              <td>{{ decision.confidence|default:"—" }}</td>
+              <td>{{ decision.reason_code|default:"—" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if routing_truncated %}<p class="truncation-note">Only the most recent {{ history_limit }} routing decisions are shown.</p>{% endif %}
+  {% else %}
+    <p class="muted">No routing decisions yet.</p>
+  {% endif %}
+</section>
+
+<section class="history-section" aria-labelledby="history-attempts-title">
+  <h2 id="history-attempts-title">Processing attempts</h2>
+  {% if attempts %}
+    <div class="table-scroll">
+      <table class="history-table">
+        <caption>Processing attempts for this recording</caption>
+        <thead>
+          <tr>
+            <th scope="col">Stage</th>
+            <th scope="col">#</th>
+            <th scope="col">Started</th>
+            <th scope="col">Finished</th>
+            <th scope="col">Outcome</th>
+            <th scope="col">Error code</th>
+            <th scope="col">Detail</th>
+            <th scope="col">Model</th>
+            <th scope="col">Segments</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for attempt in attempts %}
+            <tr>
+              <td>{{ attempt.stage }}</td>
+              <td>{{ attempt.ordinal }}</td>
+              <td>{{ attempt.started_at|local_time }}</td>
+              <td>{{ attempt.finished_at|local_time|default:"—" }}</td>
+              <td>{{ attempt.outcome }}</td>
+              <td>{{ attempt.error_code|default:"—" }}</td>
+              <td>{{ attempt.error_message|default:"—" }}</td>
+              <td>{{ attempt.model_id|default:"—" }}</td>
+              <td>{{ attempt.segment_count|default:"—" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if attempts_truncated %}<p class="truncation-note">Only the most recent {{ history_limit }} processing attempts are shown.</p>{% endif %}
+  {% else %}
+    <p class="muted">No processing attempts yet.</p>
+  {% endif %}
+</section>
+
+<section class="history-section" aria-labelledby="history-transcripts-title">
+  <h2 id="history-transcripts-title">Transcript versions</h2>
+  {% if transcripts %}
+    <div class="table-scroll">
+      <table class="history-table">
+        <caption>Transcript versions for this recording</caption>
+        <thead>
+          <tr>
+            <th scope="col">Created</th>
+            <th scope="col">State</th>
+            <th scope="col">Segments</th>
+            <th scope="col">Parser</th>
+            <th scope="col">Attempt</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for transcript in transcripts %}
+            <tr>
+              <td>{{ transcript.created_at|local_time }}</td>
+              <td>
+                {% if transcript.is_active %}<span class="current-banner-inline">active</span>
+                {% else %}superseded{% if transcript.superseded_at %} {{ transcript.superseded_at|local_time }}{% endif %}{% endif %}
+              </td>
+              <td><a href="{% url 'recording-transcript' recording.pk %}?v={{ transcript.pk }}">{{ transcript.segment_count }}</a></td>
+              <td>v{{ transcript.parser_version }}</td>
+              <td><code>{{ transcript.attempt_id|default:"—" }}</code></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if transcripts_truncated %}<p class="truncation-note">Only the most recent {{ history_limit }} transcript versions are shown.</p>{% endif %}
   {% else %}
     <p class="muted">No transcripts.</p>
   {% endif %}
 </section>
 
-<section>
-  <h2>Summary versions</h2>
+<section class="history-section" aria-labelledby="history-summary-title">
+  <h2 id="history-summary-title">Summary versions</h2>
   {% if summaries %}
-    <table>
-      <thead><tr><th>Version</th><th>Title</th><th>Language</th><th>State</th><th>Created</th><th>Model</th><th>Chunks</th><th>Input chars</th><th>Mode</th><th>Attempt</th></tr></thead>
-      <tbody>
-        {% for summary in summaries %}
+    <div class="table-scroll">
+      <table class="history-table">
+        <caption>Summary versions for this recording</caption>
+        <thead>
           <tr>
-            <td>#{{ summary.ordinal }}</td>
-            <td><a href="{% url 'summary-detail' recording.pk summary.pk %}">{{ summary.title }}</a></td>
-            <td>{{ summary.output_language|default:"—" }}</td>
-            <td>
-              {% if summary.is_active %}active in scope{% else %}superseded in scope{% endif %}
-              {% if summary.transcript.is_active and summary.is_active and summary.section.ordinal == 0 %}
-                · <span class="current-banner-inline">current</span>
-              {% else %}
-                · historical for this recording
-              {% endif %}
-            </td>
-            <td>{{ summary.created_at|local_time }}</td>
-            <td>{{ summary.model_id|default:"—" }}</td>
-            <td>{{ summary.chunk_count }}</td>
-            <td>{{ summary.input_characters }}{% if summary.input_truncated %} (truncated){% else %} (not truncated){% endif %}</td>
-            <td>{{ summary.generation_mode }}</td>
-            <td><code>{{ summary.attempt_id|default:"—" }}</code></td>
+            <th scope="col">Version</th>
+            <th scope="col">Title</th>
+            <th scope="col">Language</th>
+            <th scope="col">State</th>
+            <th scope="col">Created</th>
+            <th scope="col">Model</th>
+            <th scope="col">Chunks</th>
+            <th scope="col">Input</th>
           </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {% for summary in summaries %}
+            <tr>
+              <td>#{{ summary.ordinal }}</td>
+              <td><a href="{% url 'summary-detail' recording.pk summary.pk %}">{{ summary.title }}</a></td>
+              <td>{{ summary.output_language|default:"—" }}</td>
+              <td>
+                {% if summary.transcript.is_active and summary.is_active and summary.section.ordinal == 0 %}
+                  <span class="current-banner-inline">current</span>
+                {% else %}
+                  {% if summary.is_active %}active in scope{% else %}superseded in scope{% endif %}
+                  · historical for this recording
+                {% endif %}
+              </td>
+              <td>{{ summary.created_at|local_time }}</td>
+              <td>{{ summary.model_id|default:"—" }}</td>
+              <td>{{ summary.chunk_count }}</td>
+              <td>{{ summary.input_characters }}{% if summary.input_truncated %} (truncated){% else %} (not truncated){% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if summaries_truncated %}<p class="truncation-note">Only the most recent {{ history_limit }} summary versions are shown.</p>{% endif %}
   {% else %}
     <p class="muted">No summaries.</p>
   {% endif %}
 </section>
 
-<section>
-  <h2>Attempts</h2>
-  {% if attempts %}
-    <table>
-      <thead><tr><th>Stage</th><th>#</th><th>Outcome</th><th>Error code</th><th>Detail</th><th>Model</th><th>Started</th><th>Finished</th></tr></thead>
-      <tbody>
-        {% for attempt in attempts %}
-          <tr>
-            <td>{{ attempt.stage }}</td>
-            <td>{{ attempt.ordinal }}</td>
-            <td>{{ attempt.outcome }}</td>
-            <td>{{ attempt.error_code|default:"—" }}</td>
-            <td>{{ attempt.error_message|default:"—" }}</td>
-            <td>{{ attempt.model_id|default:"—" }}</td>
-            <td>{{ attempt.started_at|local_time }}</td>
-            <td>{{ attempt.finished_at|local_time|default:"—" }}</td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  {% else %}
-    <p class="muted">No attempts.</p>
-  {% endif %}
+<section class="history-section" aria-labelledby="history-source-title">
+  <h2 id="history-source-title">Source &amp; technical information</h2>
+  <dl class="provenance-grid">
+    <dt>Recording ID</dt><dd><code>{{ recording.pk }}</code></dd>
+    <dt>SHA-256</dt><dd><code title="{{ recording.sha256 }}">{{ recording.sha256|sha_short }}</code></dd>
+    <dt>Source file</dt><dd>{{ card.display_source.original_filename|default:"(no source)" }}</dd>
+    <dt>Recorded</dt><dd>{{ card.effective_at_label }} {{ card.effective_at|local_time }}{% if not recording.recorded_at %} <span class="muted">(discovered)</span>{% endif %}</dd>
+    <dt>Discovered</dt><dd>{{ recording.discovered_at|local_time }}</dd>
+    <dt>Duration</dt><dd>{{ recording.duration_seconds|duration }}</dd>
+    <dt>Audio status</dt><dd>{{ recording.audio_status }}</dd>
+    <dt>Processing status</dt><dd>{{ recording.processing_status }}</dd>
+    <dt>Summary status</dt><dd>{{ recording.summary_status }}</dd>
+    <dt>Created</dt><dd>{{ recording.created_at|local_time }}</dd>
+  </dl>
 </section>
 {% endblock %}

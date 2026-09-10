@@ -105,7 +105,11 @@ class TestVariantSwitching:
         content = response.content.decode()
         assert zh.title in content
         assert zh.overview in content
-        assert en.title not in content
+        # The stable detail h1 is the default-language RecordingCard
+        # title (page identity); the SELECTED variant only changes the
+        # summary content, never the page identity.
+        assert en.title in content  # default-language h1 stays
+        assert "zh-Hant" in content  # selected variant tab/note
 
     def test_finnish_variant_appears_when_it_exists(self, client):
         recording, transcript, section, _en, _zh = _multilingual_recording()

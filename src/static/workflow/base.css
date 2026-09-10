@@ -704,6 +704,221 @@ th { color: var(--muted); font-weight: 600; }
 .retired-row { color: var(--muted); }
 
 /* ============================================================
+   DETAIL / TRANSCRIPT / HISTORY (v6 redesign)
+   ============================================================ */
+.breadcrumb {
+  font-size: 0.8125rem;
+  color: var(--color-text-3);
+  margin: 0 0 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.breadcrumb a { color: var(--color-text-3); }
+.breadcrumb a:hover { color: var(--color-accent); }
+
+.detail-header { margin-bottom: 1.5rem; }
+.detail-title { font-size: 1.75rem; font-weight: 700; line-height: 1.3; margin: 0.6rem 0 0.5rem; }
+.page-subtitle { font-size: 0.8125rem; color: var(--color-text-3); margin: -0.25rem 0 1rem; }
+.detail-meta { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; font-size: 0.8125rem; color: var(--color-text-3); margin-bottom: 1rem; }
+.detail-meta .meta-item { display: inline-flex; align-items: center; gap: 0.5rem; }
+.detail-links { display: flex; gap: 1rem; margin-top: 0.5rem; flex-wrap: wrap; }
+.detail-link { font-size: 0.8125rem; font-weight: 500; }
+
+/* Status / next-action panel (one composite panel, level-tinted) */
+.status-panel {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background: var(--color-ok-bg);
+  border: 1px solid var(--color-ok);
+  border-radius: var(--radius-md);
+  margin-bottom: 1.5rem;
+  flex-wrap: wrap;
+}
+.status-panel-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-ok);
+  flex-shrink: 0;
+}
+.status-panel-main { font-size: 0.8125rem; color: var(--color-text-2); }
+.status-panel-warn { background: var(--color-warn-bg); border-color: var(--color-warn); }
+.status-panel-warn .status-panel-label { color: var(--color-warn); }
+.status-panel-danger { background: var(--color-danger-bg); border-color: var(--color-danger); }
+.status-panel-danger .status-panel-label { color: var(--color-danger); }
+.status-panel-running, .status-panel-neutral { background: var(--color-surface-2); border-color: var(--color-border-2); }
+.status-panel-running .status-panel-label, .status-panel-neutral .status-panel-label { color: var(--color-text-2); }
+
+/* Compact tags on the detail header */
+.detail-tags { margin-bottom: 1.25rem; }
+.detail-tags .tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.5rem;
+}
+.tag-editor { margin: 0.5rem 0; max-width: 34rem; }
+.tag-editor summary { cursor: pointer; font-size: 0.8125rem; color: var(--color-text-2); }
+.tag-editor summary:hover { color: var(--color-text); }
+.tag-editor[open] .tag-add-form { margin-top: 0.5rem; }
+.tag-editor h3 { font-size: 0.875rem; margin: 0.75rem 0 0.3rem; }
+
+/* Overview blocks: complete summary + transcript preview */
+.overview-block { margin-bottom: 2rem; }
+.summary-section { margin-bottom: 1.5rem; }
+.overview-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.overview-block-title { font-size: 1.05rem; font-weight: 700; margin: 0; }
+.overview-open { margin-top: 1rem; font-size: 0.8125rem; }
+.overview-open a { font-weight: 500; }
+
+.summary-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; }
+/* The shared per-variant action partial renders a plain submit button;
+   style it inside the contextual utility row only (local CSS, no change
+   to the partial's behaviour or the standalone summary page). */
+.summary-actions form button[type="submit"] {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-2);
+  cursor: pointer;
+}
+.summary-actions form button[type="submit"]:hover { background: var(--color-surface-2); }
+.btn-sm {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-text-2);
+  text-decoration: none;
+  white-space: nowrap;
+}
+a.btn-sm:hover { background: var(--color-surface-2); color: var(--color-text); }
+button.copy-button.btn-sm:hover { background: var(--color-surface-2); }
+
+.variant-note { font-size: 0.75rem; color: var(--color-text-3); margin: 0 0 1rem; }
+
+/* Markdown-like document flow (complete selected summary).
+   Heading hierarchy on the detail page: h1 recording title -> h2 Summary
+   -> h3 section headings; the summary title itself is a styled paragraph
+   so it never consumes a heading level. */
+.doc-flow { font-size: 0.9375rem; line-height: 1.55; color: var(--color-text-2); }
+.doc-flow .summary-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--color-text);
+  margin: 0 0 0.25rem;
+}
+.doc-flow h3 { font-size: 0.9375rem; font-weight: 700; color: var(--color-text); margin: 1.25rem 0 0.5rem; }
+.doc-flow h3:first-child { margin-top: 0; }
+/* Standalone summary pages (current/historical) render the same
+   sections as h2 under their own h1 — same visual weight as h3. */
+.doc-flow h2 { font-size: 0.9375rem; font-weight: 700; color: var(--color-text); margin: 1.25rem 0 0.5rem; }
+.doc-flow h2:first-child { margin-top: 0; }
+.doc-flow p { margin: 0.35rem 0; }
+.doc-flow ul { margin: 0.35rem 0; }
+
+/* Nested key-point outline: real <ol>/<li> semantics kept, but the
+   native list marker is suppressed and a deterministic CSS counter
+   supplies the full hierarchical path (1. / 1.1 / 1.1.1) — browsers
+   otherwise restart every nested <ol> at 1. */
+ol.key-points {
+  margin: 0.25rem 0;
+  padding-left: 0;
+  list-style: none;
+  counter-reset: keypoint;
+}
+ol.key-points > li {
+  counter-increment: keypoint;
+  position: relative;
+  padding-left: 3rem;
+  margin: 0.15rem 0;
+  overflow-wrap: anywhere;
+}
+ol.key-points > li::before {
+  content: counters(keypoint, ".") ".";
+  position: absolute;
+  left: 0;
+  top: 0;
+  min-width: 2.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+/* Native collapsed disclosure blocks (provenance / technical details) */
+.technical-details {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  padding: 0.75rem 1rem;
+  margin: 0.75rem 0 1.5rem;
+}
+.technical-details summary { font-size: 0.8125rem; color: var(--color-text-2); cursor: pointer; font-weight: 500; }
+.technical-details summary:hover { color: var(--color-text); }
+.technical-details[open] summary { margin-bottom: 0.75rem; }
+
+.provenance-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1.25rem;
+  font-size: 0.8125rem;
+  margin: 0;
+}
+.provenance-grid dt { color: var(--color-text-3); font-weight: 500; }
+.provenance-grid dd { color: var(--color-text-2); margin: 0; overflow-wrap: anywhere; }
+
+/* History: captioned responsive tables + bounded truncation notices */
+.history-section { margin-bottom: 2rem; }
+.history-section > h2 {
+  font-size: 1.05rem;
+  font-weight: 700;
+  margin: 0 0 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.history-table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 0.8125rem; }
+.history-table caption { text-align: left; font-size: 0.75rem; color: var(--color-text-3); padding-bottom: 0.5rem; }
+.history-table th {
+  text-align: left;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-3);
+  padding: 0.5rem 0.75rem;
+  border-bottom: 2px solid var(--color-border);
+  white-space: nowrap;
+}
+.history-table td { padding: 0.75rem; border-bottom: 1px solid var(--color-border); color: var(--color-text-2); vertical-align: top; }
+.history-table tbody tr:last-child td { border-bottom: none; }
+.truncation-note { font-size: 0.75rem; color: var(--color-text-3); font-style: italic; margin-top: 0.5rem; }
+
+/* ============================================================
    RESPONSIVE
    ============================================================ */
 @media (max-width: 40rem) {
@@ -734,6 +949,9 @@ th { color: var(--muted); font-weight: 600; }
 
   .status-grid { grid-template-columns: 1fr; }
   .provenance dl { grid-template-columns: 1fr; }
+  .provenance-grid { grid-template-columns: 1fr; }
+  .detail-title { font-size: 1.375rem; }
+  .detail-meta { flex-direction: column; gap: 0.25rem; }
   .recording-card { padding: 1rem; }
   .recording-card-header { flex-direction: column; gap: 0.5rem; }
   .recording-card-footer { flex-direction: column; align-items: flex-start; }

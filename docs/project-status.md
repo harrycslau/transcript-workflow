@@ -1,4 +1,4 @@
-# Project status — implementation handoff (unified search top bar + Step 5D delivered)
+# Project status — implementation handoff (v6 Recording Detail / Transcript / History redesign delivered)
 
 This file reflects the repository through the unified production
 search top bar on top of Step 5D: Step 4, the
@@ -32,36 +32,38 @@ selector that POSTs every mode to `/recordings/search/`; keyword POST
 redirects to the canonical bookmarkable GET `/recordings/?q=...`
 preserving the active filters/view, semantic/hybrid run and navigate
 POST-only and never place the query in a URL, and the direct keyword
-GET stays supported and read-only), and the **Step 5D Ask with
+GET stays supported and read-only), the **Step 5D Ask with
 Citations** (`workflow/services/ask.py` + the document-level evidence
 surface in `semantic_query.py`, `brain ask QUESTION [--json]`, and the
-`/ask/` GET-form/POST-execution page). The `design/ui-prototype/`
-directory is now **v6**: a design-only prototype of a PROPOSED
-recording detail page containing the complete Markdown-style summary,
-contextual summary actions, a bounded transcript preview, partitioned
-collapsed provenance/technical details, and separate navigable
-Transcript/History screens, using fictional data; the production
-recording detail view/template is unchanged. The
-working tree is independently full-suite verified: **2203 collected
-and 2203 passed** (only the known `audioop` deprecation warning), with
-`manage.py check` and `makemigrations --check` clean. No real-database
+`/ask/` GET-form/POST-execution page), and the approved
+**v6 Recording Detail / Transcript / History production redesign**
+(see the v6 section below). The `design/ui-prototype/` directory
+remains the approved v6 design source (fictional data); the production
+Recording Detail, Transcript and History pages now implement that
+design. The
+working tree is independently full-suite verified: **2238 collected
+and 2238 passed** (only the known `audioop` deprecation warning), with
+`manage.py check` and `makemigrations --check` clean (no migration).
+No real-database
 migration or real embedding/chat network call is claimed. This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
 
-## Handoff audit — 2026-09-10 (updated for the unified top bar + Step 5D)
+## Handoff audit — 2026-09-10 (updated for the v6 detail/transcript/history redesign)
 
 Updates the previous audits (the Step 5C state and the Step 5D state)
 in place to record that (1) the Step 5D Ask-with-Citations flow is now
-implemented in the working tree, and (2) the production Library search
+implemented in the working tree, (2) the production Library search
 was unified into a single global top-bar query input: a native
 Keyword/Semantic/Hybrid selector whose POST goes to
 `/recordings/search/` for every mode, keyword POSTs redirect to the
 canonical bookmarkable GET `/recordings/?q=...` (preserving the active
 filters/view), semantic/hybrid execute and navigate POST-only with the
 query never in a URL, the Library's middle semantic/hybrid section was
-removed, and mobile uses a two-row fixed header. The full suite is
-independently verified at the current state (**2203 passed**). No
+removed, and mobile uses a two-row fixed header, and (3) the approved
+**v6 Recording Detail / Transcript / History production redesign** is
+delivered (see the v6 section below). The full suite is
+independently verified at the current state (**2238 passed**). No
 real-database migration or real embedding/chat network call is
 claimed; the work and its tests are in the working tree.
 
@@ -70,7 +72,8 @@ claimed; the work and its tests are in the working tree.
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
   configuration; implementation complete through the unified search top
-  bar and Step 5D (Step 4
+  bar and Step 5D plus the **v6 Recording Detail / Transcript /
+  History production redesign** (Step 4
   web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
   with highlights and jump links, the pre-5B stability patch, the
@@ -80,17 +83,29 @@ claimed; the work and its tests are in the working tree.
   the Step 5B.4 incremental embedding synchronization, the Step 5C
   semantic/hybrid search with the unified global top-bar web input
   (keyword POST → bookmarkable GET redirect; semantic/hybrid
-  POST-only, query never in a URL), and the
-  Step 5D Ask-with-Citations service/CLI/web flow). The
-  `design/ui-prototype/` directory is a v6 DESIGN-ONLY prototype of a
-  proposed recording detail page containing the complete document-style
-  summary, contextual actions, a bounded transcript preview, and
-  separate navigable Transcript/History screens (fictional data); the
-  production recording detail view/template is unchanged.
+  POST-only, query never in a URL), the
+  Step 5D Ask-with-Citations service/CLI/web flow, and the v6
+  document-oriented Recording Detail / Transcript / History redesign).
+  The `design/ui-prototype/` directory remains the approved v6 design
+  source (fictional data); the production Recording Detail, Transcript
+  and History pages now implement that design — see the v6 section
+  below.
 - Current verification (independently confirmed, CURRENT state): the
-  full suite passes — **2203 collected and
-  2203 passed** (the Step 5D full-suite state was 2191 — historical;
-  the unified-top-bar delta is **12 tests** — the
+  full suite passes — **2238 collected and
+  2238 passed** (the unified-top-bar + Step 5D state was 2203 —
+  historical; the v6 detail/transcript/history redesign delta is
+  **35 tests** — the new
+  `tests/test_web_history.py` (10: history section accessibility,
+  routing allowlist/projection, collection bounds with truncation
+  notices, source-display safety, attempt sanitization, transcript
+  version links) plus **25 additions** to
+  `tests/test_web_detail.py` (the status-panel matrix, the
+  exactly-five preview bound, transcript anchors/version/meta,
+  nested key-point `<ol>/<li>` structure, the detail-redesign
+  invariants, and the heading-hierarchy tests across the detail/
+  current-summary/historical-summary routes); the unified-top-bar
+  delta that reached 2203 was
+  **12 tests** — the
   `TestUnifiedTopBar` class (10) in `tests/test_web_search_modes.py`,
   `test_topbar_defaults_to_keyword_and_echoes_the_current_query` in
   `tests/test_web_search.py`, and
@@ -127,13 +142,69 @@ claimed; the work and its tests are in the working tree.
 
 **Inference / next steps**
 
-- **Step 5D — Ask with Citations is delivered in the working tree** (see
+- **The approved v6 Recording Detail / Transcript / History redesign is
+  delivered in the working tree** (see the v6 section below);
+  **Step 5D — Ask with Citations is delivered** too (see
   the Step 5D section below); the next planned work is **Step 6** —
   user-initiated topic splitting, section-level summaries/tags,
   retention cleanup and launchd scheduling.
 - No claim is made here about the real user database's migration state
   (`0007`–`0009` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
+
+## Step 4 v6 — Recording Detail / Transcript / History redesign (delivered in the working tree)
+
+**Scope delivered** (durable contract in `AGENTS.md`): the approved v6
+document-oriented production redesign of the Recording Detail,
+Transcript and History pages. The `design/ui-prototype/` directory
+remains the approved v6 design source (fictional data); production now
+implements it.
+
+- **Recording Detail**: a stable default-language `RecordingCard.title`
+  h1 (selected variants change the summary content, never the page
+  identity); compact metadata with Transcript/History header links; one
+  composite read-only status/next-action panel (healthy, needs-review,
+  ready-to-transcribe, failed/retry, retranscription-failed,
+  missing/failed/regeneration-failed summary, missing audio, running,
+  unverified routing); compact tag chips with a native `<details>` tag
+  editor (add/confirm/remove and retired-tag opt-in preserved); the
+  complete selected summary with contextual Copy-Markdown/Markdown/
+  Plain-text actions and a collapsed Summary-provenance disclosure
+  (JSON export stays available but secondary); EXACTLY five
+  active-transcript preview segments with the accurate total and an
+  "Open transcript" link; a collapsed Technical-details disclosure; the
+  recent-attempts table is removed (History owns audit data).
+- **Transcript**: a separate polished screen with back-to-overview,
+  recording title/context (segment count, duration, model, language,
+  version), Copy-plain-text/plain/timestamped downloads via the
+  existing export URLs, retained pagination and
+  `id="segment-<ordinal>"` anchors, and historical `?v=` version
+  support (transcripts fetched with `select_related("attempt")`).
+- **History**: captioned responsive tables for routing decisions,
+  processing attempts, transcript versions, summary versions and
+  source/technical information. Every potentially long collection is
+  bounded by the local `HISTORY_LIMIT = 100` constant (limit+1
+  sentinel) with visible truncation notices and no N+1. Routing rows
+  project ONLY allowlisted fields (timestamp, profile, method,
+  verification, model, bounded confidence label, stable reason code) —
+  raw `evidence` is never loaded or rendered; attempts render through
+  `attempt_summary_for_display`; sources show safe original filenames
+  only (never paths); audio status says present/missing only.
+- **Preserved invariants**: all multilingual generation semantics
+  (action selector, return language/view, fingerprint, confirmation,
+  POST behavior) and the standalone summary route plus historical
+  summary/transcript routes stay operational; every GET remains
+  strictly read-only (SELECT only); all text autoescaped, external CSS
+  only, CSP unchanged.
+
+**Verification (independently confirmed, current state)**: full suite
+**2238 collected and 2238 passed** (the unified-top-bar + Step 5D state
+was 2203 — historical; the v6 delta is 35 tests across
+`tests/test_web_history.py` (new, 10) and `tests/test_web_detail.py`
+(25 additions)), only the known `audioop` warning; `manage.py check`
+and `makemigrations --check` (NO migration) and `git diff --check`
+clean. No real-database migration or real network call is claimed; no
+new commit/HEAD.
 
 ## Step 5D — Ask with Citations (delivered in the working tree)
 
@@ -228,7 +299,7 @@ warning; `manage.py check`, `makemigrations --check` (NO migration) and
 `git diff --check` clean. No real network, no real MacWhisper/oMLX, no
 user data, no real embedding/chat network calls; the real
 `config/config.yaml` untouched; no real-database migration is claimed.
-The CURRENT working-tree state is **2203 collected and 2203 passed** —
+The CURRENT working-tree state is **2238 collected and 2238 passed** —
 see the current audit at the top of this file.
 The next planned work is **Step 6**.
 
@@ -1871,9 +1942,18 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current (unified-top-bar + Step 5D tree, independently full-suite
-  verified): the full suite passes — **2203 collected
-  and 2203 passed** (the unified-top-bar delta is 12 tests: the
+- Current (v6 detail/transcript/history redesign tree, independently
+  full-suite verified): the full suite passes — **2238 collected
+  and 2238 passed** (the v6 redesign delta is 35 tests: the new
+  `tests/test_web_history.py` (10 — history safety, routing
+  allowlist/projection, bounds with truncation notices, source
+  display, sanitized attempts, transcript version links) plus 25
+  additions to `tests/test_web_detail.py` (status-panel matrix,
+  exactly-five preview bound, transcript anchors/version/meta, nested
+  key-point `<ol>/<li>` structure, detail-redesign invariants, and
+  the heading-hierarchy tests across the detail/current-summary/
+  historical-summary routes); the
+  unified-top-bar delta that reached 2203 is 12 tests: the
   `TestUnifiedTopBar` class (10) in
   `tests/test_web_search_modes.py`, `test_topbar_defaults_to_keyword_and_echoes_the_current_query`
   in `tests/test_web_search.py`, and
@@ -1890,7 +1970,10 @@ Production Library UI are delivered.
   secret-hygiene sweeps), with the only warning the known
   `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
   `manage.py check`, `makemigrations --check` (NO migration) and
-  `git diff --check` pass. The historical full-suite states are 2191
+  `git diff --check` pass. The historical full-suite states are 2235
+  (v6 corrections round — intermediate before the heading-hierarchy
+  tests), 2203
+  (unified top bar + Step 5D), 2191
   (Step 5D), 2103
   (Step 5C), 1783 (Step 5B.4), 1746 (Step 5B.3), 1632 (Step 5B.2),
   1499 (Step 5B.1) and 1404 (pre-5B stability patch).

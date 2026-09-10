@@ -45,6 +45,55 @@ def key_point_lines(points) -> list[str]:
     return lines
 
 
+def key_point_nodes(points) -> list[dict]:
+    """Nested ordered-list tree for web rendering of key points.
+
+    Returns a list of ``{"text": str, "children": [...]}`` nodes where a
+    structured ``{"text": exact str, "level": 1|2|3}`` row nests under
+    the most recent shallower row, giving real ``<ol>/<li>`` semantics
+    (browser numbering reproduces 1. / 1.1 / 1.1.1).
+
+    Historical exact strings and malformed/level-0 rows stay safely
+    readable as flat top-level items; orphaned deeper levels fall back
+    to a top-level item rather than being dropped. Arbitrary values are
+    never coerced: a non-exact-``str`` ``text`` is skipped, and ``level``
+    is accepted only as the exact ints 1..3 (bool rejected).
+    """
+    nodes: list[dict] = []
+    last: dict[int, dict | None] = {1: None, 2: None, 3: None}
+    for point in points if isinstance(points, list) else []:
+        if isinstance(point, str):
+            node = {"text": point, "children": []}
+            nodes.append(node)
+            last = {1: None, 2: None, 3: None}
+            continue
+        if not isinstance(point, dict):
+            continue
+        text = point.get("text")
+        if not isinstance(text, str):
+            continue  # never invoke arbitrary coercion on non-str values
+        level = point.get("level", 0)
+        if isinstance(level, bool) or level not in (1, 2, 3):
+            node = {"text": text, "children": []}
+            nodes.append(node)
+            last = {1: None, 2: None, 3: None}
+            continue
+        node = {"text": text, "children": []}
+        if level == 1:
+            nodes.append(node)
+            last = {1: node, 2: None, 3: None}
+        else:
+            parent = last[level - 1]
+            if parent is None:
+                nodes.append(node)  # orphaned deeper level: keep readable
+            else:
+                parent["children"].append(node)
+            last[level] = node
+            for lower in range(level + 1, 4):
+                last[lower] = None
+    return nodes
+
+
 def _action_item_line(item: dict) -> str:
     parts = [item.get("text", "")]
     owner = item.get("owner")

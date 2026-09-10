@@ -1,20 +1,35 @@
 {% load workflow_extras %}
-<div class="summary-body">
-  <h2>{{ summary.title }}</h2>
+{% comment %}
+Shared summary content partial, context-aware in heading hierarchy.
+
+Two modes, chosen by the including template:
+
+- Embedded/detail mode (``embedded=True``, used by Recording Detail under
+  its Summary h2): the summary title renders as a styled paragraph and
+  every section heading is an h3 — h1 (recording title) -> h2 (Summary)
+  -> h3 (sections).
+- Standalone mode (default, used by the current-summary page and the
+  historical summary detail page under their own h1): the title is NOT
+  repeated (the page h1 already carries it) and every section heading is
+  an h2.
+
+All content/actions are identical in both modes; the nested key-point
+``_key_points.html`` partial is preserved unchanged.
+{% endcomment %}
+<div class="summary-body doc-flow">
+  {% if embedded %}<p class="summary-title">{{ summary.title }}</p>{% endif %}
   <section class="summary-overview">
-    <h3>Overview</h3>
+    {% if embedded %}<h3>Overview</h3>{% else %}<h2>Overview</h2>{% endif %}
     <p>{{ summary.overview }}</p>
   </section>
   {% if summary.key_points %}
     <section class="summary-points">
-      <h3>Key points</h3>
-      <div class="key-points">
-        {% for point in summary.key_points|key_point_lines %}<p>{{ point }}</p>{% endfor %}
-      </div>
+      {% if embedded %}<h3>Key points</h3>{% else %}<h2>Key points</h2>{% endif %}
+      {% include "workflow/_key_points.html" with nodes=summary.key_points|key_point_tree %}
     </section>
   {% endif %}
-  <section class="summary-actions">
-    <h3>Action items</h3>
+  <section class="summary-actions-section">
+    {% if embedded %}<h3>Action items</h3>{% else %}<h2>Action items</h2>{% endif %}
     {% if summary.action_items %}
       <ul>
         {% for item in summary.action_items %}
@@ -35,12 +50,12 @@
     {% endif %}
   </section>
   {% if summary.people %}
-    <section><h3>People</h3><ul>{% for name in summary.people %}<li>{{ name }}</li>{% endfor %}</ul></section>
+    <section>{% if embedded %}<h3>People</h3>{% else %}<h2>People</h2>{% endif %}<ul>{% for name in summary.people %}<li>{{ name }}</li>{% endfor %}</ul></section>
   {% endif %}
   {% if summary.organizations %}
-    <section><h3>Organizations</h3><ul>{% for name in summary.organizations %}<li>{{ name }}</li>{% endfor %}</ul></section>
+    <section>{% if embedded %}<h3>Organizations</h3>{% else %}<h2>Organizations</h2>{% endif %}<ul>{% for name in summary.organizations %}<li>{{ name }}</li>{% endfor %}</ul></section>
   {% endif %}
   {% if summary.topics %}
-    <section><h3>Topics</h3><ul>{% for name in summary.topics %}<li>{{ name }}</li>{% endfor %}</ul></section>
+    <section>{% if embedded %}<h3>Topics</h3>{% else %}<h2>Topics</h2>{% endif %}<ul>{% for name in summary.topics %}<li>{{ name }}</li>{% endfor %}</ul></section>
   {% endif %}
 </div>

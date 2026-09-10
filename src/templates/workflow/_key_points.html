@@ -1,0 +1,16 @@
+{% load workflow_extras %}
+{% comment %}
+Recursive nested ordered list for structured summary key points.
+
+Expects ``nodes``: a list of ``{"text": str, "children": [...]}`` dicts
+as produced by the ``key_point_tree`` filter (pure
+``rendering.key_point_nodes``). Leaf nodes have empty ``children``, so
+the recursion terminates. Every ``{{ node.text }}`` value is an exact
+plain ``str`` and renders under normal template autoescaping — no
+SafeString, mark_safe or generated HTML.
+{% endcomment %}
+<ol class="key-points">
+  {% for node in nodes %}
+    <li>{{ node.text }}{% if node.children %}{% include "workflow/_key_points.html" with nodes=node.children %}{% endif %}</li>
+  {% endfor %}
+</ol>
