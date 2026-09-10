@@ -7,13 +7,17 @@ mismatched URL is a 404 — never cross-recording access.
 
 from django.urls import path
 
-from workflow.views import actions, exports, recordings, review, tags
+from workflow.views import actions, ask, exports, recordings, review, tags
 from workflow import views
 
 urlpatterns = [
     path("", views.redirect_to_recordings, name="home"),
     path("status/", views.home, name="status"),
     path("health/", views.health, name="health"),
+
+    # Ask with citations (Step 5D). GET renders the form and does zero
+    # health/embedding/chat work; POST executes the read-only Ask.
+    path("ask/", ask.ask_view, name="ask"),
 
     path("recordings/", recordings.recording_list, name="recordings"),
     # Dedicated POST-only semantic/hybrid Library search (Step 5C). GET is
@@ -22,8 +26,12 @@ urlpatterns = [
     path("recordings/search/", recordings.recording_search, name="recording-search"),
     path("recordings/<uuid:recording_id>/", recordings.recording_detail, name="recording-detail"),
     path("recordings/<uuid:recording_id>/summary/", recordings.recording_summary, name="recording-summary"),
+    # Summary ids are model CharField(36) primary keys (UUID-producing by
+    # default, but manually supplied/legacy non-UUID values are valid), so
+    # the converter is ``str`` — the parent-scoped lookup below still
+    # enforces the recording boundary.
     path(
-        "recordings/<uuid:recording_id>/summaries/<uuid:summary_id>/",
+        "recordings/<uuid:recording_id>/summaries/<str:summary_id>/",
         recordings.summary_detail,
         name="summary-detail",
     ),

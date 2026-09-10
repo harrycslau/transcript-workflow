@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Ask — Brain{% endblock %}
+{% block content %}
+
+<section class="ask-area" aria-label="Ask with citations">
+  <h1 class="ask-heading">Ask</h1>
+  <p class="muted">Ask a question about your transcripts and summaries. Answers cite only the local evidence that was retrieved; the question is submitted by POST and never appears in the URL.</p>
+  <form method="post" action="{% url 'ask' %}" class="ask-form" role="search">
+    {% csrf_token %}
+    <label class="filter-group-label" for="id_ask_question">Question</label>
+    <input type="text" id="id_ask_question" name="question" value="{{ question|default:'' }}" maxlength="256" autocomplete="off" aria-label="Ask a question about your transcripts">
+    <button type="submit" class="apply-btn">Ask</button>
+  </form>
+</section>
+
+{% if state == 'invalid' or state == 'unavailable' %}
+  <div class="messages" aria-live="polite">
+    <div class="message message-error" role="status">{{ message }}</div>
+  </div>
+{% elif state == 'insufficient' %}
+  <div class="messages" aria-live="polite">
+    <div class="message message-info" role="status">{{ result.message }}</div>
+  </div>
+  {% if result.evidence_count %}
+    <p class="muted">{{ result.evidence_count }} evidence item{{ result.evidence_count|pluralize }} considered.</p>
+  {% endif %}
+{% elif state == 'answered' and result %}
+  <div class="ask-answer" aria-live="polite">
+    <p class="ask-answer-text">{% for fragment in result.fragments %}{% if fragment.citation_id %}<a class="citation-ref" href="{{ fragment.url }}">{{ fragment.text }}</a>{% else %}{{ fragment.text }}{% endif %}{% endfor %}</p>
+  </div>
+  <div class="ask-citations">
+    <h2 class="ask-citations-heading">Citations</h2>
+    <ul class="ask-citation-list">
+      {% for citation in result.citations %}
+        <li><a href="{{ citation.url }}">{{ citation.citation_id }} &middot; {{ citation.source }} &middot; {{ citation.title|default:"(untitled)" }}</a></li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+{% if result and result.evidence_truncated %}
+  <p class="muted ask-note">{{ evidence_note }}</p>
+{% endif %}
+{% endblock %}

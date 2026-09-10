@@ -1028,3 +1028,100 @@ class TestBoundedness:
         assert canary not in message
         assert "Traceback" not in message
         assert victim.document_key not in message
+
+
+# ---------------------------------------------------------------------------
+# 9. Step 5D document-level evidence retrieval surface
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceRetrieval:
+    def test_evidence_surface_exactly_one_sweep_embed(self, tmp_path, monkeypatch):
+        build_healthy(tmp_path)
+        config = emb_config(tmp_path)
+        calls = {"health": 0}
+        real_status = si.build_status_report
+
+        def spy_status(*args, **kwargs):
+            calls["health"] += 1
+            return real_status(*args, **kwargs)
+
+        monkeypatch.setattr(si, "build_status_report", spy_status)
+        tracker = []
+        evidence = sq.retrieve_semantic_evidence(
+            "alpha",
+            config=config,
+            embedder=keyword_embedder(["alpha", "beta"], tracker=tracker),
+        )
+        assert calls["health"] == 1
+        assert len(tracker) == 1
+        assert evidence.query == "alpha"
+        assert evidence.matches
+
+    def test_evidence_metadata_excluded_and_caps_enforced(self, tmp_path):
+        rec0, t0, s0 = make_transcribed_recording(
+            [
+                "alpha segment zero",
+                "alpha segment one",
+                "alpha segment two",
+                "alpha segment three",
+            ],
+            sha="sem-ev-0",
+        )
+        make_summary_version(
+            rec0, t0, s0, title="alpha title", overview="alpha overview"
+        )
+        make_transcribed_recording(["alpha other segment"], sha="sem-ev-1")
+        si.rebuild_index()
+        config = emb_config(tmp_path)
+        ei.rebuild_embedding_index(config, embedder=keyword_embedder(["alpha"]))
+        evidence = sq.retrieve_semantic_evidence(
+            "alpha", config=config, embedder=keyword_embedder(["alpha"])
+        )
+        types = [w.match.doc_type for w in evidence.matches]
+        assert "recording" not in types
+        assert len(evidence.matches) <= sq.EVIDENCE_TOTAL_LIMIT
+        per_recording = {}
+        for w in evidence.matches:
+            per_recording[w.match.recording_id] = per_recording.get(w.match.recording_id, 0) + 1
+        assert max(per_recording.values()) <= sq.EVIDENCE_PER_RECORDING_LIMIT
+        # Deterministic comparator: the summary wins the rec0 group.
+        assert evidence.matches[0].match.doc_type == "summary"
+        assert evidence.matches[0].match.summary_id is not None
+
+    def test_evidence_empty_scope_zero_embedding(self, tmp_path):
+        build_healthy(tmp_path)
+        config = emb_config(tmp_path)
+        tracker = []
+        evidence = sq.retrieve_semantic_evidence(
+            "alpha",
+            config=config,
+            scope=Recording.objects.none(),
+            embedder=keyword_embedder(["alpha", "beta"], tracker=tracker),
+        )
+        assert tracker == []
+        assert evidence.matches == ()
+
+    def test_evidence_rejects_caller_transaction(self, tmp_path):
+        build_healthy(tmp_path)
+        config = emb_config(tmp_path)
+        with transaction.atomic():
+            with pytest.raises(sq.SemanticQueryError) as excinfo:
+                sq.retrieve_semantic_evidence(
+                    "alpha",
+                    config=config,
+                    embedder=keyword_embedder(["alpha", "beta"]),
+                )
+        assert excinfo.value.code == sq.SEMANTIC_IN_TRANSACTION
+
+    def test_evidence_integrity_defect_fails_closed(self, tmp_path):
+        build_healthy(tmp_path)
+        config = emb_config(tmp_path)
+        gen = active_generation()
+        victim = EmbeddingDocument.objects.filter(generation=gen).first()
+        EmbeddingDocument.objects.filter(pk=victim.pk).update(vector_blob=b"\x00\x00")
+        with pytest.raises(sq.SemanticQueryError) as excinfo:
+            sq.retrieve_semantic_evidence(
+                "alpha", config=config, embedder=keyword_embedder(["alpha", "beta"])
+            )
+        assert excinfo.value.code == sq.SEMANTIC_INDEX_INTEGRITY

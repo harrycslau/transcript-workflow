@@ -756,8 +756,8 @@ Non-negotiable principles:
   status/rebuild/repair (above); **5B.4 (delivered — see the dedicated
   bullet below)** incremental embedding synchronization. **Step 5C
   semantic/hybrid retrieval is now delivered too** (see the Step 5C
-  bullet below) — the still-NOT-implemented next work is **Step 5D
-  Ask-with-citations**; do not add Ask-with-citations in this phase.
+  bullet below) and **Step 5D Ask with Citations is delivered too**
+  (see the Step 5D bullet below); the next planned work is **Step 6**.
 - **Step 5B.4 — Incremental embedding synchronization (delivered)**:
   `workflow/services/embedding_sync.py` is the ONLY incremental
   `EmbeddingDocument` writer; `embedding_index.py` keeps the explicit
@@ -890,12 +890,58 @@ Non-negotiable principles:
     warning; `manage.py check`, `makemigrations --check` (no migration)
     and `git diff --check` clean. No commit, real-database migration, or
     real embedding network call is claimed; all tests are mocked/network-free.
-- **Step 5D — Ask with Citations**: bounded retrieval into the local LLM
-  with citations that resolve only to actually retrieved transcript
-  segments or summaries, including transcript jump links. Never invent
-  citations; report insufficient evidence. Initial CLI/web delivery
-  does not persist question/answer history unless separately approved.
-  **NOT implemented — next work** (do not add in this phase).
+- **Step 5D — Ask with Citations (delivered)**: read-only Ask whose
+  answers cite ONLY actually retrieved evidence. `workflow/services/ask.py`
+  is the ONLY Ask orchestrator; the document-level evidence surface
+  lives in `workflow/services/semantic_query.py`
+  (`retrieve_semantic_evidence` / `select_semantic_evidence`) and reuses
+  the EXACT Step 5C contracts — it is deliberately NOT implemented by
+  consuming `semantic_search()` (which dedups one winner per Recording
+  and permits metadata). Evidence admits only `segment` and `summary`
+  SearchDocuments (metadata NEVER evidence), allows several documents
+  per Recording, and uses deterministic hardcoded bounds (12 total, 3
+  per Recording; no AskConfig/YAML keys). Exactly ONE source health
+  sweep, at most/exactly ONE query embedding when an eligible corpus
+  exists (ZERO for an empty one), ONE complete global
+  active-generation integrity traversal, and the same
+  active-generation/version/`PRAGMA data_version` concurrency
+  protections as Step 5C. Ask never writes, locks,
+  rebuilds/repairs/syncs, persists history or logs content.
+  CLI: `brain ask QUESTION [--json]` — read-only schema preflight, no
+  pipeline lock/recovery; exit 2 invalid question before health/network,
+  exit 1 sanitized operational/index/embedding/LLM failure, exit 0 for
+  an answer OR the fixed insufficient-evidence result. Web: `/ask/` —
+  GET renders the form with ZERO health/embedding/chat work and no
+  writes; POST executes Ask (CSRF; the question never enters a URL; no
+  persistence/PRG; PUT/DELETE/PATCH are 405 before any work).
+  Chat contract: the LLM base URL is validated at the Ask boundary
+  (http/https, no credentials/query/fragment, hostname exactly
+  `localhost` or a literal loopback IP → fixed sanitized
+  `endpoint_not_local`, zero transport); the prompt treats source text
+  as untrusted quoted evidence and requires a strict structured JSON
+  object with exactly `answer`/`citations`/`insufficient`; citation ids
+  are server-owned `C1..Cn` and only retrieved ids are accepted, with
+  declared/inline set equality, no duplicates and no unknown
+  citation-looking bracket tokens; a sufficient answer needs at least
+  one citation; ONE retry, ONLY for HTTP-successful malformed/schema/
+  citation output (endpoint/timeout/HTTP/request/response-size failures
+  never retry); model-declared insufficiency uses a fixed
+  application-owned message. Evidence is bounded (per-document chars,
+  total evidence chars, serialized request chars, max output tokens,
+  answer chars, citation count — all hardcoded); per-document
+  excerpting and total-budget tail drops are explicitly marked and
+  surfaced (`evidence_truncated` + one content-free application note).
+  Selected evidence is revalidated AFTER the chat
+  (key/content_hash/provenance plus Transcript/Segment or Summary
+  ownership/existence); any change is a fixed sanitized
+  concurrent-change failure, never an answer. Stable links: transcript
+  `/recordings/<recording>/transcript/?v=<transcript-id>&page=<ordinal
+  //segments_per_page+1>#segment-<ordinal>` and exact summary version
+  `/recordings/<recording>/summaries/<summary-id>/`; the summary route
+  converter is `<str:summary_id>` (CharField(36) primary keys), parent
+  ownership still enforced. Answers render as plain autoescaped
+  fragments plus server-owned citation links — never model HTML or
+  model URLs. No history persistence.
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (deletion only after successful
   processing + retention delay), launchd scheduling.

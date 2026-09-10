@@ -306,6 +306,7 @@ class TestCliPreflight:
             ["search", "q", "--json"],
             ["search", "q", "--mode", "semantic", "--json"],
             ["search", "q", "--mode", "hybrid", "--json"],
+            ["ask", "q", "--json"],
             ["search-index", "status", "--json"],
             ["search-index", "rebuild", "--json"],
             ["embedding-index", "status", "--json"],

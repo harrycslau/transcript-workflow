@@ -6,7 +6,8 @@ OpenAI-compatible endpoint), and storing/searching the results locally.
 
 ## What is available now
 
-Steps 1–4 are implemented. The app can:
+Steps 1–5 are implemented (through Step 5D Ask with Citations). The app
+can:
 
 - `data/inbox` discovery, file-stability tracking, SHA-256 hashing, and
   content-based deduplication (the same audio at several paths becomes
@@ -27,11 +28,14 @@ Steps 1–4 are implemented. The app can:
 Keyword search is available on the CLI (`brain search`) and in the
 Library's web UI (`/recordings/`): scoped filters before ranking,
 highlighted `<mark>` snippets and segment jump links
-(Step 5A.4.2 complete). The local embeddings foundation is planned
-for Step 5B, semantic/hybrid search for Step 5C, and
-Ask-with-citations for Step 5D. Manual topic splitting, scheduling,
-and retention deletion are planned for Step 6. **The app does not
-currently delete, move, or modify audio files.**
+(Step 5A.4.2 complete). Semantic/hybrid search is available via
+`brain search --mode semantic|hybrid` and the POST-only
+`/recordings/search/` page (Step 5C). Ask with citations is available
+via `brain ask "QUESTION"` and the `/ask/` page (Step 5D): answers
+cite only actually retrieved local transcript segments or summaries.
+Manual topic splitting, scheduling, and retention deletion are
+planned for Step 6. **The app does not currently delete, move, or
+modify audio files.**
 
 ## Prerequisites
 
@@ -273,6 +277,32 @@ engine without leaving the Library:
   the anchored transcript paragraph gets a landing highlight, and
   everything still works with no JavaScript and the same strict CSP.
 
+### Ask with citations (Step 5D)
+
+Ask a natural-language question and get an answer whose citations point
+only at actually retrieved local transcript segments or summaries:
+
+```sh
+uv run brain ask "What was decided about grading?"
+uv run brain ask "What was decided about grading?" --json   # structured answer + citations
+```
+
+- Read-only: no pipeline lock, no writes, no persistence, no history.
+  The question is validated cheaply before any health/network work
+  (exit **2** for a malformed or over-long question); a
+  missing/broken/stale index, an invalid local model endpoint or a
+  model failure is a sanitized exit **1**; an answer OR an explicit
+  "insufficient evidence" result exits **0**.
+- The web page is `/ask/`: GET renders the form (zero health/embedding/
+  chat work), POST executes the Ask (CSRF-protected; the question never
+  enters a URL; PUT/DELETE/PATCH are 405). The question/answer is not
+  persisted.
+- Evidence is only ever transcript segments and summaries (never
+  metadata), deterministically bounded, and every answer is checked
+  for citation consistency — only retrieved ids, no duplicates, and
+  declared ids appear inline. Citation links are stable: the exact
+  transcript version/page/anchor and the exact summary version.
+
 ### Routing profiles and the routing policy
 
 Routing profiles live under `macwhisper.routing.profiles` in
@@ -456,6 +486,12 @@ uv run brain serve --host 127.0.0.1 --port 9000
   text, filesystem paths, SQL errors, tracebacks, or secrets (internal
   details are logged locally instead). The endpoint never launches
   MacWhisper, queries `/models`, or exposes secrets.
+- `GET/POST /ask/` — Ask with citations (Step 5D): GET renders the
+  form with zero health/embedding/chat work and no writes; POST
+  executes the read-only Ask (CSRF-protected; the question never
+  enters a URL; PUT/DELETE/PATCH are 405). Answers cite only retrieved
+  local transcript segments or summaries with stable version links.
+  See the "Ask with citations" section above.
 
 ### Tests
 
@@ -469,9 +505,11 @@ network access, or real audio.
 
 ## Current limitations
 
-- Library web search is keyword-only (Step 5A.4.2 complete with
-  highlights, jump links and styling/a11y): semantic search/hybrid
-  ranking and Ask-with-citations are later Step 5C/5D work. Keyword
+- The Library's top-bar search is keyword-only (Step 5A.4.2 complete
+  with highlights, jump links and styling/a11y); semantic/hybrid
+  search is the separate POST-only `/recordings/search/` flow
+  (Step 5C), and Ask with citations is its own `/ask/` flow (Step 5D).
+  Keyword
   matching is substring-style (FTS5
   trigrams + a Unicode-folded LIKE fallback for 1–2-codepoint terms),
   not stemmed or word-tokenized.

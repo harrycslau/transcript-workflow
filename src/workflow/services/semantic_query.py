@@ -133,6 +133,15 @@ SEMANTIC_DEFAULT_RESULT_LIMIT = DEFAULT_RESULT_LIMIT
 SEMANTIC_MAX_QUERY_CODEPOINTS = MAX_QUERY_CODEPOINTS  # 256
 SEMANTIC_SNIPPET_MAX_CODEPOINTS = SNIPPET_MAX_CODEPOINTS  # 320
 
+# Step 5D Ask-with-citations evidence policy: document-level retrieval
+# over the SAME semantic contracts. Fixed, hardcoded, never configurable.
+# Metadata (``recording``) documents are NEVER evidence; several documents
+# from one Recording may be admitted (up to the per-Recording cap).
+EVIDENCE_TOTAL_LIMIT = 12
+EVIDENCE_PER_RECORDING_LIMIT = 3
+EVIDENCE_LIMIT_MAX = MAX_RESULT_LIMIT  # 200
+EVIDENCE_DOC_TYPES = frozenset({"segment", "summary"})
+
 # Stable sanitized error codes (never renamed silently).
 INVALID_QUERY = "invalid_query"
 INVALID_LIMIT = "invalid_limit"
@@ -152,6 +161,10 @@ _TOO_LONG_ERROR = (
 _QUERY_TEXT_ERROR = "the semantic query text is not a normalized semantic query"
 _BAD_LIMIT_ERROR = (
     f"the result limit must be an integer between 1 and {SEMANTIC_RESULT_LIMIT_MAX}"
+)
+_BAD_EVIDENCE_LIMIT_ERROR = (
+    "the evidence limits must be integers with "
+    f"1 <= per-recording <= total <= {EVIDENCE_LIMIT_MAX}"
 )
 _CANDIDATE_ERROR = "a semantic candidate is malformed"
 _CANDIDATE_ORDER_ERROR = (
@@ -686,6 +699,147 @@ def select_semantic_winners(
     ordered = sorted(heap, key=lambda entry: entry.key)
     return [
         SemanticWinner(rank=rank, score=entry.score, match=entry.match)
+        for rank, entry in enumerate(ordered, start=1)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Document-level evidence top-K primitive (Step 5D Ask-with-citations)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class EvidenceWinner:
+    """One evidence document in global order (rank, score, provenance).
+
+    Unlike :class:`SemanticWinner` this is NOT one-per-Recording: several
+    documents of one Recording may win, bounded by the per-Recording cap.
+    It never carries the vector (provenance-only), so memory stays bounded
+    by the current group plus the K metadata winners.
+    """
+
+    rank: int
+    score: float
+    match: SemanticMatch
+
+
+@dataclass(frozen=True)
+class SemanticEvidence:
+    """The public evidence-retrieval result (Step 5D)."""
+
+    query: str
+    matches: tuple[EvidenceWinner, ...]
+    active: EmbeddingGeneration
+
+
+def _validate_evidence_limits(total_limit, per_recording_limit) -> None:
+    """Exact-int bounds: ``1 <= per_recording_limit <= total_limit`` and
+    ``total_limit <= EVIDENCE_LIMIT_MAX`` (bool rejected)."""
+    for value in (total_limit, per_recording_limit):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise SemanticQueryError(INVALID_LIMIT, _BAD_EVIDENCE_LIMIT_ERROR)
+    if (
+        not 1 <= per_recording_limit <= total_limit
+        or total_limit > EVIDENCE_LIMIT_MAX
+    ):
+        raise SemanticQueryError(INVALID_LIMIT, _BAD_EVIDENCE_LIMIT_ERROR)
+
+
+def _offer_evidence_group(heap: list, group: list, total_limit: int) -> None:
+    """Insert one finished Recording's bounded evidence matches (already
+    provenance-only, best-first) into the global worst-first heap of at
+    most ``total_limit`` entries. Called only after every document of the
+    Recording has been seen."""
+    for key, score, match in group:
+        heapq.heappush(heap, _WorstFirst(key, score, match))
+        if len(heap) > total_limit:
+            heapq.heappop(heap)
+
+
+def select_semantic_evidence(
+    query_vector,
+    candidates,
+    *,
+    total_limit: int = EVIDENCE_TOTAL_LIMIT,
+    per_recording_limit: int = EVIDENCE_PER_RECORDING_LIMIT,
+) -> list[EvidenceWinner]:
+    """Return the global top-``total_limit`` evidence documents.
+
+    Admitted document types are EXACTLY ``segment`` and ``summary``
+    (:data:`EVIDENCE_DOC_TYPES`); metadata (``recording``) documents are
+    skipped and can never become evidence. Several documents of one
+    Recording may win, bounded by ``per_recording_limit``; the global
+    result is bounded by ``total_limit``. The SAME deterministic
+    comparator as :func:`select_semantic_winners` is reused (cosine
+    descending, doc-type rank summary<segment, ``document_key``,
+    ``recording_id``), and ``candidates`` must be ordered by
+    ``(recording_id, document_key)`` exactly as the engine's traversal
+    yields them.
+
+    The pure boundary validates every provided field exactly as
+    :func:`select_semantic_winners` does (``recording`` candidates are
+    validated but then excluded from the result). No value is ever
+    echoed. A zero/non-finite query norm fails ``invalid_query_vector``;
+    a zero/non-finite document norm fails ``invalid_document_vector``
+    (fail closed).
+    """
+    _validate_evidence_limits(total_limit, per_recording_limit)
+    query, query_norm = _prepare_query_vector(query_vector)
+
+    heap: list[_WorstFirst] = []
+    group: list[tuple] = []
+    last_recording: str | None = None
+    last_document_key: str | None = None
+
+    for candidate in candidates:
+        if type(candidate) is not SemanticCandidate:
+            raise SemanticQueryError(INVALID_CANDIDATE, _CANDIDATE_ERROR)
+        recording_id = candidate.recording_id
+        document_key = candidate.document_key
+        if (
+            type(recording_id) is not str
+            or type(document_key) is not str
+            or type(candidate.doc_type) is not str
+            or candidate.doc_type not in _KNOWN_DOC_TYPES
+            or type(candidate.output_language) is not str
+            or not _valid_transcript_id(candidate.transcript_id)
+            or not _valid_summary_id(candidate.summary_id)
+            or not _valid_segment_ordinal(candidate.segment_ordinal)
+            or not _valid_int_provenance(candidate.start_ms)
+            or not _valid_int_provenance(candidate.end_ms)
+        ):
+            raise SemanticQueryError(INVALID_CANDIDATE, _CANDIDATE_ERROR)
+
+        if last_recording is not None:
+            if recording_id == last_recording:
+                if document_key <= last_document_key:
+                    raise SemanticQueryError(CANDIDATE_ORDER, _CANDIDATE_ORDER_ERROR)
+            else:
+                if recording_id < last_recording:
+                    raise SemanticQueryError(CANDIDATE_ORDER, _CANDIDATE_ORDER_ERROR)
+                _offer_evidence_group(heap, group, total_limit)
+                group = []
+                last_document_key = None
+
+        last_recording = recording_id
+        last_document_key = document_key
+
+        if candidate.doc_type not in EVIDENCE_DOC_TYPES:
+            continue
+
+        score = _cosine_against_query(query, query_norm, candidate.vector)
+        key = _rank_key(score, candidate)
+        group.append((key, score, _match_from_candidate(candidate)))
+        # Bounded per-Recording accumulation: keep only the best
+        # ``per_recording_limit`` entries (deterministic comparator).
+        group.sort(key=lambda entry: entry[0])
+        del group[per_recording_limit:]
+
+    _offer_evidence_group(heap, group, total_limit)
+
+    ordered = sorted(heap, key=lambda entry: entry.key)
+    return [
+        EvidenceWinner(rank=rank, score=entry.score, match=entry.match)
         for rank, entry in enumerate(ordered, start=1)
     ]
 
@@ -1409,6 +1563,108 @@ def semantic_rank(
         return run_semantic_snapshot(snapshot, using=using, limit=limit)
     except SemanticQueryError:
         raise
+    except ConfigError:
+        # Already-sanitized shared errors (e.g. the scope compiler's
+        # usage/index failures) propagate unchanged — never forked.
+        raise
+    except Exception:
+        # Unexpected operational failure — never KeyboardInterrupt/
+        # SystemExit (BaseException) and never raw details.
+        raise SemanticQueryError(SEMANTIC_UNEXPECTED, _UNEXPECTED_ERROR) from None
+
+
+def retrieve_semantic_evidence(
+    raw,
+    *,
+    total_limit: int = EVIDENCE_TOTAL_LIMIT,
+    per_recording_limit: int = EVIDENCE_PER_RECORDING_LIMIT,
+    using: str = "default",
+    scope=None,
+    config=None,
+    embedder=None,
+) -> SemanticEvidence:
+    """One complete read-only DOCUMENT-LEVEL evidence retrieval (Step 5D).
+
+    Reuses the EXACT Step 5C semantic contracts and traversal: cheap
+    query normalization → reject caller transaction → capture ``PRAGMA
+    data_version`` → EXACTLY ONE source health sweep
+    (``search_index.build_status_report``) → exact active-generation
+    identity validation → data_version re-check → scope compilation →
+    at most ONE query embedding request (zero for an empty scoped
+    corpus) → ONE complete global active-generation integrity traversal
+    with in-scope scoring → final data_version + active-identity re-read.
+
+    Unlike :func:`semantic_search` this does NOT deduplicate one winner
+    per Recording and admits ONLY ``segment``/``summary`` documents
+    (metadata is never evidence), so several documents of one Recording
+    can be returned, bounded by the fixed ``total_limit`` and
+    ``per_recording_limit`` policy values. Strictly SELECT/PRAGMA plus
+    one localhost embedding request outside any transaction; no lock, no
+    writes, no rebuild/repair/sync, no logs.
+    """
+    normalized = normalize_semantic_query(raw)
+    _validate_evidence_limits(total_limit, per_recording_limit)
+    try:
+        _reject_in_atomic_block(using)
+        if config is None:
+            raise SemanticQueryError(SEMANTIC_UNEXPECTED, _UNEXPECTED_ERROR)
+        if embedder is None:
+            from workflow.services import embedding_client
+
+            embedder = embedding_client.embed_texts
+        data_version_before = _pragma_data_version(using)
+        source_report = search_index.build_status_report(using=using)
+        if not source_report.get("healthy"):
+            raise SemanticQueryError(
+                SEMANTIC_SOURCE_UNHEALTHY, _SOURCE_UNHEALTHY_ERROR
+            )
+        active = _validate_embedding_setup(config, using=using)
+        _require_unchanged_data_version(data_version_before, using)
+        scope_sql, scope_params = _compile_scope_or_none(scope, using=using)
+        if _scope_has_documents(scope_sql, scope_params, using=using):
+            embedded = embedder(config, [prepare_query_text(normalized)])
+            query_vector = _validated_query_vector(
+                embedded, normalized, active.dimensions
+            )
+        else:
+            query_vector = None
+        state = {
+            "current_documents": 0,
+            "in_scope_documents": 0,
+            "matched_recordings": 0,
+            "matched_active_keys": 0,
+            "last_in_scope_recording": None,
+        }
+        stream = _iter_integrity_scored(
+            using=using,
+            active=active,
+            dimensions=active.dimensions,
+            scope_sql=scope_sql,
+            scope_params=scope_params,
+            query_vector=query_vector,
+            state=state,
+        )
+        if query_vector is not None:
+            winners = select_semantic_evidence(
+                query_vector,
+                stream,
+                total_limit=total_limit,
+                per_recording_limit=per_recording_limit,
+            )
+        else:
+            for _candidate in stream:
+                pass
+            winners = []
+        _verify_final_state(active, data_version_before, using)
+        return SemanticEvidence(
+            query=normalized, matches=tuple(winners), active=active
+        )
+    except SemanticQueryError:
+        raise
+    except EmbeddingError as exc:
+        raise SemanticQueryError(
+            SEMANTIC_EMBEDDING_FAILED, _request_error(getattr(exc, "code", None))
+        ) from None
     except ConfigError:
         # Already-sanitized shared errors (e.g. the scope compiler's
         # usage/index failures) propagate unchanged — never forked.

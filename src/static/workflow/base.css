@@ -398,6 +398,47 @@ a.match-chip:hover {
   color: var(--color-text-3);
   white-space: nowrap;
 }
+
+/* ============================================================
+   ASK WITH CITATIONS (Step 5D)
+   ============================================================ */
+.ask-area {
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+}
+.ask-heading { font-size: 1.05rem; margin: 0 0 0.35rem; }
+.ask-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.6rem;
+}
+.ask-form input[type="text"] {
+  flex: 1;
+  min-width: 240px;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.875rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.ask-answer-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+.citation-ref {
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+.ask-citations-heading { font-size: 0.95rem; margin: 1rem 0 0.35rem; }
+.ask-citation-list { margin: 0; padding-left: 1.25rem; }
+.ask-citation-list li { margin: 0.15rem 0; }
+
 .pagination-form {
   display: inline-flex;
   align-items: center;

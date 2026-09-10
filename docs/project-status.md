@@ -1,6 +1,6 @@
-# Project status — implementation handoff (Step 5C delivered)
+# Project status — implementation handoff (Step 5D delivered)
 
-This file reflects the repository through Step 5C: Step 4, the
+This file reflects the repository through Step 5D: Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
@@ -21,44 +21,63 @@ promotion guard, the active-generation repair, and the
 (`workflow/services/embedding_sync.py` — the ONLY incremental
 `EmbeddingDocument` writer, driven by the same post-commit callback as
 Step 5A.3 with a pre-reconcile removed-key snapshot and a separate
-fixed aggregate failure warning), and the **Step 5C semantic and
+fixed aggregate failure warning), the **Step 5C semantic and
 hybrid search** (`workflow/services/semantic_query.py` +
 `workflow/services/search_fusion.py`, the shared
 `search_query.CompiledScope`/`compile_scope` orchestration value, the
 `--mode keyword|semantic|hybrid` CLI, and the POST-only
 `/recordings/search/` web endpoint — the keyword Library GET is
-unchanged). Step 5C is delivered in the working
-tree and independently full-suite verified: **2103 collected and 2103
+unchanged), and the **Step 5D Ask with Citations**
+(`workflow/services/ask.py` + the document-level evidence surface in
+`semantic_query.py`, `brain ask QUESTION [--json]`, and the `/ask/`
+GET-form/POST-execution page). Step 5D is delivered in the working
+tree and independently full-suite verified: **2191 collected and 2191
 passed** (only the known `audioop` deprecation warning), with
-`manage.py check` and `makemigrations --check` clean. No new
-commit/HEAD, real-database migration, or real embedding network call is
-claimed. This file is a snapshot, not a durable instruction file;
-`AGENTS.md` holds the standing rules.
+`manage.py check` and `makemigrations --check` clean. No real-database
+migration or real embedding/chat network call is claimed. This file is
+a snapshot, not a durable instruction
+file; `AGENTS.md` holds the standing rules.
 
-## Handoff audit — 2026-09-10 (updated for Step 5C)
+## Handoff audit — 2026-09-10 (updated for Step 5D)
 
-Updates the previous audit (the Step 5B.4 state) in place to record
-that the Step 5C semantic/hybrid search is now
+Updates the previous audit (the Step 5C state) in place to record
+that the Step 5D Ask-with-Citations flow is now
 implemented in the working tree and independently full-suite verified
-(**2103 passed**). No new
-commit/HEAD, real-database migration, or real embedding network call is
-claimed; the 5C work and its tests are in the working tree.
+(**2191 passed**). No real-database migration or real embedding/chat
+network call is claimed; the 5D work and its tests are in the working
+tree.
 
 **Observed facts**
 
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
-  configuration; implementation complete through Step 5C (Step 4
+  configuration; implementation complete through Step 5D (Step 4
   web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
   with highlights and jump links, the pre-5B stability patch, the
   Step 5B.1 local /embeddings client, the Step 5B.2 embedding
   storage foundation: migration 0009 + generation/document models +
   vector codec, the Step 5B.3 embedding index status/rebuild/repair,
-  the Step 5B.4 incremental embedding synchronization, and the Step 5C
-  semantic/hybrid search with the POST-only web endpoint).
-- Step 5C verification (independently confirmed): the full suite
-  passes — **2103 collected and
+  the Step 5B.4 incremental embedding synchronization, the Step 5C
+  semantic/hybrid search with the POST-only web endpoint, and the
+  Step 5D Ask-with-Citations service/CLI/web flow).
+- Step 5D verification (independently confirmed, CURRENT state): the
+  full suite passes — **2191 collected and
+  2191 passed** (the Step 5C full-suite state was 2103 — historical;
+  the 5D delta is 88 tests: the three new Step 5D files
+  `tests/test_ask_service.py` (60),
+  `tests/test_ask_cli.py` (9) and
+  `tests/test_web_ask.py` (13) = **82 tests**, plus **5 additions**
+  to `tests/test_semantic_search.py` (the document-level evidence
+  surface) and **1 addition** to `tests/test_migration_readiness.py`
+  (the `ask` command in the ORM-command preflight inventory);
+  `tests/test_web_security.py` gained `/ask/` in its CSP and
+  secret-hygiene sweeps), with the only warning the
+  known `audioop` DeprecationWarning (Python 3.12, removal slated for
+  3.13); `manage.py check`, `makemigrations --check` (NO migration) and
+  `git diff --check` pass.
+- Step 5C verification (historical state, independently confirmed at
+  the time): the full suite then passed — **2103 collected and
   2103 passed** (the Step 5B.4 full-suite state was 1783 — historical;
   the 5C delta is the five new Step 5C test files
   `tests/test_semantic_query.py` (69),
@@ -68,10 +87,7 @@ claimed; the 5C work and its tests are in the working tree.
   `tests/test_web_search_modes.py` (40) = **310 tests** plus **10
   additions** across `tests/test_embedding_index_service.py`,
   `tests/test_embedding_index_sync.py` and
-  `tests/test_migration_readiness.py`), with the only warning the
-  known `audioop` DeprecationWarning (Python 3.12, removal slated for
-  3.13); `manage.py check`, `makemigrations --check` (NO migration) and
-  `git diff --check` pass.
+  `tests/test_migration_readiness.py`).
 - Observed cleanup debt (not fixed here): the unreachable `return
   None` after `return "first"` in
   `workflow/services/web_actions.py:summarize_mode`, and the noted
@@ -79,12 +95,107 @@ claimed; the 5C work and its tests are in the working tree.
 
 **Inference / next steps**
 
-- Next is **Step 5D — Ask with Citations** (the next work; explicitly
-  NOT implemented in this working tree: no question/answer history, no
-  citation generation), then Step 6.
+- **Step 5D — Ask with Citations is delivered in the working tree** (see
+  the Step 5D section below); the next planned work is **Step 6** —
+  user-initiated topic splitting, section-level summaries/tags,
+  retention cleanup and launchd scheduling.
 - No claim is made here about the real user database's migration state
   (`0007`–`0009` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
+
+## Step 5D — Ask with Citations (delivered in the working tree)
+
+**Scope delivered** (durable contract in `AGENTS.md`): a read-only Ask
+flow whose answers cite ONLY actually retrieved evidence.
+`workflow/services/ask.py` is the ONLY Ask orchestrator; the
+document-level semantic evidence surface lives in
+`workflow/services/semantic_query.py`
+(`retrieve_semantic_evidence` / `select_semantic_evidence`) and reuses
+the EXACT Step 5C contracts — it is deliberately NOT implemented by
+consuming `semantic_search()` (which dedups one winner per Recording and
+permits metadata).
+
+- **Evidence retrieval**: admits only `segment` and `summary`
+  SearchDocuments (metadata is never evidence), allows several
+  documents per Recording, and uses deterministic hardcoded bounds
+  (12 total, 3 per Recording — no AskConfig/YAML keys, no models, no
+  migration). Exactly ONE source health sweep, at most/exactly ONE
+  query embedding when an eligible corpus exists (ZERO for an empty
+  one), ONE complete global active-generation integrity traversal, and
+  the same active-generation/version/`PRAGMA data_version` concurrency
+  protections as Step 5C. Strictly SELECT/PRAGMA plus one localhost
+  embedding call; no lock, write, rebuild/repair/sync, transaction over
+  network, or log.
+- **Ask service** (`workflow/services/ask.py`): cheap question
+  validation (the semantic normalization / 256-codepoint contract, exit
+  2 before any health/network) → LLM base-URL validation at the Ask
+  boundary (http/https, no credentials/query/fragment, hostname exactly
+  `localhost` or a literal loopback IP → fixed sanitized
+  `endpoint_not_local`, zero transport) → evidence materialization with
+  bounded queries (one SearchDocument fetch, one title lookup, one
+  query per ownership family) validating exact provenance/ownership
+  against the live active Transcript/Segment/Summary objects → a bounded
+  prompt (per-document chars, total evidence chars, serialized request
+  chars, max output tokens, answer chars, citation count — all
+  hardcoded; per-document excerpting and total-budget tail drops are
+  explicitly marked and surfaced as `evidence_truncated` with one
+  content-free application note) → one chat request with exactly one
+  retry ONLY for HTTP-successful malformed/schema/citation output
+  (endpoint/timeout/HTTP/request/response-size failures never retry) →
+  post-chat targeted revalidation of the selected SearchDocument
+  key/content_hash/provenance plus Transcript/Segment or Summary
+  ownership/existence; any change is a fixed sanitized
+  concurrent-change failure, never an answer.
+- **Model output contract**: the prompt treats source text as untrusted
+  quoted evidence and requires a strict structured JSON object with
+  exactly `answer`/`citations`/`insufficient`; citation ids are
+  server-owned `C1..Cn`; only retrieved ids are accepted; declared and
+  inline ids must match exactly with no duplicates and no unknown
+  citation-looking bracket tokens; a sufficient answer needs at least
+  one citation; model-declared insufficiency uses a fixed
+  application-owned message (prose discarded). If no usable evidence
+  exists the fixed insufficiency result is returned with ZERO chat
+  calls. Answers render as plain autoescaped fragments plus
+  server-owned citation links — never model HTML or model URLs; no
+  content-bearing logs/errors.
+- **Stable links**: transcript
+  `/recordings/<recording>/transcript/?v=<transcript-id>&page=<ordinal//
+  segments_per_page+1>#segment-<ordinal>` and exact summary version
+  `/recordings/<recording>/summaries/<summary-id>/`. The summary route
+  converter was aligned with the model's `CharField(36)` primary key
+  (`<uuid:summary_id>` → `<str:summary_id>`); the parent-scoped lookup
+  is retained and regression-tested (non-UUID legacy ids resolve,
+  cross-recording ids stay 404).
+- **CLI**: `brain ask QUESTION [--json]` — read-only schema preflight,
+  no pipeline lock/recovery; exit 2 invalid question before
+  health/network, exit 1 sanitized operational/index/embedding/LLM
+  failure, exit 0 for an answer OR insufficient evidence. Human and
+  JSON output carry the answer, citation metadata and safe URLs (full
+  evidence text never exposed by default); errors never contain the
+  question or evidence.
+- **Web**: dedicated `workflow/views/ask.py` + `templates/workflow/ask.html`
+  at `/ask/`. GET renders the form with ZERO health/embedding/chat work
+  and no writes; POST on the same endpoint executes Ask (CSRF, the
+  question never enters a URL, no persistence/PRG); PUT/DELETE/PATCH
+  are 405 before any work. Invalid input skips health/network;
+  operational failures render one sanitized unavailable state and clear
+  the submitted question; insufficiency is a successful explicit state.
+  All content autoescaped; no mark_safe/SafeString/`|safe`/generated
+  HTML/inline JS/style.
+
+**Verification (independently confirmed)**: full suite **2191 collected
+and 2191 passed** (the Step 5C state was 2103 — historical; the 5D delta
+is 88 tests: the three new Step 5D files —
+`tests/test_ask_service.py` (60), `tests/test_ask_cli.py` (9),
+`tests/test_web_ask.py` (13) = 82 — plus 5 additions to
+`tests/test_semantic_search.py` and 1 addition to
+`tests/test_migration_readiness.py`; `tests/test_web_security.py` gained
+`/ask/` in the CSP/secret-hygiene sweeps), only the known `audioop`
+warning; `manage.py check`, `makemigrations --check` (NO migration) and
+`git diff --check` clean. No real network, no real MacWhisper/oMLX, no
+user data, no real embedding/chat network calls; the real
+`config/config.yaml` untouched; no real-database migration is claimed.
+The next planned work is **Step 6**.
 
 ## Step 5C — Semantic and Hybrid Search (delivered in the working tree)
 
@@ -183,7 +294,8 @@ new Step 5C test files — `tests/test_semantic_query.py` (69),
 user data, no real embedding network calls; the real
 `config/config.yaml` untouched; no new commit/HEAD or real-database
 migration is claimed — the work and its tests are in the working tree.
-Step 5D (Ask with Citations) is the next, NOT-implemented work.
+Step 5D (Ask with Citations) is now delivered — see the Step 5D section
+at the top of this file.
 
 ## Step 5B.3 — Embedding index status/rebuild/repair (delivered in the working tree)
 
@@ -724,9 +836,11 @@ top of this file).
   autoescaping.
 - **Delivered later in Step 5A.4.2b** (see the section above):
   `<mark>` highlight fragments, segment jump links and the
-  styling/a11y polish. **Still NOT implemented (Step 5B)**:
-  Semantic/Hybrid controls (FORBIDDEN — tests assert their absence),
-  any health cache or background maintenance.
+  styling/a11y polish. At the 5A.4.2a round the Library keyword GET
+  carried NO Semantic/Hybrid controls (FORBIDDEN — tests assert their
+  absence) and no health cache or background maintenance; semantic and
+  hybrid search later arrived as the separate Step 5C POST-only
+  `/recordings/search/` flow (see the Step 5C section at the top).
 
 ## Step 5A.4.1 — Keyword Search Backend + CLI (delivered)
 
@@ -1708,23 +1822,22 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current (Step 5C tree, independently full-suite verified): the full
-  suite passes — **2103 collected
-  and 2103 passed** (the 5C delta is 320 tests: the five new Step 5C
-  test files — `tests/test_semantic_query.py` (69),
-  `tests/test_semantic_search.py` (42),
-  `tests/test_search_fusion.py` (43),
-  `tests/test_search_cli_modes.py` (32) and
-  `tests/test_web_search_modes.py` (40) = 310 — plus 10 additions
-  across `tests/test_embedding_index_service.py`,
-  `tests/test_embedding_index_sync.py` and
-  `tests/test_migration_readiness.py`; the historical 5B.4 state was
-  1783), with the only warning the known
+- Current (Step 5D tree, independently full-suite verified): the full
+  suite passes — **2191 collected
+  and 2191 passed** (the 5D delta is 88 tests: the three new Step 5D
+  files — `tests/test_ask_service.py` (60),
+  `tests/test_ask_cli.py` (9) and
+  `tests/test_web_ask.py` (13) = 82 — plus 5 additions
+  to `tests/test_semantic_search.py` (the document-level evidence
+  surface) and 1 addition to `tests/test_migration_readiness.py` (the
+  `ask` command in the ORM-command preflight inventory);
+  `tests/test_web_security.py` gained `/ask/` in its CSP and
+  secret-hygiene sweeps), with the only warning the known
   `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
   `manage.py check`, `makemigrations --check` (NO migration) and
-  `git diff --check` pass. The historical full-suite states are 1783
-  (Step 5B.4), 1746 (Step 5B.3), 1632 (Step 5B.2), 1499 (Step 5B.1)
-  and 1404 (pre-5B stability patch).
+  `git diff --check` pass. The historical full-suite states are 2103
+  (Step 5C), 1783 (Step 5B.4), 1746 (Step 5B.3), 1632 (Step 5B.2),
+  1499 (Step 5B.1) and 1404 (pre-5B stability patch).
 - Step 5B.1 full-suite state (historical, delivered and independently
   full-suite verified at that time): **1499 tests passing** — the
   historical 1404-test pre-5B stability patch
@@ -1802,8 +1915,9 @@ Production Library UI are delivered.
   production (status/rebuild/repair — Step 5B.3) and incremental
   embedding synchronization (Step 5B.4) are delivered; **Step 5C
   semantic/hybrid search is delivered** (CLI `--mode` plus the
-  POST-only `/recordings/search/` endpoint); **Ask-with-citations
-  (Step 5D) remains later work**.
+  POST-only `/recordings/search/` endpoint); **Step 5D Ask with
+  Citations is delivered** (`brain ask QUESTION [--json]` plus the
+  `/ask/` page).
   Keyword matching is substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
@@ -1816,7 +1930,7 @@ Production Library UI are delivered.
 - **Step 4 — delivered**: full web interface, review queue,
   transcript/summary views, tag editing/filtering, manual routing
   controls.
-- **Step 5 — in progress**: Step 5A.1 Production Library UI, Step 5A.2
+- **Step 5 — complete**: Step 5A.1 Production Library UI, Step 5A.2
   Search Index Foundation and **Step 5A.3 Incremental Index
   Synchronization are delivered**, and **Step 5A.4.1 keyword search
   backend + CLI is delivered** (registry + FTS5 trigram table,
@@ -1841,10 +1955,10 @@ Production Library UI are delivered.
   local /embeddings client), Step 5B.2 (embedding storage
   foundation: generation/document models, vector codec, migration 0009),
   Step 5B.3 (embedding index status/rebuild/repair), Step 5B.4
-  (incremental embedding synchronization) and Step 5C
-  (semantic/hybrid search) are all delivered** (see the sections at
-  the top of this file); **Step 5D — Ask-with-citations — is
-  next** (not implemented).
+  (incremental embedding synchronization), Step 5C
+  (semantic/hybrid search) and Step 5D (Ask with Citations) are all
+  delivered** (see the sections at the top of this file). **Step 5 is
+  complete; Step 6 is next.**
 - **Step 5B — Local Embeddings Foundation**: **5B.1 delivered** — the
   bounded local /embeddings client
   (`workflow/services/embedding_client.py`) plus the embedding config
@@ -1855,19 +1969,23 @@ Production Library UI are delivered.
   pure-stdlib `vector_codec.py` float32 codec (see the Step 5B.2
   section at the top of this file). **5B.3 and 5B.4 are delivered**
   (status/rebuild/repair and incremental synchronization; see the
-  sections at the top of this file), as is Step 5C.
+  sections at the top of this file), as are Step 5C and Step 5D.
 - **Step 5C — Semantic and Hybrid Search**: delivered in the working
   tree — bounded semantic retrieval and deterministic keyword+semantic
   fusion preserving recording deduplication, tag/date scope,
   provenance and stale/index-unavailable states, exposed as
   Keyword/Semantic/Hybrid modes in the CLI and the POST-only Library
   web endpoint (see the Step 5C section at the top of this file).
-- **Step 5D — Ask with Citations**: retrieve bounded local evidence,
-  call only the local LLM, and produce answers whose citations map to
-  real retrieved transcript segments or summaries (including working
-  transcript jump links). Never invent citations; surface insufficient
-  evidence clearly. Add CLI and web flows; persistence of question/
-  answer history is out of the initial scope unless separately approved.
+- **Step 5D — Ask with Citations (delivered)**: a read-only Ask flow
+  that retrieves bounded local evidence (segments/summaries only, never
+  metadata), calls only the local LLM, and produces answers whose
+  server-owned citations map ONLY to actually retrieved evidence
+  (transcript version/page/anchor and exact summary-version links).
+  Never invent citations; insufficient evidence is surfaced with a
+  fixed application message; question/answer history is NOT persisted.
+  Exposed as `brain ask QUESTION [--json]` and the `/ask/` GET-form/
+  POST-execution page (see the Step 5D section at the top of this
+  file).
 - **Step 6**: user-initiated topic splitting, section-level
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation

@@ -16,6 +16,13 @@ Commands:
                              index/embedding generation is missing, broken,
                              stale or unavailable; 2 on malformed query;
                              --json; --limit up to 200, default 50).
+  brain ask QUESTION [--json]
+                             Ask a question with citations drawn only from
+                             retrieved transcript segments/summaries
+                             (read-only; no lock; exit 2 on a malformed
+                             question; exit 1 on a sanitized index/
+                             embedding/model failure; exit 0 for an answer
+                             OR an explicit insufficient-evidence result).
   brain search-index status  Read-only search index health (no lock; exit 1
                              when the index is not built, stale, inconsistent
                              or the FTS table is missing/broken).
@@ -880,6 +887,104 @@ def cmd_search(args) -> int:
     return 0
 
 
+def _ask_payload(result) -> dict:
+    """JSON-safe Ask payload: answer/citation metadata and server-owned
+    URLs only — the full evidence text is never exposed."""
+    return {
+        "state": result.state,
+        "question": result.question,
+        "answer": result.answer,
+        "evidence_count": result.evidence_count,
+        "evidence_truncated": result.evidence_truncated,
+        "citations": [
+            {
+                "id": citation.citation_id,
+                "source": citation.source,
+                "recording_id": citation.recording_id,
+                "title": citation.title,
+                "url": citation.url,
+            }
+            for citation in result.citations
+        ],
+    }
+
+
+def _print_ask_human(result) -> None:
+    from workflow.services import ask as ask_service
+
+    if result.state == ask_service.STATE_INSUFFICIENT:
+        print(result.answer)
+        if result.evidence_truncated:
+            print(f"note: {ask_service.EVIDENCE_TRUNCATED_NOTE}")
+        return
+    print("Answer:")
+    print(result.answer)
+    if result.citations:
+        print("Citations:")
+        for citation in result.citations:
+            label = citation.title or "(untitled)"
+            print(f"  [{citation.citation_id}] {citation.source} \u00b7 {label}")
+            print(f"      {citation.url}")
+    if result.evidence_truncated:
+        print(f"note: {ask_service.EVIDENCE_TRUNCATED_NOTE}")
+
+
+def cmd_ask(args) -> int:
+    """``brain ask QUESTION`` (Step 5D) — strictly read-only.
+
+    Order: config/Django/schema preflight → cheap question validation
+    (exit 2, before any health/network work) → the Ask service (one
+    read-only evidence retrieval, at most one localhost embedding
+    request and at most two chat requests). Never takes the pipeline
+    lock, never recovers, never writes. Exit 0 for an answer OR the
+    explicit insufficiency result; exit 1 for sanitized operational
+    failures.
+    """
+    from brainlib.config import ConfigError, load_config
+
+    try:
+        config = load_config()
+        _setup_django()
+        # Schema preflight: Ask reads ORM models too.
+        _require_applied_migrations()
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except ImproperlyConfigured as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    from workflow.services import ask as ask_service
+
+    # Cheap question validation BEFORE any health/network work.
+    try:
+        question = ask_service.validate_question(args.question)
+    except ask_service.AskInputError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        # Resolve the production seams at call time so tests can patch
+        # them cleanly.
+        from workflow.services import embedding_client, llm
+
+        result = ask_service.ask_question(
+            question,
+            config=config,
+            embedder=embedding_client.embed_texts,
+            chat=llm.chat_completion,
+        )
+    except ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(_ask_payload(result), indent=2, default=str))
+    else:
+        _print_ask_human(result)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="brain",
@@ -996,6 +1101,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     search_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
 
+    ask_cmd = subparsers.add_parser(
+        "ask",
+        help="Ask a question about transcripts and summaries, with citations (read-only)",
+    )
+    ask_cmd.add_argument(
+        "question", help="Natural-language question (at most 256 characters)"
+    )
+    ask_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
+
     search_index_cmd = subparsers.add_parser(
         "search-index", help="Inspect or rebuild the keyword-search index (Step 5A.2)"
     )
@@ -1067,6 +1181,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_transcript_language(args)
     if args.command == "search":
         return cmd_search(args)
+    if args.command == "ask":
+        return cmd_ask(args)
     if args.command == "search-index":
         return cmd_search_index(args)
     if args.command == "embedding-index":

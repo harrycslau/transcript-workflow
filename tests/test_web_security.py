@@ -25,7 +25,7 @@ def client():
 
 class TestSecurityHeaders:
     def test_csp_header_on_all_pages(self, client):
-        for url in ("/", "/recordings/", "/tags/", "/review/", "/health/"):
+        for url in ("/", "/recordings/", "/tags/", "/review/", "/health/", "/ask/"):
             response = client.get(url)
             csp = response.headers.get("Content-Security-Policy", "")
             assert "default-src 'self'" in csp, url
@@ -98,6 +98,7 @@ class TestSecretHygiene:
             "/tags/",
             "/review/",
             "/status/",
+            "/ask/",
             f"/recordings/{recording.pk}/summary/export/?format=json",
         ):
             content = client.get(url).content.decode("utf-8")
