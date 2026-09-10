@@ -5,6 +5,9 @@ config/config.yaml
 # --- Runtime data (never commit) ---
 data/
 
+# --- Agentic setup files (never commit) ---
+.opencode/
+
 # Database sidecar files, in case a DB is ever placed outside data/
 *.sqlite3
 *.sqlite3-journal
