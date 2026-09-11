@@ -323,6 +323,359 @@ class TestSummaryHeadingHierarchy:
         assert "V1 summary" in content  # title via the page h1
 
 
+class TestDetailTagEditorMarkup:
+    """The compact + Add tag editor and concise wrapping tag chips
+    (production integration): real server forms, client-only filter,
+    retired nested disclosure, create form, and no verbose state labels."""
+
+    def test_chips_are_compact_inline_wrapping_and_concise(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        manual = make_tag("Work")
+        make_tag_assignment(recording, manual, origin="manual")
+        suggested = make_tag("Meeting")
+        make_tag_assignment(recording, suggested, origin="suggested")
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        # One wrapping chip container (flex + wrap), each chip inline.
+        assert 'class="tag-chips"' in content
+        assert "flex-wrap" not in content  # layout lives in external CSS only
+        assert 'class="tag-chip tag-manual"' in content
+        assert 'class="tag-chip tag-suggested"' in content
+        # Concise visible text: plain name for manual, "(suggested)" only
+        # for the suggested chip — no verbose origin/legend labels.
+        assert "Work" in content
+        assert "Meeting" in content
+        assert '<span class="tag-chip-suggested">(suggested)</span>' in content
+        assert "(manual)" not in content
+        assert "(confirmed)" not in content
+        assert "(assigned)" not in content
+        # Confirm/Remove semantics stay intact.
+        assert "/tags/{}/confirm/".format(suggested.pk) in content
+        assert "/tags/{}/remove/".format(manual.pk) in content
+
+    def test_add_editor_renders_one_bulk_form_with_checkboxes(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        work = make_tag("Work")
+        make_tag_assignment(recording, work, origin="manual")
+        retired = make_tag("OldTopic", configured=False)
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        # + Add tag enhanced details; no old select disclosure.
+        assert '<details class="enhanced-details tag-editor" id="tag-editor">' in content
+        assert "+ Add tag" in content
+        assert 'id="id_tag_add"' not in content
+        # Client-only filter input.
+        assert 'id="tag-filter-input"' in content
+        # ONE bulk form posting to tag-apply with repeated checkbox fields
+        # and the optional new-tag input — no per-option submit buttons,
+        # no separate create form, no hidden include_retired flag.
+        assert 'action="/recordings/{}/tags/apply/"'.format(recording.pk) in content
+        assert 'name="selected_tags"' in content
+        assert 'name="selected_retired_tags"' in content
+        assert 'name="new_tag_name"' in content
+        assert 'name="tag"' not in content
+        assert 'name="include_retired"' not in content
+        assert "/tags/create/" not in content
+        assert "/tags/add/" not in content
+        # The already-assigned available option's checkbox is checked; the
+        # retired option (no assignment) stays unchecked.
+        assert 'value="{}" checked'.format(work.pk) in content
+        assert 'value="{}">'.format(retired.pk) in content
+        # Retired tags live in a small nested disclosure.
+        assert '<details class="retired-tags">' in content
+        assert "Retired tags" in content
+        # One Done submit (the only mutating submit control in the modal).
+        assert ">Done</button>" in content
+        assert "Create and add" not in content
+
+    def test_editor_options_show_concise_labels_only_suggested_suffixed(self, client):
+        """The editor options carry the same concise visible text as the
+        chips: bare names, with '(suggested)' ONLY for an actively
+        suggested definition. The checkbox block's initial checked state
+        equals the authoritative active assignments."""
+        recording, _t, _s, _summary = _summary_recording()
+        manual = make_tag("Work")
+        make_tag_assignment(recording, manual, origin="manual")
+        suggested = make_tag("Meeting")
+        make_tag_assignment(recording, suggested, origin="suggested")
+        free = make_tag("Research")
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        # Concise option text: plain names for manual/plain options.
+        assert "Research" in content
+        assert "Work" in content
+        # Exactly one editor option is suffixed: the actively suggested
+        # one (the chips use their own tag-chip-suggested class).
+        assert content.count("tag-option-suggested") == 1
+        assert '<span class="tag-option-suggested">(suggested)</span>' in content
+        # Initial checked state == authoritative active assignments.
+        assert 'value="{}" checked'.format(manual.pk) in content
+        assert 'value="{}" checked'.format(suggested.pk) in content
+        assert 'value="{}">'.format(free.pk) in content
+        # Tapping is local: options are checkbox labels, never submit
+        # controls; deselecting an assigned block just unchecks it.
+        assert '<label class="tag-option" data-tag-name="Meeting">' in content
+        assert 'type="checkbox"' in content
+        assert 'class="tag-option-button"' not in content
+
+    def test_detail_get_is_select_only_with_tag_editor(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        make_tag_assignment(recording, make_tag("SelectOnly"))
+        with CaptureQueriesContext(connection) as ctx:
+            response = client.get(f"/recordings/{recording.pk}/")
+        assert response.status_code == 200
+        non_select = [
+            q for q in ctx.captured_queries
+            if not q["sql"].lstrip().upper().startswith("SELECT")
+        ]
+        assert non_select == []
+
+
+class TestEnhancedDetailsOverlay:
+    """Routing / + Add tag enhanced details: the native <details> no-JS
+    fallback stays fully usable with the real forms, the first useful
+    control per editor is explicitly marked for overlay focus, and the
+    app.js overlay contract is browser-independent (no <dialog>/showModal)
+    with cache-busted static URLs."""
+
+    def test_tag_filter_and_route_select_marked_for_focus(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        # The two "first useful control" markers: the tag filter input
+        # and the routing profile select.
+        assert content.count("data-modal-focus") == 2
+        assert 'id="tag-filter-input"' in content
+        assert 'id="id_route_profile_routing"' in content
+        assert 'name="profile"' in content
+
+    def test_app_js_custom_overlay_contract(self):
+        from django.contrib.staticfiles import finders
+
+        path = finders.find("workflow/app.js")
+        assert path is not None
+        source = Path(path).read_text(encoding="utf-8")
+        # Custom overlay instead of native <dialog>: role=dialog panel
+        # inside a fixed backdrop, shown/hidden via the hidden attribute.
+        assert 'className = "modal-overlay"' in source
+        assert 'className = "modal-panel"' in source
+        assert 'setAttribute("role", "dialog")' in source
+        assert 'setAttribute("aria-modal", "true")' in source
+        assert 'setAttribute("aria-labelledby", titleId)' in source
+        assert 'setAttribute("hidden", "")' in source
+        assert 'removeAttribute("hidden")' in source
+        # Summary click intercepts the native expansion.
+        assert 'addEventListener("click"' in source
+        assert "event.preventDefault()" in source
+        # No native dialog dependency; never innerHTML from data.
+        assert "showModal" not in source
+        assert 'createElement("dialog")' not in source
+        assert ".innerHTML" not in source
+        # Closing: Done (routing, no commit control), Escape, backdrop;
+        # focus restored to the trigger. A panel with its own
+        # [data-modal-commit] Done submit gets Cancel instead.
+        assert 'closeButton.textContent = commitControl ? "Cancel" : "Done";' in source
+        assert 'event.key === "Escape"' in source
+        assert 'event.target === overlay' in source
+        assert 'trigger.focus()' in source
+        # Tab containment.
+        assert 'event.key !== "Tab"' in source
+
+    def test_app_js_bulk_modal_contract(self):
+        """The tag modal stages changes locally: NO sessionStorage reopen
+        marker exists any more (nothing submits before Done); a panel with
+        its own [data-modal-commit] Done submit gets a Cancel close button
+        instead of a second generated Done; (re)opening resets the staged
+        checkbox/text state to the server-rendered initial values."""
+        from django.contrib.staticfiles import finders
+
+        path = finders.find("workflow/app.js")
+        assert path is not None
+        source = Path(path).read_text(encoding="utf-8")
+        # Reopen-marker behaviour is entirely removed.
+        assert "sessionStorage" not in source
+        assert "TAG_REOPEN_KEY" not in source
+        assert "consumeTagReopenMarker" not in source
+        # Commit panels: the generated close control is Cancel (routing,
+        # which has no commit control, keeps Done).
+        assert 'panel.querySelector("[data-modal-commit]")' in source
+        assert 'closeButton.textContent = commitControl ? "Cancel" : "Done";' in source
+        # Staged-state reset on (re)open: form.reset() restores the
+        # server-rendered checkbox defaults, the filter is cleared, and
+        # filtered options are un-hidden.
+        assert "resetStagedState" in source
+        assert "form.reset()" in source
+        assert '.tag-filter-input' in source
+        assert "option.hidden = false" in source
+        # The bulk form still submits normally (no AJAX/interception).
+        assert 'data-modal-commit' in source
+        # Never build DOM content from user/config values with innerHTML.
+        assert ".innerHTML" not in source
+
+    def test_routing_summary_matches_sibling_detail_links(self):
+        """The Routing <summary> reads like the Transcript/History anchors
+        (same colour, size/weight, underline, line-height and focus ring)
+        and keeps the native disclosure marker hidden — never button
+        chrome."""
+        from django.contrib.staticfiles import finders
+
+        path = finders.find("workflow/base.css")
+        assert path is not None
+        css = Path(path).read_text(encoding="utf-8")
+        rule = css[css.index(".routing-editor summary.detail-link {") : css.index(
+            ".routing-editor summary.detail-link::-webkit-details-marker"
+        )]
+        assert "font-size: 0.8125rem" in rule
+        assert "font-weight: 500" in rule
+        assert "line-height: 1.5" in rule
+        assert "color: var(--color-accent)" in rule
+        assert "text-decoration: underline" in rule
+        # Native disclosure marker stays hidden.
+        assert ".routing-editor summary.detail-link::-webkit-details-marker { display: none; }" in css
+        assert ".routing-editor summary.detail-link::marker { content: none; }" in css
+        # Focus ring matches the global anchor focus ring.
+        assert ".routing-editor summary.detail-link:focus-visible {" in css
+        assert "outline: 2px solid var(--accent)" in css
+        # Hover keeps the link colour (sibling anchors have no distinct
+        # hover state) — never button chrome.
+        assert ".routing-editor summary.detail-link:hover { color: var(--color-accent); }" in css
+        # No button chrome on the summary.
+        assert "border:" not in rule
+        assert "background:" not in rule
+        assert "border-radius:" not in rule
+
+    def test_versioned_static_urls_on_detail(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert 'href="/static/workflow/base.css?v=3"' in content
+        assert 'src="/static/workflow/app.js?v=3" defer' in content
+
+
+class TestBulkTagEditorMarkup:
+    """The + Add tag modal (production UX correction): ONE bulk form with
+    checkbox blocks posting only to tag-apply, initial checked state =
+    authoritative active assignments, local-only tapping (no per-option
+    submits), a single Done submit, no-JS native fallback, no
+    sessionStorage marker, asset v3, and the routing-overflow CSS rules."""
+
+    def _editor(self, client, recording):
+        body = client.get(f"/recordings/{recording.pk}/").content.decode()
+        start = body.index('id="tag-editor"')
+        return body[start : body.index("</section>", start)]
+
+    def test_one_bulk_form_only_done_submit(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        editor = self._editor(client, recording)
+        # Exactly ONE form, posting to tag-apply.
+        assert editor.count("<form") == 1
+        assert 'action="/recordings/{}/tags/apply/"'.format(recording.pk) in editor
+        # The ONLY mutating submit control is the Done button; there are no
+        # per-option submit buttons and no separate add/create forms.
+        assert editor.count('type="submit"') == 1
+        assert ">Done</button>" in editor
+        assert "Create and add" not in editor
+        assert 'name="tag"' not in editor
+        assert 'class="tag-option-button"' not in editor
+        assert "/tags/add/" not in editor
+        assert "/tags/create/" not in editor
+
+    def test_initial_checked_state_equals_authoritative_active_set(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        manual = make_tag("Work")
+        make_tag_assignment(recording, manual, origin="manual")
+        suggested = make_tag("Meeting")
+        make_tag_assignment(recording, suggested, origin="suggested")
+        free = make_tag("Research")
+        retired_active = make_tag("OldTopic", configured=False)
+        make_tag_assignment(recording, retired_active, origin="confirmed")
+        editor = self._editor(client, recording)
+        for pk in (manual.pk, suggested.pk, retired_active.pk):
+            assert 'value="{}" checked'.format(pk) in editor, pk
+        assert 'value="{}">'.format(free.pk) in editor
+        # Suggested visible label only on the suggested option.
+        assert "Meeting" in editor
+        assert '<span class="tag-option-suggested">(suggested)</span>' in editor
+        assert "(manual)" not in editor
+        assert "(confirmed)" not in editor
+
+    def test_tapping_is_local_checkbox_toggle(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        assigned = make_tag("Assigned")
+        make_tag_assignment(recording, assigned, origin="manual")
+        editor = self._editor(client, recording)
+        # Compact inline wrapping blocks: label wrapping a real checkbox
+        # and a sibling span — tapping toggles the checkbox locally, and
+        # tapping a selected block again deselects it (no submission).
+        assert '<label class="tag-option" data-tag-name="Assigned">' in editor
+        assert '<input type="checkbox" name="selected_tags" value="{}" checked>'.format(assigned.pk) in editor
+        assert '<span class="tag-option-label">Assigned</span>' in editor
+        # No submit is wired to the individual option.
+        assert "tag-option-button" not in editor
+
+    def test_retired_options_are_explicit_nested_opt_in(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        retired = make_tag("OldTopic", configured=False)
+        editor = self._editor(client, recording)
+        assert '<details class="retired-tags">' in editor
+        assert "Retired tags" in editor
+        assert 'name="selected_retired_tags"' in editor
+        assert 'value="{}">'.format(retired.pk) in editor
+
+    def test_new_tag_input_is_inside_the_same_form(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        editor = self._editor(client, recording)
+        # The optional new-tag text input lives inside the ONE bulk form
+        # and is committed only by Done.
+        assert 'id="id_new_tag_name"' in editor
+        assert 'name="new_tag_name"' in editor
+        assert 'maxlength="64"' in editor
+        assert editor.index("tag-selection-form") < editor.index("id_new_tag_name")
+        assert editor.index("id_new_tag_name") < editor.index(">Done</button>")
+
+    def test_no_js_fallback_is_usable(self, client):
+        """Without JS the enhanced-details remains a plain native
+        disclosure whose real checkbox form, text input and Done submit
+        work as an ordinary POST form."""
+        recording, _t, _s, _summary = _summary_recording()
+        make_tag("Fallback")
+        editor = self._editor(client, recording)
+        assert 'method="post"' in editor
+        assert 'name="csrfmiddlewaretoken"' in editor
+        assert 'type="checkbox"' in editor
+        assert 'type="text"' in editor
+        assert 'type="submit"' in editor
+        assert ">Done</button>" in editor
+
+    def test_detail_page_has_no_reopen_marker_data(self, client):
+        recording, _t, _s, _summary = _summary_recording()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert "sessionStorage" not in content
+        assert "data-reopen" not in content
+
+    def test_routing_overflow_css_rules(self):
+        from django.contrib.staticfiles import finders
+
+        path = finders.find("workflow/base.css")
+        assert path is not None
+        css = Path(path).read_text(encoding="utf-8")
+        # .modal-panel / .routing-panel: border-box + min-width 0 so a
+        # long route option can never force horizontal overflow.
+        for selector in (".modal-panel {", ".routing-panel {"):
+            block = css[css.index(selector) : css.index("}", css.index(selector))]
+            assert "box-sizing: border-box" in block, selector
+            assert "min-width: 0" in block, selector
+        # .route-form stacks cleanly and its select shrinks.
+        form_block = css[css.index(".route-form {") : css.index("}", css.index(".route-form {"))]
+        assert "box-sizing: border-box" in form_block
+        assert "min-width: 0" in form_block
+        assert "width: 100%" in form_block
+        assert "flex-direction: column" in form_block
+        select_block = css[css.index(".route-form select {") : css.index("}", css.index(".route-form select {"))]
+        assert "max-width: 100%" in select_block
+        assert "width: 100%" in select_block
+        assert "min-width: 0" in select_block
+        # Checkbox-block selection styling: `input:checked + span` (no
+        # per-row layout, no :has dependency).
+        assert "input:checked + .tag-option-label" in css
+        assert "input:focus-visible + .tag-option-label" in css
+
+
 class TestStatusPanel:
     """The single composite status/next-action panel covers the real
     state matrix: healthy, failed/retry, retranscription-failed,
@@ -448,22 +801,30 @@ class TestDetailActionsPresentation:
         assert 'aria-label="Actions"' not in content
         assert 'aria-label="Recommended action"' not in content
 
-    def test_healthy_advanced_disclosure_collapsed_with_route_form(self, client):
+    def test_healthy_routing_disclosure_collapsed_with_route_form(self, client):
         recording, _t, _s, _summary = _summary_recording()
         content = client.get(f"/recordings/{recording.pk}/").content.decode()
-        # Collapsed native disclosure (no `open`), named explicitly.
-        assert '<details class="technical-details advanced-actions">' in content
-        assert "Advanced processing actions" in content
-        # It retains the manual route form and its fingerprint.
-        assert "/route/" in content
-        assert 'id="id_route_profile_adv"' in content
+        # Compact native Routing disclosure (no `open`), beside the
+        # Transcript/History links — the standalone "Advanced processing
+        # actions" block is gone.
+        assert "Advanced processing actions" not in content
+        assert '<details class="enhanced-details routing-editor" id="routing-editor">' in content
+        assert "Routing" in content
+        # It retains the manual route form and its fingerprint, posting
+        # to the existing action-route endpoint (server confirmation
+        # interstitial + lock + revalidate unchanged).
+        assert '/route/' in content
+        assert 'id="id_route_profile_routing"' in content
         assert 'name="profile"' in content
         assert 'name="fingerprint"' in content
+        # The concise retranscription explanation is present.
+        assert "schedules a retranscription" in content
+        assert "created only when the retranscription succeeds" in content
 
     def test_needs_review_with_confirmable_decision_confirm_only_prominent(self, client):
         """With an active unverified routing decision the immediate
         recommended action is ONLY 'Confirm routing'; manual profile
-        selection moves to the collapsed Advanced disclosure."""
+        selection moves to the collapsed Routing disclosure."""
         recording, _t, _s = make_transcribed_recording(["a"], sha="pa-nr-conf")
         Recording.objects.filter(pk=recording.pk).update(
             processing_status=ProcessingStatus.NEEDS_REVIEW
@@ -477,14 +838,14 @@ class TestDetailActionsPresentation:
         content = client.get(f"/recordings/{recording.pk}/").content.decode()
         assert 'aria-label="Recommended action"' in content
         assert "Confirm routing" in content
-        # Manual profile selection is NOT prominent; it lives in Advanced.
+        # Manual profile selection is NOT prominent; it lives in Routing.
         assert 'id="id_route_profile"' not in content
-        assert 'id="id_route_profile_adv"' in content
+        assert 'id="id_route_profile_routing"' in content
         assert 'name="fingerprint"' in content
 
     def test_needs_review_without_decision_manual_route_only_no_duplicate(self, client):
         """With no confirmable decision the manual route is the single
-        prominent action and is NOT duplicated in the Advanced
+        prominent action and is NOT duplicated in the Routing
         disclosure."""
         recording, _t, _s = make_transcribed_recording(["a"], sha="pa-nr-man")
         Recording.objects.filter(pk=recording.pk).update(
@@ -495,8 +856,10 @@ class TestDetailActionsPresentation:
         assert 'aria-label="Recommended action"' in content
         assert 'id="id_route_profile"' in content
         assert "Confirm routing" not in content
-        # Advanced disclosure must not duplicate the prominent manual form.
-        assert 'id="id_route_profile_adv"' not in content
+        # The Routing disclosure must not duplicate the prominent manual
+        # form (no trigger, no form).
+        assert 'id="routing-editor"' not in content
+        assert 'id="id_route_profile_routing"' not in content
         assert 'name="fingerprint"' in content
 
     def test_ready_to_transcribe_prominent_transcribe(self, client):

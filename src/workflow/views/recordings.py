@@ -312,6 +312,15 @@ def _action_availability(config, recording) -> dict:
 
     profiles = sorted(config.macwhisper.routing.profiles.values(), key=lambda p: p.name)
     decision = recording.routing_decisions.filter(is_active=True).first()
+    confirm_routing_available = decision is not None and not decision.routing_verified
+    # The compact Routing trigger appears only where OPTIONAL route UI
+    # belongs: manual profile selection is hidden when it is already the
+    # prominent recommended action (needs-review without a confirmable
+    # decision) so the same form is never duplicated.
+    show_routing = route_eligible(recording) and (
+        recording.processing_status != ProcessingStatus.NEEDS_REVIEW
+        or confirm_routing_available
+    )
     return {
         "fingerprint": state_fingerprint(recording),
         "route_eligible": route_eligible(recording),
@@ -324,10 +333,11 @@ def _action_availability(config, recording) -> dict:
             }
             for profile in profiles
         ],
-        "confirm_routing_available": decision is not None and not decision.routing_verified,
+        "confirm_routing_available": confirm_routing_available,
         "transcribe_available": recording.processing_status == ProcessingStatus.READY_TO_TRANSCRIBE,
         "summarize_mode": summarize_mode(recording),
         "retry_available": retry_eligible(recording),
+        "show_routing": show_routing,
     }
 
 
@@ -494,10 +504,34 @@ def recording_detail(request, recording_id):
         preview_segments = list(
             transcript.segments.order_by("ordinal")[:DETAIL_PREVIEW_SEGMENTS]
         )
-    from workflow.models import Tag
+    from workflow.models import Tag, TagOrigin
 
     tag_choices = Tag.objects.filter(is_configured=True).order_by("name")
     retired_tag_choices = Tag.objects.filter(is_configured=False).order_by("name")
+    # Read-only presentation list for the add-tag editor, derived ONLY
+    # from the card's already-prefetched active assignments (no extra
+    # queries, no N+1): per option the tag itself, whether it is
+    # currently assigned (disables the button), and whether that active
+    # assignment is a model suggestion (drives the concise visible
+    # "(suggested)" label). A manual/confirmed assignment stays bare.
+    active_by_tag = {assignment.tag_id: assignment for assignment in card.active_tags}
+
+    def _tag_options(tags):
+        return [
+            {
+                "tag": tag,
+                "assigned": tag.pk in active_by_tag,
+                "suggested": (
+                    active_by_tag[tag.pk].origin == TagOrigin.SUGGESTED
+                    if tag.pk in active_by_tag
+                    else False
+                ),
+            }
+            for tag in tags
+        ]
+
+    tag_options = _tag_options(tag_choices)
+    retired_tag_options = _tag_options(retired_tag_choices)
 
     # Read-only variant view-model: resolves the requested selector and
     # provides the selected summary, variant state, action mode and all
@@ -524,8 +558,8 @@ def recording_detail(request, recording_id):
         "actions": _action_availability(config, recording),
         "routing_decision": card.active_route,
         "status": _status_panel(recording, card.active_route),
-        "tag_choices": tag_choices,
-        "retired_tag_choices": retired_tag_choices,
+        "tag_options": tag_options,
+        "retired_tag_options": retired_tag_options,
         "default_output_language": variant.default_language,
         "selected_language": variant.requested,
     }

@@ -637,17 +637,12 @@ a.match-chip:hover {
 .status-grid dt { color: var(--muted); }
 .status-grid dd { margin: 0; overflow-wrap: anywhere; }
 
-.recommended-action .action-buttons,
-.advanced-actions .action-buttons { display: flex; flex-direction: column; gap: 0.6rem; max-width: 34rem; }
-.recommended-action form,
-.advanced-actions form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-.recommended-action .muted,
-.advanced-actions .muted { font-size: 0.8125rem; }
-.advanced-actions { max-width: 40rem; }
+.recommended-action .action-buttons { display: flex; flex-direction: column; gap: 0.6rem; max-width: 34rem; }
+.recommended-action form { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.recommended-action .muted { font-size: 0.8125rem; }
 .inline-form { display: inline; }
 
 .tag-chips { list-style: none; padding: 0; }
-.tag-add-form { margin: 0.7rem 0; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .checkbox { display: inline-block; margin: 0.2rem 0.8rem 0.2rem 0; }
 
 .transcript { max-width: 46rem; }
@@ -773,8 +768,6 @@ th { color: var(--muted); font-weight: 600; }
 .tag-editor { margin: 0.5rem 0; max-width: 34rem; }
 .tag-editor summary { cursor: pointer; font-size: 0.8125rem; color: var(--color-text-2); }
 .tag-editor summary:hover { color: var(--color-text); }
-.tag-editor[open] .tag-add-form { margin-top: 0.5rem; }
-.tag-editor h3 { font-size: 0.875rem; margin: 0.75rem 0 0.3rem; }
 
 /* Overview blocks: complete summary + transcript preview */
 .overview-block { margin-bottom: 2rem; }
@@ -924,6 +917,243 @@ ol.key-points > li::before {
 .truncation-note { font-size: 0.75rem; color: var(--color-text-3); font-style: italic; margin-top: 0.5rem; }
 
 /* ============================================================
+   ENHANCED DETAILS — Routing / + Add tag (production integration)
+   ============================================================ */
+/* The compact Routing trigger sits beside Transcript/History in the
+   detail header. WITHOUT JS it is a native inline disclosure revealing
+   the real server-rendered route form; with JS (app.js) the SAME panel
+   is moved into a custom overlay — never duplicated. The disclosure
+   marker is hidden so the summary reads like the sibling link, while
+   the native details keyboard/disclosure semantics stay intact. */
+.routing-editor { min-width: 0; max-width: 30rem; }
+/* Match the sibling .detail-link anchors (Transcript/History): same
+   colour, size/weight, underline, line-height and focus ring, and no
+   button chrome — the native <details> disclosure marker stays hidden
+   while the summary keeps its disclosure semantics. */
+.routing-editor summary.detail-link {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--color-accent);
+  text-decoration: underline;
+  list-style: none;
+}
+.routing-editor summary.detail-link::-webkit-details-marker { display: none; }
+.routing-editor summary.detail-link::marker { content: none; }
+.routing-editor summary.detail-link:hover { color: var(--color-accent); }
+.routing-editor summary.detail-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.routing-panel {
+  margin-top: 0.75rem;
+  box-sizing: border-box;
+  min-width: 0;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 0.9rem 1rem;
+  max-width: 30rem;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.routing-current { margin: 0; font-size: 0.8rem; }
+.routing-note { margin: 0; font-size: 0.8rem; }
+/* The route form stacks cleanly so long option labels can never force
+   horizontal overflow at narrow widths: full-row select + button, with
+   the select allowed to shrink (min-width: 0 / width: 100%). */
+.route-form {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+.route-form select {
+  box-sizing: border-box;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  font-size: 0.8125rem;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.route-form button { align-self: flex-start; }
+
+/* Compact + Add tag editor: ONE real bulk form (checkbox blocks named
+   selected_tags / selected_retired_tags, an optional new-tag text input,
+   and a single Done submit), a client-only filter, and a small nested
+   disclosure for retired tags. Tapping a block toggles its checkbox
+   locally (label association, no JS needed); the modal only submits on
+   Done. */
+.tag-editor-body {
+  margin-top: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.tag-filter-input {
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.tag-selection-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.tag-selection-fieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+.tag-option-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.tag-option[hidden] { display: none; }
+/* Compact inline wrapping blocks: the native checkbox is visually hidden
+   but stays focusable; the sibling span is the visible pill, so the
+   checked state is styled via `input:checked + span` (no per-row
+   layout, no :has dependency) and label clicks toggle locally. */
+.tag-option {
+  position: relative;
+  cursor: pointer;
+}
+.tag-option input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+}
+.tag-option .tag-option-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+  background: var(--color-surface);
+  color: var(--color-text-2);
+}
+.tag-option:hover .tag-option-label { background: var(--color-surface-2); color: var(--color-text); }
+.tag-option input:checked + .tag-option-label {
+  border-color: var(--color-accent);
+  background: var(--color-accent-bg);
+  color: var(--color-text);
+}
+.tag-option input:focus-visible + .tag-option-label {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.tag-option-suggested { font-size: 0.75rem; opacity: 0.85; }
+.retired-tags summary { cursor: pointer; color: var(--color-text-3); font-size: 0.75rem; }
+.retired-tags summary:hover { color: var(--color-text); }
+.tag-create-inline {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.6rem;
+}
+.tag-create-inline label { font-size: 0.8125rem; color: var(--color-text-2); }
+.tag-create-inline input[type="text"] {
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-size: 0.8125rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.tag-selection-actions { display: flex; justify-content: flex-end; }
+.tag-done-button { font-weight: 700; }
+
+/* Compact inline wrapping tag chips (concise text; state lives in
+   classes/ARIA, not verbose right-side labels). */
+.detail-tags .tag-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.5rem;
+}
+.detail-tags .tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.8rem;
+  background: var(--color-surface);
+  color: var(--color-text-2);
+  margin: 0;
+}
+.detail-tags .tag-chip .inline-form { display: inline-flex; }
+.detail-tags .tag-chip .link-button { font-size: 0.75rem; }
+.tag-chip-suggested { font-size: 0.75rem; opacity: 0.85; }
+
+/* Modal presentation of the SAME server-rendered content (app.js moves
+   the details panel into a fixed backdrop + role=dialog overlay; the
+   native details remains the no-JS fallback). The overlay never depends
+   on HTMLDialogElement's modal presentation — visibility is driven by
+   the `hidden` attribute, made truly hidden below. */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(44, 40, 37, 0.45);
+  z-index: 200;
+}
+.modal-overlay[hidden] { display: none !important; }
+.modal-panel {
+  box-sizing: border-box;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  padding: 1.25rem;
+  max-width: 32rem;
+  width: 100%;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.modal-title {
+  font-size: 1rem;
+  font-weight: 700;
+  margin: 0 0 0.75rem;
+  border: none;
+  padding: 0;
+}
+.modal-close { margin-top: 1rem; align-self: flex-end; }
+
+/* ============================================================
    RESPONSIVE
    ============================================================ */
 @media (max-width: 40rem) {
@@ -960,6 +1190,10 @@ ol.key-points > li::before {
   .recording-card { padding: 1rem; }
   .recording-card-header { flex-direction: column; gap: 0.5rem; }
   .recording-card-footer { flex-direction: column; align-items: flex-start; }
+  /* The Routing disclosure's no-JS expanded panel takes the full row so
+     it never overflows the container on narrow screens. */
+  .routing-editor { width: 100%; max-width: none; }
+  .routing-panel { max-width: none; }
 
   /* The SAME table DOM becomes readable stacked rows — no duplicate list. */
   .recording-table-wrap { overflow-x: visible; }

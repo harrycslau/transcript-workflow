@@ -145,10 +145,61 @@ Non-negotiable principles:
   A replacement Summary becomes active only after complete successful
   generation. Markdown/plain text are deterministic renderings, not the
   canonical stored representation.
-- Tags are defined by YAML `tags.allowed` and synchronized explicitly;
-  removed definitions are retired, never deleted. Model suggestions are
+- Config-owned tag definitions come from YAML `tags.allowed` and are
+  synchronized explicitly; removed config-owned definitions are retired,
+  never deleted. Custom tag definitions come from the web (see the next
+  bullet). Model suggestions are
   versioned provenance. Manual/confirmed effective assignments are
   user-owned and must not be silently removed by regeneration.
+- Tag definition provenance is explicit (`Tag.definition_origin`:
+  `config` | `custom`, DB CHECK allowlist, migration 0010). Custom tags
+  are global reusable definitions created ONLY through
+  `workflow/services/tags.py:create_custom_tag_and_assign` (web POST
+  only, `definition_origin=custom`, `is_configured=True`); `is_configured`
+  stays the availability/retired state. `tags --sync` creates
+  config-owned tags, updates/reactivates config tags as before, and —
+  when a configured name normalizes to a custom tag's `name_key` —
+  atomically PROMOTES that SAME row to config-owned (applying the
+  configured name/description; pk, assignments, suggestions and history
+  preserved); it retires ONLY absent config-owned tags, never custom
+  tags. Custom creation validates exact-str/nonblank, control/newline
+  rejection, `Tag.name`/`name_key` max lengths and ALL existing
+  normalized-key collisions (retired rows included) with stable friendly
+  errors, uses the shared manual-assignment semantics, runs under the
+  local SQLite BUSY/LOCKED retry (outside atomic), takes no pipeline
+  lock, and schedules exactly one recording search sync inside the
+  successful transaction; concurrent duplicate creation never creates
+  duplicates nor leaks `IntegrityError`.
+- The + Add tag modal commits the COMPLETE desired active selection
+  ATOMICALLY on Done via `workflow/services/tags.py:apply_tag_selection`
+  (the ONLY bulk writer; the individual tag-add/tag-create/
+  tag-confirm/tag-remove endpoints stay for compatibility but are not
+  used inside the modal). Tapping an option toggles a checkbox LOCALLY —
+  nothing mutates, redirects, or flashes a banner before Done; Done
+  applies the whole set in one POST/transaction (the optional one new
+  custom tag name is committed only by Done, inside the SAME
+  transaction; a validation/collision failure rolls ALL selection
+  changes back). The service validates bounded exact-integer IDs (bool/
+  duplicates/missing rejected; size-capped against the real tag count
+  with a hard limit), category-checks available vs retired
+  (`is_configured=True` vs explicit `is_configured=False` opt-in), and
+  applies exact ownership semantics: already-active-and-selected stays
+  UNCHANGED (suggested stays suggested, confirmed/manual keep
+  origin/provenance — Done never promotes); newly selected creates
+  active manual; selected-inactive reactivates manual and clears
+  suppression/source summary; active-but-unselected applies the exact
+  user-removal suppression (`deactivated_by="user"`); inactive-and-
+  unselected is untouched. Exactly ONE recording search sync is
+  scheduled inside the transaction only when indexed tag membership
+  changed; an unchanged Done is zero DML and zero callback. Runs under
+  the local SQLite BUSY/LOCKED retry (outside atomic), takes no
+  pipeline lock, returns safe counts only. Success (changed or
+  unchanged) emits NO banner; invalid/error Done may show one sanitized
+  error banner. The modal enhancer gives a panel with its own
+  `[data-modal-commit]` Done submit a Cancel close control (never a
+  second generated Done), and (re)opening resets staged checkbox/text
+  state to the server-rendered initial values — no sessionStorage
+  reopen marker exists any more.
 
 ## Multilingual summary variants (standing invariants)
 
@@ -321,7 +372,7 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- Migrations `0001`–`0009` define the current schema (0007 is the
+- Migrations `0001`–`0010` define the current schema (0007 is the
   multilingual-summary migration: `Summary.output_language`,
   `SummaryVariantState`, transcript language-verification fields;
   intentionally irreversible — repair it in place, never add an 0008
@@ -334,7 +385,11 @@ Non-negotiable principles:
   `workflow_embedding_document`), SCHEMA-ONLY `CreateModel` operations,
   fully reversible, with no `RunPython`, no backfill, no network or
   embedding-client use, and no change to `SearchDocument`/source
-  tables). Add NEW migrations, never
+  tables; 0010 is the approved tag-provenance migration:
+  `Tag.definition_origin` (`config`/`custom`, default `config`; existing
+  rows migrate as config) plus the `chk_tag_definition_origin_allowlist`
+  DB CHECK — additive and fully reversible, no data migration or
+  `RunPython`). Add NEW migrations, never
   edit existing/applied ones. Enforce invariants with DB constraints
   (partial uniques, check constraints), not just application logic.
   Run `makemigrations --check` in verification. 0007's data migration

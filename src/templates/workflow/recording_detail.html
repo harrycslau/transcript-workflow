@@ -16,6 +16,36 @@
   <div class="detail-links">
     <a class="detail-link" href="{% url 'recording-transcript' recording.pk %}" aria-label="Open the full transcript">Transcript</a>
     <a class="detail-link" href="{% url 'recording-history' recording.pk %}" aria-label="Open the processing history">History</a>
+    {% if actions.show_routing %}
+    <details class="enhanced-details routing-editor" id="routing-editor">
+      <summary class="detail-link">Routing</summary>
+      <div class="routing-panel">
+        {% if routing_decision %}
+          <p class="muted routing-current">
+            Current: {{ routing_decision.profile_name }} ({{ routing_decision.method }}){% if routing_decision.routing_verified %} · verified{% else %} · unverified{% endif %}
+          </p>
+        {% endif %}
+        <p class="muted routing-note">
+          Choosing a different profile schedules a retranscription; a new transcript
+          version is created only when the retranscription succeeds, and the current
+          transcript and history remain preserved until then. Choosing the current
+          profile only confirms the existing routing and does not retranscribe.
+        </p>
+        <form method="post" action="{% url 'action-route' recording.pk %}" class="route-form">
+          {% csrf_token %}
+          <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+          <label for="id_route_profile_routing">Route manually</label>
+          <select id="id_route_profile_routing" name="profile" data-modal-focus>
+            <option value="">Choose a profile…</option>
+            {% for profile in actions.route_profiles %}
+              <option value="{{ profile.name }}">{{ profile.name }} — {{ profile.model }}{% if profile.manual_only %} (manual-only){% endif %}</option>
+            {% endfor %}
+          </select>
+          <button type="submit">Route</button>
+        </form>
+      </div>
+    </details>
+    {% endif %}
   </div>
 </div>
 
@@ -80,46 +110,22 @@
 </section>
 {% endif %}
 
-{% if actions.route_eligible %}
-{% if recording.processing_status != 'needs_review' or actions.confirm_routing_available %}
-<details class="technical-details advanced-actions">
-  <summary>Advanced processing actions</summary>
-  <p class="muted">Actions run under the pipeline lock and re-check the current state before doing anything.</p>
-  <div class="action-buttons">
-    <form method="post" action="{% url 'action-route' recording.pk %}">
-      {% csrf_token %}
-      <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
-      <label for="id_route_profile_adv">Route manually</label>
-      <select id="id_route_profile_adv" name="profile">
-        <option value="">Choose a profile…</option>
-        {% for profile in actions.route_profiles %}
-          <option value="{{ profile.name }}">{{ profile.name }} — {{ profile.model }}{% if profile.manual_only %} (manual-only){% endif %}</option>
-        {% endfor %}
-      </select>
-      <button type="submit">Route</button>
-    </form>
-    <p class="muted">Choosing a different routing profile schedules a retranscription; a new transcript version is created only when the retranscription succeeds, and the current transcript and history remain preserved until then. Choosing the current profile only confirms the existing routing and does not retranscribe.</p>
-  </div>
-</details>
-{% endif %}
-{% endif %}
-
 <section class="detail-tags" aria-label="Tags">
   {% if card.active_tags %}
     <ul class="tag-chips" aria-label="Active tags">
       {% for assignment in card.active_tags %}
-        <li class="tag-chip tag-{{ assignment.origin }}">
-          {{ assignment.tag.name }}
-          <span class="muted">({{ assignment.origin }})</span>
+        <li class="tag-chip tag-{{ assignment.origin }}"
+            {% if assignment.origin == 'suggested' %}aria-label="{{ assignment.tag.name }} (suggested)"{% endif %}>
+          {{ assignment.tag.name }}{% if assignment.origin == 'suggested' %} <span class="tag-chip-suggested">(suggested)</span>{% endif %}
           {% if assignment.origin == 'suggested' %}
             <form method="post" action="{% url 'tag-confirm' recording.pk assignment.tag.pk %}" class="inline-form">
               {% csrf_token %}
-              <button type="submit" class="link-button">Confirm</button>
+              <button type="submit" class="link-button" aria-label="Confirm {{ assignment.tag.name }}">Confirm</button>
             </form>
           {% endif %}
           <form method="post" action="{% url 'tag-remove' recording.pk assignment.tag.pk %}" class="inline-form">
             {% csrf_token %}
-            <button type="submit" class="link-button danger">Remove</button>
+            <button type="submit" class="link-button danger" aria-label="Remove {{ assignment.tag.name }}">Remove</button>
           </form>
         </li>
       {% endfor %}
@@ -128,40 +134,44 @@
     <p class="muted">No active tags.</p>
   {% endif %}
 
-  <details class="tag-editor">
-    <summary>Add tag</summary>
-    <form method="post" action="{% url 'tag-add' recording.pk %}" class="tag-add-form">
-      {% csrf_token %}
-      <label for="id_tag_add">Add tag</label>
-      <select id="id_tag_add" name="tag">
-        <option value="">Choose a tag…</option>
-        {% for tag in tag_choices %}
-          <option value="{{ tag.pk }}">{{ tag.name }}</option>
-        {% endfor %}
-        {% for tag in retired_tag_choices %}
-          <option value="{{ tag.pk }}">{{ tag.name }} (retired)</option>
-        {% endfor %}
-      </select>
-      <label class="checkbox">
-        <input type="checkbox" name="include_retired" value="1"> include retired tags
-      </label>
-      <button type="submit">Add</button>
-    </form>
-
-    {% if default_summary %}
-      <h3>Suggestions on the default summary</h3>
-      {% with suggestions=default_summary.tag_suggestions.all %}
-        {% if suggestions %}
-          <ul>
-            {% for suggestion in suggestions %}
-              <li>{{ suggestion.tag.name }} <span class="muted">(suggested by model)</span></li>
+  <details class="enhanced-details tag-editor" id="tag-editor">
+    <summary>+ Add tag</summary>
+    <div class="tag-editor-body">
+      <label class="visually-hidden" for="tag-filter-input">Filter tags</label>
+      <input type="search" id="tag-filter-input" class="tag-filter-input" placeholder="Filter tags" autocomplete="off" data-modal-focus>
+      <form method="post" action="{% url 'tag-apply' recording.pk %}" class="tag-selection-form">
+        {% csrf_token %}
+        <fieldset class="tag-selection-fieldset">
+          <legend class="visually-hidden">Tag selection</legend>
+          <div class="tag-option-list" aria-label="Existing tags">
+            {% for option in tag_options %}
+              <label class="tag-option" data-tag-name="{{ option.tag.name }}">
+                <input type="checkbox" name="selected_tags" value="{{ option.tag.pk }}"{% if option.assigned %} checked{% endif %}>
+                <span class="tag-option-label">{{ option.tag.name }}{% if option.suggested %} <span class="tag-option-suggested">(suggested)</span>{% endif %}</span>
+              </label>
             {% endfor %}
-          </ul>
-        {% else %}
-          <p class="muted">The current summary suggested no tags.</p>
-        {% endif %}
-      {% endwith %}
-    {% endif %}
+          </div>
+          <details class="retired-tags">
+            <summary>Retired tags</summary>
+            <div class="tag-option-list">
+              {% for option in retired_tag_options %}
+                <label class="tag-option" data-tag-name="{{ option.tag.name }}">
+                  <input type="checkbox" name="selected_retired_tags" value="{{ option.tag.pk }}"{% if option.assigned %} checked{% endif %}>
+                  <span class="tag-option-label">{{ option.tag.name }}{% if option.suggested %} <span class="tag-option-suggested">(suggested)</span>{% endif %}</span>
+                </label>
+              {% endfor %}
+            </div>
+          </details>
+        </fieldset>
+        <div class="tag-create-inline">
+          <label for="id_new_tag_name">New tag name</label>
+          <input type="text" id="id_new_tag_name" name="new_tag_name" maxlength="64" autocomplete="off" placeholder="New tag name">
+        </div>
+        <div class="tag-selection-actions">
+          <button type="submit" class="tag-done-button" data-modal-commit>Done</button>
+        </div>
+      </form>
+    </div>
   </details>
 </section>
 

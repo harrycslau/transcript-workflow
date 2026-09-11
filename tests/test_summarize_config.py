@@ -257,4 +257,4 @@ class TestTagSync:
         first = sync_tags(config)
         second = sync_tags(config)
         assert first["created"] == 1
-        assert second == {"created": 0, "updated": 0, "retired": 0, "reactivated": 0}
+        assert second == {"created": 0, "updated": 0, "retired": 0, "reactivated": 0, "promoted": 0}

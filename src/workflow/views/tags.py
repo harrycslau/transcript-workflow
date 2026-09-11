@@ -16,9 +16,16 @@ from django.views.decorators.http import require_POST
 
 from workflow.models import Recording, Tag, TagAssignment
 from workflow.query import tag_overview
-from workflow.services.tags import TagOperationError, add_manual_tag, confirm_suggestion, remove_tag
+from workflow.services.tags import (
+    TagOperationError,
+    add_manual_tag,
+    apply_tag_selection,
+    confirm_suggestion,
+    create_custom_tag_and_assign,
+    remove_tag,
+)
 from workflow.views.helpers import get_config
-from workflow.forms import TagAddForm
+from workflow.forms import CustomTagForm, TagAddForm, TagSelectionForm
 
 
 def tag_list(request):
@@ -88,6 +95,37 @@ def tag_add(request, recording_id):
     return redirect("recording-detail", recording_id)
 
 
+@require_POST
+def tag_create(request, recording_id):
+    """POST-only custom tag creation (CSRF-protected like every mutation).
+
+    Creates a global reusable custom Tag and assigns it to the current
+    recording in one transaction. GET is a 405 via ``require_POST`` and
+    writes nothing. Errors are sanitized friendly ``TagOperationError``
+    messages — never paths, SQL or tracebacks. Follows the shared
+    POST→redirect→GET flash-message convention.
+    """
+    recording = _recording_or_404(recording_id)
+    form = CustomTagForm(data=request.POST)
+    if not form.is_valid():
+        message = "Enter a valid tag name."
+        if "name" in form.errors:
+            message = form.errors["name"][0]
+        dj_messages.error(request, message)
+        return redirect("recording-detail", recording_id)
+    try:
+        result = create_custom_tag_and_assign(recording, form.cleaned_data["name"])
+    except TagOperationError as exc:
+        dj_messages.error(request, exc.message)
+        return redirect("recording-detail", recording_id)
+    tag_name = result["tag"].name
+    if result["created_tag"]:
+        dj_messages.success(request, f"Custom tag '{tag_name}' created and added.")
+    else:
+        dj_messages.success(request, f"Tag '{tag_name}' added.")
+    return redirect("recording-detail", recording_id)
+
+
 def _assignment_or_404(recording: Recording, tag_id: int) -> tuple[TagAssignment, Tag]:
     try:
         tag = Tag.objects.get(pk=tag_id)
@@ -97,6 +135,53 @@ def _assignment_or_404(recording: Recording, tag_id: int) -> tuple[TagAssignment
     if assignment is None:
         raise Http404("No tag assignment for this recording")
     return assignment, tag
+
+
+@require_POST
+def tag_apply(request, recording_id):
+    """POST-only bulk tag-apply — the + Add tag modal's ONLY Done path.
+
+    One service call applies the COMPLETE desired active selection
+    atomically (:func:`workflow.services.tags.apply_tag_selection`) and
+    redirects to the detail page. Success — including an unchanged
+    selection — emits NO success/info banner; the redirected page simply
+    shows the authoritative tags with the modal closed. Invalid/error
+    Done may show one sanitized error banner after the redirect; staged
+    selection is not preserved and the modal does not reopen. GET is a
+    405 via ``require_POST`` with zero work. The individual
+    tag-add/tag-create/tag-confirm/tag-remove endpoints stay intact for
+    compatibility but are no longer used inside the modal.
+    """
+    recording = _recording_or_404(recording_id)
+    tags = list(Tag.objects.order_by("name"))
+    form = TagSelectionForm(
+        data=request.POST,
+        available=[tag for tag in tags if tag.is_configured],
+        retired=[tag for tag in tags if not tag.is_configured],
+    )
+    if not form.is_valid():
+        # Value-free sanitized errors: the checkbox fields' generic
+        # invalid-choice text is never surfaced (it echoes the submitted
+        # value); the new-tag-name field errors are our own friendly
+        # messages.
+        if "new_tag_name" in form.errors:
+            message = str(form.errors["new_tag_name"][0])
+        else:
+            message = "Choose a valid tag selection."
+        dj_messages.error(request, message)
+        return redirect("recording-detail", recording_id)
+    try:
+        apply_tag_selection(
+            recording,
+            form.cleaned_data["selected_tags"],
+            form.cleaned_data["selected_retired_tags"],
+            new_tag_name=form.cleaned_data["new_tag_name"],
+        )
+    except TagOperationError as exc:
+        dj_messages.error(request, exc.message)
+        return redirect("recording-detail", recording_id)
+    # Success (changed or unchanged): NO banner.
+    return redirect("recording-detail", recording_id)
 
 
 @require_POST

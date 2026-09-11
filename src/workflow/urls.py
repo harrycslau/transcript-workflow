@@ -53,7 +53,9 @@ urlpatterns = [
     ),
 
     # Tag mutations (POST).
+    path("recordings/<uuid:recording_id>/tags/apply/", tags.tag_apply, name="tag-apply"),
     path("recordings/<uuid:recording_id>/tags/add/", tags.tag_add, name="tag-add"),
+    path("recordings/<uuid:recording_id>/tags/create/", tags.tag_create, name="tag-create"),
     path("recordings/<uuid:recording_id>/tags/<int:tag_id>/confirm/", tags.tag_confirm, name="tag-confirm"),
     path("recordings/<uuid:recording_id>/tags/<int:tag_id>/remove/", tags.tag_remove, name="tag-remove"),
 

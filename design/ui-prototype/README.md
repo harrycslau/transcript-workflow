@@ -131,11 +131,12 @@ The inert **+ Add tag** button now opens a tag editor dialog containing:
   reports the outcome in a small status message.
 
 Custom-tag creation is **explicitly labelled as a prototype proposal** (one short
-muted note: "Custom tags are a prototype feature."). Current production tag
-definitions are configuration-owned (YAML `tags.allowed`), so creating and
-storing custom tags requires a **future product and backend decision** — the
-prototype does not imply this backend exists today. The full production/config
-ownership explanation lives in this README only.
+muted note: "Custom tags are a prototype feature.") — this README is a static
+design document. Production has since adopted the interaction: custom tags are
+global reusable definitions created via the recording detail page
+(`workflow/services/tags.py:create_custom_tag_and_assign`), and a custom tag
+whose normalized name later appears in YAML `tags.allowed` is promoted to
+config-owned by `tags --sync` on the same row (assignments/history preserved).
 
 ## Information architecture (proposal)
 

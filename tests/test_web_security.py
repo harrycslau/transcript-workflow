@@ -81,6 +81,68 @@ class TestSecurityHeaders:
         assert cookie["samesite"] == "Lax"
 
 
+def test_enhanced_details_and_modal_stay_external_js_only(client):
+        """The Routing/+ Add tag enhanced details are external app.js
+        only: the detail page carries no inline handlers and the static
+        script builds a custom overlay (backdrop + role=dialog panel,
+        never a native <dialog>/showModal) without innerHTML from
+        user/config values."""
+        from factories import make_summary_version, make_transcribed_recording
+
+        recording, transcript, section = make_transcribed_recording(["x"], sha="sec-modal")
+        make_summary_version(recording, transcript, section)
+        content = client.get(f"/recordings/{recording.pk}/").content.decode("utf-8")
+        import re
+
+        for handler in re.findall(r'\bon(?:click|change|submit|load|error)\s*=', content):
+            raise AssertionError(f"inline event handler found: {handler}")
+        assert "<style" not in content
+        assert "style=" not in content
+        # The enhanced details markers exist and carry no inline JS.
+        assert 'class="enhanced-details routing-editor"' in content
+        assert 'class="enhanced-details tag-editor"' in content
+
+        from django.contrib.staticfiles import finders
+
+        path = finders.find("workflow/app.js")
+        assert path is not None
+        source = Path(path).read_text(encoding="utf-8")
+        # Custom overlay enhancer contract (browser-independent: no
+        # HTMLDialogElement.showModal dependency).
+        assert 'details.enhanced-details' in source
+        assert 'role", "dialog"' in source
+        assert 'aria-modal' in source
+        assert 'setAttribute("hidden", "")' in source  # closed by default
+        assert 'removeAttribute("hidden")' in source  # opening shows the overlay
+        assert 'event.key === "Escape"' in source  # Escape closes
+        assert 'event.key !== "Tab"' in source  # basic Tab containment
+        assert 'trigger.focus()' in source  # focus returns to the trigger
+        assert 'data-modal-focus' in source  # explicit first-control focus
+        assert "Done" in source
+        # The overlay must not depend on the native <dialog> element.
+        assert "showModal" not in source
+        assert 'createElement("dialog")' not in source
+        # Client-only filter over server-rendered options.
+        assert '.tag-filter-input' in source
+        assert 'getAttribute("data-tag-name")' in source
+        # The tag modal stages changes locally: NO sessionStorage reopen
+        # marker exists any more — nothing submits before the single Done.
+        assert "sessionStorage" not in source
+        assert "TAG_REOPEN_KEY" not in source
+        # NEVER build DOM content from user/config values with innerHTML.
+        assert ".innerHTML" not in source
+
+
+def test_versioned_static_assets(client):
+    """base.html cache-busts the local CSS/JS with a fixed UI asset
+    version query so an updated app.js/base.css loads immediately
+    (an unversioned URL could keep serving a stale cached script
+    against the new templates)."""
+    content = client.get("/recordings/").content.decode("utf-8")
+    assert '/static/workflow/base.css?v=3' in content
+    assert '/static/workflow/app.js?v=3' in content
+
+
 class TestSecretHygiene:
     def test_no_secrets_on_pages(self, client, monkeypatch):
         monkeypatch.setenv("BRAIN_TEST_LLM_API_KEY", "super-secret-value-42")

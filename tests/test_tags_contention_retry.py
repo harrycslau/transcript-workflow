@@ -379,14 +379,23 @@ class TestPolicyApplied:
             is False
         )
 
-    def test_all_three_are_wrapped_by_the_retry_policy(self):
-        """Structural guard: each mutation's outermost wrapper is the
-        retry policy layered ON TOP of ``@transaction.atomic``. A plain
-        ``@transaction.atomic`` function's ``__wrapped__`` is the raw
-        function (which itself has no ``__wrapped__``); with the retry
-        wrapper outermost, ``func.__wrapped__`` is the ATOMIC-wrapped
-        function, which in turn wraps the raw function."""
-        for name in ("add_manual_tag", "confirm_suggestion", "remove_tag"):
+    def test_all_mutations_are_wrapped_by_the_retry_policy(self):
+        """Structural guard: each web tag mutation's outermost wrapper is
+        the retry policy layered ON TOP of ``@transaction.atomic``. A
+        plain ``@transaction.atomic`` function's ``__wrapped__`` is the
+        raw function (which itself has no ``__wrapped__``); with the
+        retry wrapper outermost, ``func.__wrapped__`` is the
+        ATOMIC-wrapped function, which in turn wraps the raw function.
+        ``create_custom_tag_and_assign`` is wrapped like the other three
+        unlocked web tag mutations. The bulk ``apply_tag_selection``
+        (Done) is wrapped the same way: retry OUTSIDE one atomic block."""
+        for name in (
+            "add_manual_tag",
+            "confirm_suggestion",
+            "remove_tag",
+            "create_custom_tag_and_assign",
+            "apply_tag_selection",
+        ):
             func = getattr(tags_service, name)
             assert getattr(func, "__wrapped__", None) is not None
             # The retry wrapper's target is itself a wrapper (the atomic

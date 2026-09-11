@@ -22,6 +22,10 @@ from django.db.migrations.executor import MigrationExecutor
 
 TARGET_0007 = ("workflow", "0007_summary_multilingual")
 TARGET_0008 = ("workflow", "0008_search_index")
+# The CURRENT schema leaf: runtime services below reference the current
+# Tag model (definition_origin etc.), so any runtime call on the isolated
+# database must run against the full current schema.
+TARGET_LEAF = ("workflow", "0010_tag_definition_origin")
 
 ALIAS = "mig0008"
 
@@ -330,6 +334,8 @@ def test_migration_backfill_matches_runtime_rebuild_parity(executor_and_alias):
 
     from workflow.services import search_index
 
+    # The runtime rebuild runs on the CURRENT schema leaf.
+    _migrate_to(executor, TARGET_LEAF)
     search_index.rebuild_index(using=alias)
 
     with connection.cursor() as cursor:
@@ -379,6 +385,8 @@ def test_legacy_und_variant_backfilled_then_reported(executor_and_alias):
 
     from workflow.services import search_index
 
+    # The runtime status report runs on the CURRENT schema leaf.
+    _migrate_to(executor, TARGET_LEAF)
     report = search_index.build_status_report(using=alias)
     assert report["counts"]["legacy_und_variants"] == 1
 

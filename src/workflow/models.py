@@ -382,13 +382,25 @@ class Section(models.Model):
 
 
 class Tag(models.Model):
-    """A configured tag definition.
+    """A tag definition with explicit provenance.
 
-    Rows are created/updated/retired by synchronization with the YAML
-    ``tags.allowed`` list; they are never deleted, so historical
-    suggestions and assignments keep their FK even after a tag is
-    removed from configuration (``is_configured=False`` = retired).
+    ``definition_origin`` records whether the definition is config-owned
+    (YAML ``tags.allowed``) or custom (user-created from the web UI).
+    Config rows are created/updated/retired by synchronization with
+    ``tags.allowed`` (``is_configured=False`` = retired); they are never
+    deleted, so historical suggestions and assignments keep their FK
+    even after retirement. Custom rows are global reusable definitions
+    created from the web UI with ``is_configured=True``; they are never
+    retired merely because YAML lacks them. ``tags --sync`` PROMOTES a
+    custom definition to config-owned when a configured name normalizes
+    to its ``name_key`` — the SAME row keeps its assignments and
+    history — and retires only absent config-owned tags, never custom
+    tags.
     """
+
+    class DefinitionOrigin(models.TextChoices):
+        CONFIG = "config", "Config"
+        CUSTOM = "custom", "Custom"
 
     name = models.CharField(max_length=64, help_text="Display name, preserved from first synchronization")
     name_key = models.CharField(
@@ -396,14 +408,29 @@ class Tag(models.Model):
     )
     description = models.TextField(blank=True, default="")
     is_configured = models.BooleanField(default=True)
+    definition_origin = models.CharField(
+        max_length=16,
+        choices=DefinitionOrigin.choices,
+        default=DefinitionOrigin.CONFIG,
+        help_text=(
+            "Provenance of the definition: config (YAML tags.allowed) or "
+            "custom (user-created)"
+        ),
+    )
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["name"]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(definition_origin__in=["config", "custom"]),
+                name="chk_tag_definition_origin_allowlist",
+            ),
+        ]
 
     def __str__(self) -> str:
-        return f"Tag({self.name}, configured={self.is_configured})"
+        return f"Tag({self.name}, configured={self.is_configured}, origin={self.definition_origin})"
 
 
 class Summary(models.Model):

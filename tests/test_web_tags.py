@@ -449,6 +449,162 @@ class TestGetPurityAndCrossRecording:
         assert client.post(f"/recordings/{recording.pk}/tags/999999/remove/", {}).status_code == 404
 
 
+class TestCustomTagCreate:
+    """POST-only custom tag creation (CSRF-protected, service-sanitized,
+    POST→redirect→GET flash messages, GET purity, exactly one search
+    sync per successful commit, global reusable definitions)."""
+
+    def _post_create(self, client, recording, name):
+        return client.post(f"/recordings/{recording.pk}/tags/create/", {"name": name})
+
+    def test_create_assigns_custom_tag_and_flashes(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        response = self._post_create(client, recording, "Work")
+        assert response.status_code == 302
+        tag = Tag.objects.get(name_key="work")
+        assert tag.definition_origin == "custom"
+        assert tag.is_configured is True
+        assignment = TagAssignment.objects.get(recording=recording, tag=tag)
+        assert assignment.is_active is True
+        assert assignment.origin == TagOrigin.MANUAL
+        body = client.get(response.headers["Location"]).content.decode()
+        assert "created and added" in body
+
+    def test_create_survives_case_insensitive_duplicate_rejection(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        self._post_create(client, recording, "Work")
+        response = self._post_create(client, recording, "WORK")
+        assert response.status_code == 302
+        assert Tag.objects.filter(name_key="work").count() == 1
+        assert TagAssignment.objects.filter(recording=recording).count() == 1
+        body = client.get(response.headers["Location"]).content.decode()
+        assert "already exists" in body
+
+    def test_blank_name_rejected_no_writes(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        response = client.post(
+            f"/recordings/{recording.pk}/tags/create/", {"name": "   "}
+        )
+        assert response.status_code == 302
+        assert Tag.objects.count() == 0
+        assert TagAssignment.objects.count() == 0
+        body = client.get(response.headers["Location"]).content.decode()
+        assert "Enter a tag name" in body
+
+    def test_control_character_name_rejected(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        response = self._post_create(client, recording, "bad\nname")
+        assert response.status_code == 302
+        assert Tag.objects.count() == 0
+        body = client.get(response.headers["Location"]).content.decode()
+        assert "control characters" in body
+
+    def test_retired_collision_rejected(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        from workflow.models import Tag as TagModel
+
+        TagModel.objects.create(
+            name="OldTopic", name_key="oldtopic", is_configured=False
+        )
+        response = self._post_create(client, recording, "OldTopic")
+        assert response.status_code == 302
+        assert Tag.objects.filter(name_key="oldtopic").count() == 1
+        assert TagAssignment.objects.count() == 0
+        body = client.get(response.headers["Location"]).content.decode()
+        assert "already exists" in body
+
+    def test_global_tag_reused_via_add_existing_on_another_recording(self, client):
+        rec_a, _t, _s, _sum = _tagged_recording()
+        rec_b, _t2, _s2 = make_transcribed_recording(["b"], sha="reuse-1")
+        self._post_create(client, rec_a, "Shared")
+        tag = Tag.objects.get(name_key="shared")
+        _post_add(client, rec_b, tag.pk)
+        assert Tag.objects.filter(name_key="shared").count() == 1
+        assert TagAssignment.objects.filter(recording=rec_a, tag=tag).exists()
+        assert TagAssignment.objects.filter(recording=rec_b, tag=tag).exists()
+
+    def test_detail_editor_uses_bulk_apply_form_only(self, client):
+        """The modal editor is ONE bulk form posting to tag-apply — the
+        individual add/create endpoints are no longer used inside the
+        modal (they stay available for compatibility)."""
+        recording, _t, _s, _sum = _tagged_recording()
+        make_tag("SomeTag")
+        make_tag("OldTopic", configured=False)
+        body = client.get(f"/recordings/{recording.pk}/").content.decode()
+        start = body.index('id="tag-editor"')
+        editor = body[start : body.index("</section>", start)]
+        assert "/tags/apply/" in editor
+        assert "/tags/add/" not in editor
+        assert "/tags/create/" not in editor
+        assert 'name="selected_tags"' in editor
+        assert 'name="selected_retired_tags"' in editor
+        assert 'name="new_tag_name"' in editor
+
+    def test_get_on_create_is_405_and_writes_nothing(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        before_tags = Tag.objects.count()
+        before_assignments = TagAssignment.objects.count()
+        response = client.get(f"/recordings/{recording.pk}/tags/create/")
+        assert response.status_code == 405
+        assert Tag.objects.count() == before_tags
+        assert TagAssignment.objects.count() == before_assignments
+
+    def test_post_without_csrf_token_rejected(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        csrf_client = Client(enforce_csrf_checks=True)
+        response = csrf_client.post(
+            f"/recordings/{recording.pk}/tags/create/", {"name": "Work"}
+        )
+        assert response.status_code == 403
+        assert Tag.objects.count() == 0
+
+    def test_detail_get_renders_bulk_editor_and_writes_nothing(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        before = TagAssignment.objects.count()
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert "/tags/apply/" in content
+        assert 'id="id_new_tag_name"' in content
+        assert ">Done</button>" in content
+        assert "/tags/create/" not in content
+        assert "/tags/add/" not in content
+        assert TagAssignment.objects.count() == before
+
+    def test_create_post_fires_exactly_one_index_sync(
+        self, client, django_capture_on_commit_callbacks
+    ):
+        from workflow.services import search_index as si
+
+        recording, _t, _s, _sum = _tagged_recording()
+        si.rebuild_index()
+        with django_capture_on_commit_callbacks(execute=True) as captured:
+            response = self._post_create(client, recording, "Work")
+        assert response.status_code == 302
+        assert len(captured) == 1
+        from workflow.models import SearchDocument
+
+        assert SearchDocument.objects.get(
+            document_key=f"recording:{recording.pk}"
+        ).aux_text == "Work"
+        assert si.build_status_report()["healthy"] is True
+
+    def test_sync_failure_never_breaks_the_create_request(
+        self, client, monkeypatch, django_capture_on_commit_callbacks
+    ):
+        from workflow.services import search_sync
+
+        recording, _t, _s, _sum = _tagged_recording()
+
+        def always_fail(recording_id, **kwargs):
+            raise RuntimeError("index unavailable")
+
+        monkeypatch.setattr(search_sync, "reconcile_recording", always_fail)
+        with django_capture_on_commit_callbacks(execute=True):
+            response = self._post_create(client, recording, "Work")
+        assert response.status_code == 302
+        assert Tag.objects.get(name_key="work").is_configured is True
+        assert TagAssignment.objects.get(recording=recording).is_active is True
+
+
 class TestSearchIndexSyncOnWebActions:
     """Step 5A.3: tag POSTs keep the search index in sync after commit;
     a sync failure never breaks the request; GET stays sync-free."""
@@ -538,3 +694,149 @@ class TestSearchIndexSyncOnWebActions:
         make_tag_assignment(recording, tag)
         assert client.get("/tags/").status_code == 200
         assert client.get(f"/recordings/{recording.pk}/").status_code == 200
+
+
+class TestBulkTagApply:
+    """POST-only bulk tag-apply (the modal's only Done path): the complete
+    desired active set is applied atomically in one service call, success
+    (changed OR unchanged) emits NO banner, invalid/error Done shows one
+    sanitized error banner, GET is a 405 with zero work, and exactly one
+    search sync fires when membership changed."""
+
+    def _post_apply(self, client, recording, *, selected=(), retired=(), new_tag_name=""):
+        data = {
+            "selected_tags": [str(pk) for pk in selected],
+            "selected_retired_tags": [str(pk) for pk in retired],
+        }
+        if new_tag_name:
+            data["new_tag_name"] = new_tag_name
+        return client.post(f"/recordings/{recording.pk}/tags/apply/", data)
+
+    def _flash(self, client, response):
+        import re
+
+        body = client.get(response.headers["Location"]).content.decode()
+        return re.findall(r'message message-\w+"[^>]*>([^<]+)</div>', body)
+
+    def test_apply_complete_set_atomically(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        keep = make_tag("Keep")
+        make_tag_assignment(recording, keep, origin="manual")
+        drop = make_tag("Drop")
+        make_tag_assignment(recording, drop, origin="suggested")
+        add = make_tag("Add")
+        response = self._post_apply(client, recording, selected=[keep.pk, add.pk])
+        assert response.status_code == 302
+        assert TagAssignment.objects.get(recording=recording, tag=keep).origin == TagOrigin.MANUAL
+        dropped = TagAssignment.objects.get(recording=recording, tag=drop)
+        assert dropped.is_active is False
+        assert dropped.deactivated_by == TagDeactivatedBy.USER
+        added = TagAssignment.objects.get(recording=recording, tag=add)
+        assert added.is_active is True
+        assert added.origin == TagOrigin.MANUAL
+        # Success emits NO success/info banner (authoritative page only).
+        assert self._flash(client, response) == []
+
+    def test_unchanged_done_no_banner_no_sync(self, client, django_capture_on_commit_callbacks):
+        from workflow.services import search_index as si
+
+        recording, _t, _s, _sum = _tagged_recording()
+        tag = make_tag("Family")
+        make_tag_assignment(recording, tag, origin="manual")
+        si.rebuild_index()
+        with django_capture_on_commit_callbacks(execute=True) as captured:
+            response = self._post_apply(client, recording, selected=[tag.pk])
+        assert response.status_code == 302
+        assert captured == []  # unchanged Done: zero callback
+        assert self._flash(client, response) == []
+        assert si.build_status_report()["healthy"] is True
+
+    def test_apply_get_is_405_no_writes(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        before = TagAssignment.objects.count()
+        response = client.get(f"/recordings/{recording.pk}/tags/apply/")
+        assert response.status_code == 405
+        assert TagAssignment.objects.count() == before
+
+    def test_apply_post_without_csrf_rejected(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        tag = make_tag("Family")
+        csrf_client = Client(enforce_csrf_checks=True)
+        response = csrf_client.post(
+            f"/recordings/{recording.pk}/tags/apply/",
+            {"selected_tags": [str(tag.pk)]},
+        )
+        assert response.status_code == 403
+        assert TagAssignment.objects.count() == 0
+
+    def test_invalid_selection_shows_sanitized_error_banner(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        make_tag("Real")
+        response = self._post_apply(client, recording, selected=[999999])
+        assert response.status_code == 302
+        assert TagAssignment.objects.count() == 0
+        body = client.get(response.headers["Location"]).content.decode()
+        assert "Choose a valid tag selection." in body
+        assert "999999" not in body  # the submitted value never leaks
+
+    def test_invalid_new_tag_name_shows_error_and_no_writes(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        response = self._post_apply(client, recording, new_tag_name="bad\nname")
+        assert response.status_code == 302
+        assert Tag.objects.count() == 0
+        assert TagAssignment.objects.count() == 0
+        body = client.get(response.headers["Location"]).content.decode()
+        assert "control characters" in body
+
+    def test_collision_error_rolls_back_selection_via_web(self, client, django_capture_on_commit_callbacks):
+        recording, _t, _s, _sum = _tagged_recording()
+        keep = make_tag("Keep")
+        make_tag_assignment(recording, keep, origin="manual")
+        make_tag("Exists")
+        with django_capture_on_commit_callbacks(execute=True) as captured:
+            response = self._post_apply(client, recording, new_tag_name="exists")
+        assert response.status_code == 302
+        assert captured == []
+        assert Tag.objects.filter(name_key="exists").count() == 1  # no duplicate
+        assert TagAssignment.objects.get(recording=recording, tag=keep).is_active is True
+        body = client.get(response.headers["Location"]).content.decode()
+        assert "already exists" in body
+
+    def test_retired_restore_via_bulk_opt_in(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        retired = make_tag("OldTopic", configured=False)
+        response = self._post_apply(client, recording, retired=[retired.pk])
+        assert response.status_code == 302
+        assignment = TagAssignment.objects.get(recording=recording, tag=retired)
+        assert assignment.is_active is True
+        assert assignment.origin == TagOrigin.MANUAL
+
+    def test_apply_fires_exactly_one_index_sync(self, client, django_capture_on_commit_callbacks):
+        from workflow.services import search_index as si
+
+        recording, _t, _s, _sum = _tagged_recording()
+        tag = make_tag("Family")
+        si.rebuild_index()
+        with django_capture_on_commit_callbacks(execute=True) as captured:
+            response = self._post_apply(client, recording, selected=[tag.pk])
+        assert response.status_code == 302
+        assert len(captured) == 1  # exactly one recording sync per commit
+        from workflow.models import SearchDocument
+
+        assert SearchDocument.objects.get(
+            document_key=f"recording:{recording.pk}"
+        ).aux_text == "Family"
+        assert si.build_status_report()["healthy"] is True
+
+    def test_apply_creates_custom_tag_with_selection(self, client):
+        recording, _t, _s, _sum = _tagged_recording()
+        existing = make_tag("Existing")
+        response = self._post_apply(
+            client, recording, selected=[existing.pk], new_tag_name="  Work  "
+        )
+        assert response.status_code == 302
+        work = Tag.objects.get(name_key="work")
+        assert work.name == "Work"
+        assert work.definition_origin == "custom"
+        assert TagAssignment.objects.filter(recording=recording, tag=work).count() == 1
+        assert TagAssignment.objects.get(recording=recording, tag=existing).is_active is True
