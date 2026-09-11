@@ -146,8 +146,28 @@ claimed; the work and its tests are in the working tree.
   delivered in the working tree** (see the v6 section below);
   **Step 5D — Ask with Citations is delivered** too (see
   the Step 5D section below); the next planned work is **Step 6** —
-  user-initiated topic splitting, section-level summaries/tags,
-  retention cleanup and launchd scheduling.
+  user-initiated topic splitting, manual **crop/trim** (non-destructive
+  logical trim), section-level summaries/tags, retention cleanup and
+  launchd scheduling. The overall Step 6 plan has been **accepted as the
+  working baseline** and **Step 6.0 is complete**: the approved D1–D12
+  decisions and phase acceptance contracts are recorded in
+  `docs/step-6-decisions.md`, and the Step 6 screens in
+  `design/ui-prototype/` implement the final approved feedback refinement
+  (the Edit toggle on the active Transcript screen only reveals small
+  scissors on the inter-segment divider lines; clicking a scissors opens a
+  small action
+  dialog — Split here / Crop from here / Crop to here / Remove split;
+  crop-only has zero topic sections, splits create inline-named sections,
+  cropped rows are hidden by default and a saved crop becomes the normal
+  Transcript working presentation with a "Show full transcript" toggle,
+  and revision history lives on the History
+  screen; the separate Trim & sections screen is removed, and
+  retention/Rescan UX placement is deferred to 6.4). **Step 6.1
+  (segmented versions: logical trim + topic layout/history, structure/
+  history only) is planned/next and is NOT implemented**; its concrete
+  implementation plan is in `docs/step-6-plan.md` §8. Actual source file
+  deletion/move/trash/quarantine and installing/enabling any schedule
+  remain separate explicit approval gates.
 - No claim is made here about the real user database's migration state
   (`0007`–`0009` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
@@ -2126,10 +2146,31 @@ Production Library UI are delivered.
   Exposed as `brain ask QUESTION [--json]` and the `/ask/` GET-form/
   POST-execution page (see the Step 5D section at the top of this
   file).
-- **Step 6**: user-initiated topic splitting, section-level
+- **Step 6**: user-initiated topic splitting, manual **crop/trim**
+  (non-destructive logical trim — selecting a working interval/range
+  while retaining source audio and the full transcript; a possible later
+  derived trimmed-audio export is separate and deferred), section-level
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation
-  UI, launchd scheduling.
+  UI, launchd scheduling. **The overall Step 6 plan is accepted as the
+  working baseline and Step 6.0 is complete; Step 6.1 is planned/next and
+  NOT implemented.** The approved decisions D1–D12 and the phase
+  acceptance contracts are in `docs/step-6-decisions.md`, including the
+  final approved feedback refinement (edit toggle reveals scissors only;
+  scissors open a small action dialog — Split here / Crop from here /
+  Crop to here / Remove split; crop-only has zero topic sections; splits
+  create inline-named sections; cropped rows are hidden by default and a
+  saved crop is the normal Transcript working presentation with a "Show
+  full transcript" toggle; revision history
+  lives on the History screen). The Step 6
+  screens in `design/ui-prototype/` implement that behavior
+  (trim/split editing is integrated into the active Transcript screen;
+  historical transcript versions are read-only; the separate Trim &
+  sections screen is removed, and retention/Rescan UX placement is deferred
+  to 6.4); the
+  concrete 6.1 implementation plan (structure/history only) is in
+  `docs/step-6-plan.md` §8. Actual source deletion and schedule activation
+  remain separate explicit approval gates.
 
 ### Step 3 decisions
 

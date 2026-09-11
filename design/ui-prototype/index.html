@@ -365,7 +365,7 @@
           <span class="meta-item"><span class="status status-transcribed">transcribed</span></span>
         </div>
         <div class="detail-links">
-          <a class="detail-link" href="#" data-screen="transcript-screen" aria-label="Open the full transcript">Transcript</a>
+          <a class="detail-link" href="#" data-screen="transcript-screen" aria-label="Open the full transcript and its trim and split editor">Transcript</a>
           <a class="detail-link" href="#" data-screen="history-screen" aria-label="Open the processing history">History</a>
           <button class="detail-link detail-link-btn" id="processing-actions-trigger" aria-haspopup="dialog" aria-controls="processing-actions-dialog">Routing</button>
         </div>
@@ -496,7 +496,7 @@
     </div><!-- /detail screen -->
 
 
-    <!-- =============== SCREEN: TRANSCRIPT =============== -->
+    <!-- =============== SCREEN: TRANSCRIPT (also the Step 6.1 trim & split editor) =============== -->
     <div id="transcript-screen" class="screen">
       <div class="page-header">
         <a href="#" class="back-btn" data-screen="detail">&larr; Recording overview</a>
@@ -515,26 +515,43 @@
           <button class="btn btn-sm" data-copy="#transcript-doc">Copy transcript</button>
           <a class="btn btn-sm" href="#" download>Download .txt</a>
           <a class="btn btn-sm" href="#" download>Download .srt</a>
+          <button type="button" class="btn btn-sm btn-primary" id="transcript-edit-toggle" aria-expanded="false" aria-controls="edit-mode-bar">Edit trim &amp; splits</button>
         </div>
       </div>
 
+      <p class="proto-note">Historical transcript versions are read-only; only the active transcript can be trimmed and split. Editing reveals small scissors on the inter-segment divider lines between rows — no audio is cut or moved, the persisted full transcript is never modified, and the whole-recording summary/search/Ask defaults stay unchanged.</p>
+
+      <div class="edit-mode-bar" id="edit-mode-bar" hidden>
+        <span class="edit-status" id="edit-status" role="status" aria-live="polite">No changes yet.</span>
+        <div class="edit-actions">
+          <button type="button" class="btn btn-sm" id="edit-clear-crop" disabled>Clear crop</button>
+          <button type="button" class="btn btn-sm" id="edit-reset" disabled>Reset</button>
+          <button type="button" class="btn btn-sm btn-primary" id="edit-save" disabled>Save revision</button>
+        </div>
+      </div>
+
+      <div class="crop-view-bar" id="crop-view-bar" hidden>
+        <span class="crop-view-msg" id="crop-view-msg"></span>
+        <button type="button" class="btn btn-sm" id="crop-view-toggle">Show full transcript</button>
+      </div>
+
       <div class="transcript-segments transcript-full" id="transcript-doc" lang="en">
-        <div class="transcript-segment"><span class="segment-time">00:00</span><span class="segment-speaker">Harry:</span><span>Alright, let's get started. I want to go through the AI features roadmap for Q4 and make sure we're aligned on priorities.</span></div>
-        <div class="transcript-segment"><span class="segment-time">00:12</span><span class="segment-speaker">Sarah:</span><span>Sounds good. I've prepared the slides on local LLM integration. Should I start there?</span></div>
-        <div class="transcript-segment"><span class="segment-time">00:18</span><span class="segment-speaker">Harry:</span><span>Yes, please. I think that's the most critical piece. The whole privacy-first approach depends on getting this right.</span></div>
-        <div class="transcript-segment"><span class="segment-time">00:30</span><span class="segment-speaker">Sarah:</span><span>So the key question is whether we can run a 7B model on consumer hardware. Our tests show that with quantisation to 4-bit, we can fit within 8GB of unified memory on the M-series chips.</span></div>
-        <div class="transcript-segment"><span class="segment-time">00:48</span><span class="segment-speaker">David:</span><span>That's the bottleneck for most users. Even on the MacBook Air with 8GB, it should work — but just barely. We need to be careful about context window size.</span></div>
-        <div class="transcript-segment"><span class="segment-time">01:05</span><span class="segment-speaker">Sarah:</span><span>Right. We could keep the default context window small and let power users raise it. That keeps the common case fast and predictable.</span></div>
-        <div class="transcript-segment"><span class="segment-time">01:22</span><span class="segment-speaker">Harry:</span><span>Good. And the fallback path stays local-only? No silent calls to a remote model?</span></div>
-        <div class="transcript-segment"><span class="segment-time">01:31</span><span class="segment-speaker">Sarah:</span><span>Correct. If the local model is unavailable, we surface that state and ask the user. We never route data off-device automatically.</span></div>
-        <div class="transcript-segment"><span class="segment-time">01:49</span><span class="segment-speaker">David:</span><span>That matches the privacy principle. I'd also like us to log only categories and counts, never the transcript text.</span></div>
-        <div class="transcript-segment"><span class="segment-time">02:04</span><span class="segment-speaker">Harry:</span><span>Agreed. Let's move to speech recognition. Where are we on the WER targets?</span></div>
-        <div class="transcript-segment"><span class="segment-time">02:15</span><span class="segment-speaker">Sarah:</span><span>English is already close to five percent. Cantonese is the harder case — around eighteen percent before fine-tuning.</span></div>
-        <div class="transcript-segment"><span class="segment-time">02:33</span><span class="segment-speaker">David:</span><span>The training data is the issue. We need conversational Cantonese with natural English code-switching, not read speech.</span></div>
-        <div class="transcript-segment"><span class="segment-time">02:51</span><span class="segment-speaker">Harry:</span><span>Let's budget for data collection and set a fifteen percent target for Cantonese by end of quarter.</span></div>
-        <div class="transcript-segment"><span class="segment-time">03:07</span><span class="segment-speaker">Sarah:</span><span>I'll set up the fine-tuning pipeline and bring a first evaluation to the next sync.</span></div>
-        <div class="transcript-segment"><span class="segment-time">03:19</span><span class="segment-speaker">Harry:</span><span>Perfect. Last item: the budget split. Forty percent engineering, thirty data, twenty testing, ten documentation.</span></div>
-        <div class="transcript-segment"><span class="segment-time">03:34</span><span class="segment-speaker">David:</span><span>That works. I'll confirm the beta milestone with the wider team this week.</span></div>
+        <div class="transcript-segment" data-ordinal="0"><span class="segment-time">00:00</span><span class="segment-speaker">Harry:</span><span>Alright, let's get started. I want to go through the AI features roadmap for Q4 and make sure we're aligned on priorities.</span></div>
+        <div class="transcript-segment" data-ordinal="1"><span class="segment-time">00:12</span><span class="segment-speaker">Sarah:</span><span>Sounds good. I've prepared the slides on local LLM integration. Should I start there?</span></div>
+        <div class="transcript-segment" data-ordinal="2"><span class="segment-time">00:18</span><span class="segment-speaker">Harry:</span><span>Yes, please. I think that's the most critical piece. The whole privacy-first approach depends on getting this right.</span></div>
+        <div class="transcript-segment" data-ordinal="3"><span class="segment-time">00:30</span><span class="segment-speaker">Sarah:</span><span>So the key question is whether we can run a 7B model on consumer hardware. Our tests show that with quantisation to 4-bit, we can fit within 8GB of unified memory on the M-series chips.</span></div>
+        <div class="transcript-segment" data-ordinal="4"><span class="segment-time">00:48</span><span class="segment-speaker">David:</span><span>That's the bottleneck for most users. Even on the MacBook Air with 8GB, it should work — but just barely. We need to be careful about context window size.</span></div>
+        <div class="transcript-segment" data-ordinal="5"><span class="segment-time">01:05</span><span class="segment-speaker">Sarah:</span><span>Right. We could keep the default context window small and let power users raise it. That keeps the common case fast and predictable.</span></div>
+        <div class="transcript-segment" data-ordinal="6"><span class="segment-time">01:22</span><span class="segment-speaker">Harry:</span><span>Good. And the fallback path stays local-only? No silent calls to a remote model?</span></div>
+        <div class="transcript-segment" data-ordinal="7"><span class="segment-time">01:31</span><span class="segment-speaker">Sarah:</span><span>Correct. If the local model is unavailable, we surface that state and ask the user. We never route data off-device automatically.</span></div>
+        <div class="transcript-segment" data-ordinal="8"><span class="segment-time">01:49</span><span class="segment-speaker">David:</span><span>That matches the privacy principle. I'd also like us to log only categories and counts, never the transcript text.</span></div>
+        <div class="transcript-segment" data-ordinal="9"><span class="segment-time">02:04</span><span class="segment-speaker">Harry:</span><span>Agreed. Let's move to speech recognition. Where are we on the WER targets?</span></div>
+        <div class="transcript-segment" data-ordinal="10"><span class="segment-time">02:15</span><span class="segment-speaker">Sarah:</span><span>English is already close to five percent. Cantonese is the harder case — around eighteen percent before fine-tuning.</span></div>
+        <div class="transcript-segment" data-ordinal="11"><span class="segment-time">02:33</span><span class="segment-speaker">David:</span><span>The training data is the issue. We need conversational Cantonese with natural English code-switching, not read speech.</span></div>
+        <div class="transcript-segment" data-ordinal="12"><span class="segment-time">02:51</span><span class="segment-speaker">Harry:</span><span>Let's budget for data collection and set a fifteen percent target for Cantonese by end of quarter.</span></div>
+        <div class="transcript-segment" data-ordinal="13"><span class="segment-time">03:07</span><span class="segment-speaker">Sarah:</span><span>I'll set up the fine-tuning pipeline and bring a first evaluation to the next sync.</span></div>
+        <div class="transcript-segment" data-ordinal="14"><span class="segment-time">03:19</span><span class="segment-speaker">Harry:</span><span>Perfect. Last item: the budget split. Forty percent engineering, thirty data, twenty testing, ten documentation.</span></div>
+        <div class="transcript-segment" data-ordinal="15"><span class="segment-time">03:34</span><span class="segment-speaker">David:</span><span>That works. I'll confirm the beta milestone with the wider team this week.</span></div>
       </div>
     </div><!-- /transcript-screen -->
 
@@ -633,6 +650,28 @@
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section class="history-section" aria-labelledby="history-segmented-title">
+        <h2 id="history-segmented-title">Segmented versions</h2>
+        <div class="table-scroll">
+          <table class="history-table">
+            <caption>Trim and split revisions for this recording</caption>
+            <thead>
+              <tr>
+                <th scope="col">Revision</th>
+                <th scope="col">Saved</th>
+                <th scope="col">Working range</th>
+                <th scope="col">Sections</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
+            <tbody id="segmented-history-body">
+              <tr id="segmented-history-empty"><td colspan="5">No segmented version saved yet. Saving from the active Transcript page creates one immutable revision here.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="proto-hint">History here is illustrative: each confirmed save appends one fictional revision row and marks the prior active row <strong>superseded</strong>. This static prototype only displays rows — it does not provide navigable/readable historical transcript or segmented-version views (production 6.1 will provide recording-scoped read-only access to prior revisions). The fixed ordinal-0 full-recording section is never part of any revision. After a successful retranscription the new active transcript starts <strong>Not segmented</strong>: no range or split boundaries are copied, and old transcript revisions stay historical/readable.</p>
       </section>
 
       <section class="history-section" aria-labelledby="history-source-title">
@@ -769,6 +808,37 @@
       <div class="dialog-actions">
         <button class="btn btn-primary dialog-cancel">Done</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Boundary scissors action dialog (Step 6.1 prototype) -->
+<div class="dialog-overlay" id="boundary-action-dialog" role="dialog" aria-modal="true" aria-labelledby="boundary-action-title" aria-describedby="boundary-action-summary boundary-action-note" hidden>
+  <div class="dialog">
+    <h3 class="dialog-title" id="boundary-action-title">Boundary actions</h3>
+    <p class="dialog-lead" id="boundary-action-summary"></p>
+    <div class="boundary-action-buttons">
+      <button type="button" class="btn btn-sm" id="boundary-split">Split here</button>
+      <button type="button" class="btn btn-sm" id="boundary-crop-from">Crop from here</button>
+      <button type="button" class="btn btn-sm" id="boundary-crop-to">Crop to here</button>
+      <button type="button" class="btn btn-sm" id="boundary-remove-split">Remove split</button>
+    </div>
+    <p class="dialog-note" id="boundary-action-note"></p>
+    <div class="dialog-actions">
+      <button class="btn dialog-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Segmented version confirmation dialog (Step 6.1 prototype) -->
+<div class="dialog-overlay" id="segmented-version-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="segmented-confirm-title" hidden>
+  <div class="dialog">
+    <h3 class="dialog-title" id="segmented-confirm-title">Save this trimmed &amp; split revision?</h3>
+    <p class="dialog-lead" id="segmented-confirm-summary"></p>
+    <p class="dialog-note">Prototype only — confirming creates a fictional immutable revision; nothing is processed or saved to a database. The full transcript and source audio always remain recoverable, and any sections created by splits start without summaries or tags.</p>
+    <div class="dialog-actions">
+      <button class="btn dialog-cancel">Cancel</button>
+      <button class="btn btn-primary" id="segmented-confirm-btn">Confirm save</button>
     </div>
   </div>
 </div>

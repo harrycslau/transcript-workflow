@@ -19,6 +19,12 @@ open design/ui-prototype/index.html
 - On Recording Detail, switch **language variant tabs** (visual state only) and use
   **Copy Markdown**, **Download .md**, **Plain text**, and **Regenerate summary**
 - Open the separate **Transcript** or **History** screens from the detail header
+- On the active **Transcript** screen, **Edit trim & splits** reveals small
+  scissors on the inter-segment divider lines (no panel and no modal). Clicking a scissors
+  opens a small action dialog — Split here / Crop from here / Crop to here /
+  Remove split; crop-only needs no topics, and splits create inline-named
+  sections. Save confirms one immutable revision; history lives on the History
+  screen. Historical transcript versions are read-only.
 - **Routing** in the detail header opens a modal chooser to reroute and
   retranscribe with a different routing profile, or confirm the current routing
   (prototype-only, static — nothing is scheduled or polled)
@@ -138,7 +144,106 @@ global reusable definitions created via the recording detail page
 whose normalized name later appears in YAML `tags.allowed` is promoted to
 config-owned by `tags --sync` on the same row (assignments/history preserved).
 
-## Information architecture (proposal)
+## Step 6 trim & split editor (final approved feedback refinement)
+
+The Step 6 trim/split editor is **integrated into the existing active
+Transcript screen** (`data-screen="transcript-screen"`) and demonstrates the
+final approved Step 6.0 feedback refinement (see
+`docs/step-6-decisions.md` §7a). It is a static, staged interaction with
+fictional data; nothing is processed, scheduled, written, or deleted. The
+former separate **Trim & sections** screen/link is removed. **Step 6.4
+retention / Keep Audio / Rescan UX placement is deferred**: the approved
+policies remain in `docs/step-6-decisions.md` and `docs/step-6-plan.md` but
+are not prototyped now.
+
+### Editing on the active Transcript (`Edit trim & splits`)
+
+- **Only the active transcript is editable.** The Transcript screen carries an
+  **Edit trim & splits** toggle; historical transcript versions are read-only.
+  Pressing it does **not** open a panel or a dialog — it simply reveals a small
+  scissors button on each **inter-segment** divider line (never at the
+  transcript's very start or end), preserving the clean
+  transcript layout. Pressing it again (**Done editing**) hides the scissors
+  and discards unsaved staging.
+- **Scissors → action dialog.** Clicking a scissors opens a small accessible
+  action dialog (the toggle itself never opens one) that summarizes the
+  boundary/time and offers only the actions valid there:
+  - **Split here** — an interior split that starts a new user-visible section.
+  - **Crop from here** — sets the working start to this boundary, hiding the
+    content above it.
+  - **Crop to here** — sets the end-exclusive to this boundary, hiding the
+    content below it.
+  - **Remove split** — shown only when the boundary is already a split.
+  - **Cancel**.
+  Invalid actions are disabled or omitted. Endpoint splits, duplicate splits,
+  outside-range actions and empty crops are rejected.
+- **Crop hides, never dims.** Cropped-away rows and their irrelevant divider
+  controls disappear from the staged edited transcript; the full transcript and
+  source audio are never modified and remain fully recoverable. A compact
+  status bar shows counts such as "3 lines cropped above · 2 lines cropped
+  below" together with **Clear crop**, **Reset** and **Save revision** — not a
+  large editor panel.
+- **Crop-only = no sections.** A crop with no splits is valid and has **zero**
+  topic sections; nothing needs naming. One or more splits partition the
+  retained range into N+1 visible sections, and each section gets an **inline
+  topic input** rendered at its start in the transcript flow (DOM APIs /
+  `textContent` only). Removing the final split removes the topic inputs and the
+  section records while the crop remains. There is **no automatic or derived
+  topic inference** and no separate section-card list, ranges, summaries, tags,
+  variants or provenance in this editor.
+- **Clear crop** restores the full transcript. Splits already made by the user
+  are retained (sections are created by splits, never by a crop), so a
+  crop-only state clears to a plain full transcript with zero sections.
+- **One staged immutable revision.** Any crop/split/topic edit marks "not saved
+  yet". **Reset** restores the current active revision; **Save revision**
+  (disabled while invalid) opens the existing accessible confirmation dialog
+  summarizing the crop range and the optional sections. Confirming creates one
+  fictional new revision; an unchanged payload is a no-op.
+- **History belongs on History.** The revision list lives on the History screen
+  as a captioned table (revision, saved, working range, sections, status);
+  confirming a save appends a row there and marks the prior active row
+  superseded. The table is illustrative — this static prototype only displays
+  rows and does not provide navigable/readable historical views (production
+  6.1 will provide recording-scoped read-only access to prior revisions).
+  There is no history list on Transcript.
+- **Saved crop = working presentation.** After saving, the normal Transcript
+  shows the saved cropped working view — cropped rows are hidden by default —
+  with a small **Show full transcript** toggle, so the full transcript is
+  always one action away. The fixed ordinal-0 default summary, search,
+  embeddings and Ask stay full-recording, and the persisted full transcript
+  data and source audio are never changed.
+- **No carry-forward.** Saving a new revision creates brand-new split sections:
+  section summaries, variants, model suggestions and section tags are **not**
+  copied — not even for identical boundaries or titles; they start clean for
+  6.2 (B).
+- **Retranscription.** After a successful retranscription the new active
+  transcript starts **Not segmented** (no crop or split boundaries are copied),
+  old transcript revisions stay historical/readable (in production; this static
+  prototype only lists rows), and a failed
+  retranscription leaves the active revision untouched. Recording-level tags
+  continue unchanged.
+- No table/field names are implied (the recommended minimal direction is in
+  `docs/step-6-plan.md` §8).
+
+The editor reuses the existing Transcript screen, `data-screen` navigation,
+native controls, tokens and responsive behaviour; the keyboard `/` shortcut
+and Escape handling are unchanged. Topic values and all labels are rendered
+with `textContent`/`createElement` only — never generated HTML.
+
+## Approved Step 6.0 decisions
+
+The Step 6 decisions D1–D12 and the requested clarifications
+(segmented-version semantics, retranscription continuation, retention
+timer, Rescan, scheduling) are **approved** and recorded in
+`docs/step-6-decisions.md`, together with the final approved feedback
+refinement for the transcript-page scissors/crop/split interaction. The
+concrete Step 6.1
+implementation plan (structure/history only, integrated into the active
+Transcript route/template) is in `docs/step-6-plan.md` §8. Actual source
+deletion and schedule activation remain separate explicit approval gates;
+6.4 UX placement (retention / Keep Audio / Rescan) is deferred.
+
+## Information architecture
 
 ```
 Top bar: [Brain] [Search + mode dropdown] [Review badge] [Status]
@@ -160,7 +265,8 @@ Recording Detail:
   Transcript preview (5 segments → open transcript)
   Technical details (native <details>: IDs/hash/source/routing/model)
               |
-              +--> Transcript (metadata, exports, fuller transcript)
+              +--> Transcript (metadata, exports, fuller transcript;
+              |     active version also hosts the trim & split editor)
               +--> History    (routing/transcription/summary tables, source info)
 ```
 
@@ -201,40 +307,7 @@ obsolete Summary-screen markup and dead selectors are removed.
 - Mobile layout stacks both dialogs using the existing tokens and
   breakpoints (full-width action buttons, stacked create row)
 
-## Questions for approval
-
-1. **Complete summary on the detail page.** Is the complete summary (five
-   sections plus variant tabs and utility actions) the right content
-   for Recording Detail, or should any section be collapsed by default
-   while staying on the same page?
-
-2. **Utility action placement.** Copy Markdown, Download .md, Plain
-   text and Regenerate sit in the Summary heading row. Is that the
-   right contextual home, or should the actions live in a toolbar
-   between the variant tabs and the document?
-
-3. **Two disclosures vs one.** Does splitting Technical details
-   (recording/routing/transcription) and Summary provenance
-   (summary-specific) read clearly, or should they be merged into a
-   single collapsed block with grouped labels?
-
-4. **Transcript preview bounds.** The detail page still shows exactly
-   5 transcript segments and links to the separate Transcript screen.
-   Is that the right bound now that the summary is complete on the same
-   page?
-
-5. **Routing trigger placement.** Should the trigger stay next to
-   Transcript/History as prototyped, or sit adjacent to the status
-   panel? If status-adjacent, the interactive control must remain
-   outside `role="status"`.
-
-6. **Custom tag definitions.** Should production move from
-   configuration-owned tag definitions to user-created custom tag
-   definitions (stored per recording, as prototyped), or stay
-   configuration-owned? Custom-tag creation requires this product and
-   backend decision.
-
-## Current production behaviours preserved (for the proposal)
+## Current production behaviours preserved
 
 - Default / Original / English / Traditional Chinese generation
 - Concrete existing variants readable

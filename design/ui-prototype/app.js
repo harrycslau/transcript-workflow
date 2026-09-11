@@ -630,7 +630,480 @@ document.addEventListener('DOMContentLoaded', () => {
     },
   });
 
+  // ---- Step 6 prototype: transcript-page trim & split editing (segmented versions) ----
+  // The Transcript screen is the only 6.1 editor location. Fictional segment
+  // rows are read from the DOM and small scissors controls are injected on the
+  // inter-segment divider lines between them. Canonical boundaries are half-open segment
+  // ordinals [start, end_exclusive); the UI shows timestamps and inclusive
+  // segment labels. The edit toggle only reveals the scissors (no panel, no
+  // dialog); clicking a scissors opens a small action dialog offering
+  // Split here / Crop from here / Crop to here / Remove split. Cropped rows are
+  // hidden in the staged view. Save commits one immutable revision holding the
+  // crop range plus optional splits/topics (crop-only = zero topic sections).
+  const transcriptDoc = document.getElementById('transcript-doc');
+  const editToggle = document.getElementById('transcript-edit-toggle');
+  const editModeBar = document.getElementById('edit-mode-bar');
+  const editStatus = document.getElementById('edit-status');
+  const editClearCrop = document.getElementById('edit-clear-crop');
+  const editReset = document.getElementById('edit-reset');
+  const editSave = document.getElementById('edit-save');
+  const cropViewBar = document.getElementById('crop-view-bar');
+  const cropViewMsg = document.getElementById('crop-view-msg');
+  const cropViewToggle = document.getElementById('crop-view-toggle');
+  const segmentedHistoryBody = document.getElementById('segmented-history-body');
+  const segmentedHistoryEmpty = document.getElementById('segmented-history-empty');
+
+  const segmentEls = Array.from(transcriptDoc.querySelectorAll('.transcript-segment'));
+  const segmentTimes = segmentEls.map(el => {
+    const t = el.querySelector('.segment-time');
+    return t ? t.textContent : '';
+  });
+  const SEGMENT_COUNT = segmentEls.length;
+  const END_BOUNDARY = SEGMENT_COUNT;
+  const scissorsButtons = [];
+  const topicMarkers = [];
+  let editMode = false;
+  let viewFullTranscript = false;
+  let nextRevision = 1;
+
+  function makeState() {
+    return { start: 0, end: END_BOUNDARY, splits: [], titles: new Map() };
+  }
+  function cloneState(s) {
+    return { start: s.start, end: s.end, splits: s.splits.slice(), titles: new Map(s.titles) };
+  }
+
+  // Baseline: a clean, full transcript (no trim, no splits) so the reference
+  // layout stays clean until the user edits. Confirmed saves create fictional
+  // revisions; the History screen owns the revision list.
+  let activeState = makeState();
+  let staged = cloneState(activeState);
+
+  function boundaryTimeText(b) {
+    if (b <= 0) return segmentTimes[0] || '00:00';
+    if (b >= END_BOUNDARY) return 'end';
+    return segmentTimes[b];
+  }
+  function boundaryLabel(b) {
+    if (b <= 0) return 'start · ' + boundaryTimeText(0);
+    if (b >= END_BOUNDARY) return 'end · ' + boundaryTimeText(END_BOUNDARY);
+    return 'before segment ' + b + ' · ' + boundaryTimeText(b);
+  }
+  function inclusiveRangeText(start, end) {
+    if (end - start <= 1) return 'segment ' + start;
+    return 'segments ' + start + '–' + (end - 1);
+  }
+  function keyOf(sec) { return sec.start + '-' + sec.end; }
+
+  // Sections are materialized only from the crop range + split markers. Zero
+  // splits means zero sections (crop-only); N splits inside the range yield N+1
+  // sections that exactly partition [start, end_exclusive).
+  function deriveSections(start, end, splits) {
+    const interior = splits.filter(s => s > start && s < end).slice().sort((a, b) => a - b);
+    if (interior.length === 0) return [];
+    const bounds = [start].concat(interior, [end]);
+    const out = [];
+    for (let i = 0; i < bounds.length - 1; i++) out.push({ start: bounds[i], end: bounds[i + 1] });
+    return out;
+  }
+
+  // ---- Scissors controls: one compact button per inter-segment divider line ----
+  function scissorsIcon() {
+    const NS = 'http://www.w3.org/2000/svg';
+    function el(name, attrs) {
+      const node = document.createElementNS(NS, name);
+      for (const k in attrs) node.setAttribute(k, attrs[k]);
+      return node;
+    }
+    const svg = el('svg', {
+      viewBox: '0 0 24 24', width: '12', height: '12',
+      fill: 'none', stroke: 'currentColor', 'stroke-width': '2',
+      'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
+    });
+    svg.appendChild(el('circle', { cx: '6', cy: '6', r: '3' }));
+    svg.appendChild(el('circle', { cx: '6', cy: '18', r: '3' }));
+    svg.appendChild(el('line', { x1: '20', y1: '4', x2: '8.12', y2: '15.88' }));
+    svg.appendChild(el('line', { x1: '14.47', y1: '14.48', x2: '20', y2: '20' }));
+    svg.appendChild(el('line', { x1: '8.12', y1: '8.12', x2: '12', y2: '12' }));
+    return svg;
+  }
+
+  function makeScissors(boundary) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'boundary-scissors';
+    btn.dataset.boundary = String(boundary);
+    btn.setAttribute('aria-haspopup', 'dialog');
+    btn.setAttribute('aria-label', 'Divider ' + boundaryLabel(boundary) + '. Actions: split here, crop from here, crop to here.');
+    btn.appendChild(scissorsIcon());
+    btn.addEventListener('click', () => { if (editMode) openBoundaryDialog(boundary); });
+    return btn;
+  }
+
+  function buildScissors() {
+    segmentEls.forEach((seg, i) => {
+      if (i === 0) return;
+      const sc = makeScissors(i);
+      transcriptDoc.insertBefore(sc, seg);
+      scissorsButtons.push(sc);
+    });
+  }
+
+  // ---- Action validity (half-open canonical semantics) ----
+  // Splits are only valid strictly inside the retained range (never at the
+  // endpoints); crops must leave at least one segment; duplicates rejected.
+  function insideRange(b) { return b > staged.start && b < staged.end; }
+  function canCropFrom(b) { return insideRange(b); }
+  function canCropTo(b) { return insideRange(b); }
+  function canSplit(b) { return insideRange(b) && !staged.splits.includes(b); }
+  function canRemoveSplit(b) { return staged.splits.includes(b); }
+
+  // ---- Boundary action dialog (opened only by clicking a scissors) ----
+  const boundaryDialog = setupDialog(document.getElementById('boundary-action-dialog'), {});
+  let selectedBoundary = null;
+
+  function openBoundaryDialog(b) {
+    selectedBoundary = b;
+    const title = document.getElementById('boundary-action-title');
+    const summary = document.getElementById('boundary-action-summary');
+    const note = document.getElementById('boundary-action-note');
+    const splitBtn = document.getElementById('boundary-split');
+    const cropFromBtn = document.getElementById('boundary-crop-from');
+    const cropToBtn = document.getElementById('boundary-crop-to');
+    const removeBtn = document.getElementById('boundary-remove-split');
+    title.textContent = 'Boundary · ' + boundaryLabel(b);
+    summary.textContent = 'Choose an action for the divider ' + boundaryLabel(b) + '.';
+    splitBtn.disabled = !canSplit(b);
+    cropFromBtn.disabled = !canCropFrom(b);
+    cropToBtn.disabled = !canCropTo(b);
+    removeBtn.disabled = !canRemoveSplit(b);
+    removeBtn.hidden = !canRemoveSplit(b);
+    if (b <= staged.start) {
+      note.textContent = 'This is the start of the retained range — cropping or splitting here is not possible.';
+    } else if (b >= staged.end) {
+      note.textContent = 'This is the end of the retained range — cropping or splitting here is not possible.';
+    } else if (staged.splits.includes(b)) {
+      note.textContent = 'This boundary is already a split — Remove split reverses it.';
+    } else {
+      note.textContent = 'Split here divides the transcript into named sections; crops hide the content above or below this boundary from the staged view.';
+    }
+    boundaryDialog.open();
+  }
+
+  // Preserve topic titles: exact range keys survive unchanged; splitting an
+  // existing section keeps the title on the left-hand part (the new right part
+  // starts blank and needs a topic). Brand-new ranges start blank.
+  function preserveTitles(prevSections) {
+    const next = deriveSections(staged.start, staged.end, staged.splits);
+    const titles = new Map();
+    next.forEach(sec => {
+      const key = keyOf(sec);
+      let sourceKey = null;
+      if (staged.titles.has(key)) {
+        sourceKey = key;
+      } else if (prevSections) {
+        const sameStart = prevSections.find(p => p.start === sec.start && sec.end <= p.end);
+        if (sameStart && staged.titles.has(keyOf(sameStart))) sourceKey = keyOf(sameStart);
+      }
+      titles.set(key, sourceKey ? staged.titles.get(sourceKey) : '');
+    });
+    return titles;
+  }
+
+  function applyCropFrom() {
+    if (selectedBoundary === null || !canCropFrom(selectedBoundary)) return;
+    const prevSections = deriveSections(staged.start, staged.end, staged.splits);
+    staged.start = selectedBoundary;
+    staged.splits = staged.splits.filter(s => s > staged.start && s < staged.end);
+    staged.titles = preserveTitles(prevSections);
+    renderAll();
+  }
+  function applyCropTo() {
+    if (selectedBoundary === null || !canCropTo(selectedBoundary)) return;
+    const prevSections = deriveSections(staged.start, staged.end, staged.splits);
+    staged.end = selectedBoundary;
+    staged.splits = staged.splits.filter(s => s > staged.start && s < staged.end);
+    staged.titles = preserveTitles(prevSections);
+    renderAll();
+  }
+  function applySplit() {
+    if (selectedBoundary === null || !canSplit(selectedBoundary)) return;
+    const prevSections = deriveSections(staged.start, staged.end, staged.splits);
+    staged.splits = staged.splits.concat(selectedBoundary).sort((a, b) => a - b);
+    staged.titles = preserveTitles(prevSections);
+    renderAll();
+  }
+  function applyRemoveSplit() {
+    if (selectedBoundary === null || !canRemoveSplit(selectedBoundary)) return;
+    const prevSections = deriveSections(staged.start, staged.end, staged.splits);
+    staged.splits = staged.splits.filter(s => s !== selectedBoundary);
+    staged.titles = preserveTitles(prevSections);
+    renderAll();
+  }
+
+  document.getElementById('boundary-split').addEventListener('click', () => { applySplit(); boundaryDialog.close(); });
+  document.getElementById('boundary-crop-from').addEventListener('click', () => { applyCropFrom(); boundaryDialog.close(); });
+  document.getElementById('boundary-crop-to').addEventListener('click', () => { applyCropTo(); boundaryDialog.close(); });
+  document.getElementById('boundary-remove-split').addEventListener('click', () => { applyRemoveSplit(); boundaryDialog.close(); });
+
+  // ---- Inline topic controls (rendered in the transcript flow once a split exists) ----
+  function makeTopicInput(sec, index) {
+    const key = keyOf(sec);
+    const row = document.createElement('div');
+    row.className = 'section-topic-inline';
+
+    const label = document.createElement('label');
+    label.className = 'section-topic-label';
+    label.setAttribute('for', 'topic-' + index);
+    label.textContent = 'Topic ' + (index + 1);
+
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'topic-input';
+    input.id = 'topic-' + index;
+    input.maxLength = 255;
+    input.value = staged.titles.get(key) || '';
+    input.placeholder = 'Name this section';
+    input.setAttribute('aria-label', 'Topic ' + (index + 1) + ' for the section starting at ' + boundaryLabel(sec.start));
+
+    input.addEventListener('input', () => {
+      staged.titles.set(key, input.value);
+      updateStatus();
+    });
+
+    row.appendChild(label);
+    row.appendChild(input);
+    return row;
+  }
+
+  function makeTopicLabel(sec, index) {
+    const row = document.createElement('div');
+    row.className = 'section-topic-inline section-topic-readonly';
+    const label = document.createElement('span');
+    label.className = 'section-topic-label';
+    label.textContent = 'Topic ' + (index + 1);
+    const value = document.createElement('span');
+    value.className = 'section-topic-value';
+    value.textContent = activeState.titles.get(keyOf(sec)) || '';
+    row.appendChild(label);
+    row.appendChild(value);
+    return row;
+  }
+
+  function clearTopicMarkers() {
+    topicMarkers.forEach(m => m.remove());
+    topicMarkers.length = 0;
+  }
+
+  // ---- Rendering ----
+  function renderTranscriptFlow() {
+    const range = editMode ? staged : activeState;
+    const showFull = !editMode && viewFullTranscript;
+
+    // Cropped rows are hidden (not dimmed) in the staged edited view and in the
+    // saved cropped working view; the full transcript is one toggle away.
+    segmentEls.forEach((seg, i) => {
+      const hiddenRow = showFull ? false : (i < range.start || i >= range.end);
+      seg.hidden = hiddenRow;
+    });
+
+    // Scissors are visible only while editing and only on dividers that touch
+    // the retained range (edge dividers stay visible as crop markers).
+    scissorsButtons.forEach(btn => {
+      const b = parseInt(btn.dataset.boundary, 10);
+      const isSplit = editMode && staged.splits.includes(b);
+      btn.hidden = !editMode || b < staged.start || b > staged.end;
+      btn.classList.toggle('is-split', isSplit);
+      btn.setAttribute('aria-label', 'Divider ' + boundaryLabel(b) +
+        (isSplit ? ' — split marker. Actions: remove split, crop from here, crop to here.' : '. Actions: split here, crop from here, crop to here.'));
+    });
+
+    // Inline topic labels/inputs in the transcript flow, only when splits exist.
+    clearTopicMarkers();
+    const sections = editMode
+      ? deriveSections(staged.start, staged.end, staged.splits)
+      : (showFull ? [] : deriveSections(activeState.start, activeState.end, activeState.splits));
+    if (sections.length > 0) {
+      sections.forEach((sec, i) => {
+        const marker = editMode ? makeTopicInput(sec, i) : makeTopicLabel(sec, i);
+        segmentEls[sec.start].before(marker);
+        topicMarkers.push(marker);
+      });
+    }
+
+    // Compact saved-working-view bar (non-edit) with the full-transcript toggle.
+    const hasSavedCrop = activeState.start !== 0 || activeState.end !== END_BOUNDARY;
+    cropViewBar.hidden = editMode || !hasSavedCrop;
+    if (!editMode && hasSavedCrop) {
+      const hiddenCount = activeState.start + (SEGMENT_COUNT - activeState.end);
+      const noun = hiddenCount === 1 ? 'line' : 'lines';
+      cropViewMsg.textContent = showFull
+        ? 'Showing the full transcript — the saved working view hides ' + hiddenCount + ' ' + noun + '.'
+        : 'Saved working view (revision ' + (nextRevision - 1) + ') — ' + hiddenCount + ' ' + noun + ' hidden. The full transcript and source audio remain available.';
+      cropViewToggle.textContent = showFull ? 'Show saved working view' : 'Show full transcript';
+    }
+  }
+
+  // ---- Validation / staged status ----
+  function validateStaged() {
+    if (staged.start >= staged.end) {
+      return { ok: false, message: 'The crop must leave at least one segment.' };
+    }
+    // Crop-only (no splits) is valid and has zero topic sections.
+    if (staged.splits.length === 0) return { ok: true, message: '' };
+    const sections = deriveSections(staged.start, staged.end, staged.splits);
+    for (const sec of sections) {
+      const title = staged.titles.get(keyOf(sec)) || '';
+      if (title.trim() === '') {
+        return { ok: false, message: 'Every section needs a topic — give each resulting section a name.' };
+      }
+      if (/[\u0000-\u001f\u007f]/.test(title)) {
+        return { ok: false, message: 'A topic contains an invalid character — control characters and newlines are not allowed.' };
+      }
+      if (title.length > 255) {
+        return { ok: false, message: 'A topic is too long — at most 255 characters.' };
+      }
+    }
+    return { ok: true, message: '' };
+  }
+
+  function isDirty() {
+    if (staged.start !== activeState.start || staged.end !== activeState.end) return true;
+    if (staged.splits.join(',') !== activeState.splits.join(',')) return true;
+    const sections = deriveSections(staged.start, staged.end, staged.splits);
+    for (const sec of sections) {
+      if ((staged.titles.get(keyOf(sec)) || '') !== (activeState.titles.get(keyOf(sec)) || '')) return true;
+    }
+    return false;
+  }
+
+  function updateStatus() {
+    const dirty = isDirty();
+    const valid = validateStaged();
+    const above = staged.start;
+    const below = SEGMENT_COUNT - staged.end;
+    const sections = deriveSections(staged.start, staged.end, staged.splits);
+    const parts = [];
+    if (above > 0) parts.push(above + ' line' + (above === 1 ? '' : 's') + ' cropped above');
+    if (below > 0) parts.push(below + ' line' + (below === 1 ? '' : 's') + ' cropped below');
+    if (sections.length > 1) parts.push(sections.length + ' sections from ' + staged.splits.length + ' split' + (staged.splits.length === 1 ? '' : 's'));
+    let msg;
+    if (!dirty) {
+      msg = 'No changes yet.';
+    } else {
+      msg = (parts.length ? parts.join(' · ') : 'Staged changes') + ' — not saved yet.';
+    }
+    if (!valid.ok) msg = msg + ' ' + valid.message;
+    editStatus.textContent = msg;
+    editSave.disabled = !dirty || !valid.ok;
+    editReset.disabled = !dirty;
+    editClearCrop.disabled = staged.start === 0 && staged.end === END_BOUNDARY;
+  }
+
+  function renderAll() {
+    renderTranscriptFlow();
+    updateStatus();
+  }
+
+  // ---- Edit mode toggle (only reveals scissors/controls; opens no dialog) ----
+  function setEditMode(on) {
+    editMode = on;
+    editModeBar.hidden = !on;
+    editToggle.setAttribute('aria-expanded', String(on));
+    editToggle.textContent = on ? 'Done editing' : 'Edit trim & splits';
+    if (!on) boundaryDialog.close();
+    if (on) {
+      staged = cloneState(activeState);
+      viewFullTranscript = false;
+    }
+    renderAll();
+  }
+  editToggle.addEventListener('click', () => setEditMode(!editMode));
+
+  // ---- Compact controls: Clear crop / Reset / Save ----
+  editClearCrop.addEventListener('click', () => {
+    if (staged.start === 0 && staged.end === END_BOUNDARY) return;
+    staged.start = 0;
+    staged.end = END_BOUNDARY;
+    // Splits already made by the user are retained (sections are created by
+    // splits, never by the crop itself); a crop-only state clears to zero
+    // sections with nothing to name.
+    staged.splits = staged.splits.filter(s => s > 0 && s < END_BOUNDARY);
+    staged.titles = preserveTitles();
+    renderAll();
+  });
+
+  editReset.addEventListener('click', () => {
+    staged = cloneState(activeState);
+    renderAll();
+  });
+
+  // ---- Save: one confirmed immutable revision ----
+  function updateConfirmSummary() {
+    const summary = document.getElementById('segmented-confirm-summary');
+    const sections = deriveSections(staged.start, staged.end, staged.splits);
+    const parts = [];
+    if (staged.start > 0) parts.push('crops ' + staged.start + ' line' + (staged.start === 1 ? '' : 's') + ' above');
+    if (staged.end < END_BOUNDARY) parts.push('crops ' + (SEGMENT_COUNT - staged.end) + ' line' + (SEGMENT_COUNT - staged.end === 1 ? '' : 's') + ' below');
+    const sectionPart = sections.length === 0
+      ? 'no topic sections (crop only)'
+      : sections.length + ' topic section' + (sections.length === 1 ? '' : 's') + ': ' +
+        sections.map(sec => '“' + (staged.titles.get(keyOf(sec)) || '') + '”').join(', ');
+    summary.textContent = 'Working range: ' + inclusiveRangeText(staged.start, staged.end) + '.' +
+      (parts.length ? ' ' + parts.join(', ') + '.' : '') + ' ' + sectionPart + '.';
+  }
+
+  const segConfirmDialog = setupDialog(document.getElementById('segmented-version-confirm-dialog'), {});
+
+  editSave.addEventListener('click', () => {
+    if (!validateStaged().ok) return;
+    updateConfirmSummary();
+    segConfirmDialog.open();
+  });
+
+  function commitRevision() {
+    const revision = nextRevision++;
+    activeState = cloneState(staged);
+    staged = cloneState(activeState);
+    viewFullTranscript = false;
+    // New split-created sections start without summaries/tags (6.2); nothing
+    // is carried forward.
+    if (segmentedHistoryEmpty) segmentedHistoryEmpty.remove();
+    Array.from(segmentedHistoryBody.rows).forEach(existingRow => {
+      const statusCell = existingRow.cells[4];
+      if (statusCell && statusCell.textContent === 'active') statusCell.textContent = 'superseded';
+    });
+    const row = document.createElement('tr');
+    const sections = deriveSections(activeState.start, activeState.end, activeState.splits);
+    const cells = [
+      String(revision),
+      'just now',
+      inclusiveRangeText(activeState.start, activeState.end),
+      sections.length === 0 ? 'none (crop only)' : sections.length + ' (splits ' + activeState.splits.map(String).join(', ') + ')',
+      'active',
+    ];
+    cells.forEach(text => {
+      const td = document.createElement('td');
+      td.textContent = text;
+      row.appendChild(td);
+    });
+    segmentedHistoryBody.prepend(row);
+    setEditMode(false);
+  }
+
+  document.getElementById('segmented-confirm-btn').addEventListener('click', () => {
+    if (!validateStaged().ok) { segConfirmDialog.close(); return; }
+    commitRevision();
+    segConfirmDialog.close();
+  });
+
+  cropViewToggle.addEventListener('click', () => {
+    viewFullTranscript = !viewFullTranscript;
+    renderAll();
+  });
   // ---- Init ----
+  buildScissors();
+  setEditMode(false);
   updateResultsCount();
   renderCardGroups(sortDesktop.value);
   renderDetailTagRow();

@@ -629,6 +629,111 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 /* Manual (custom) tag chip — prototype proposal */
 .tag-manual { background: var(--color-warn-bg); color: var(--color-warn); border-color: transparent; }
 
+/* ============================================================
+   STEP 6 EDITOR — transcript-page trim & split editing
+   Prototype only. Reuses existing tokens and components.
+   ============================================================ */
+.proto-note {
+  font-size: var(--fs-sm);
+  color: var(--color-text-2);
+  background: var(--color-warn-bg);
+  border: 1px solid var(--color-warn);
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-6);
+  line-height: var(--lh-normal);
+}
+.proto-hint { font-size: var(--fs-xs); color: var(--color-text-3); margin-top: var(--sp-3); }
+
+/* Compact edit-mode bar (small, not a panel) */
+.edit-mode-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  flex-wrap: wrap; background: var(--color-surface); border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg); padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-4);
+}
+.edit-mode-bar[hidden] { display: none; }
+.edit-status { font-size: var(--fs-sm); color: var(--color-text-2); }
+.edit-actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+
+/* Compact saved-working-view bar with the full-transcript toggle */
+.crop-view-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  flex-wrap: wrap; background: var(--color-surface-2); border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg); padding: var(--sp-2) var(--sp-3); margin-bottom: var(--sp-4);
+}
+.crop-view-bar[hidden] { display: none; }
+.crop-view-msg { font-size: var(--fs-sm); color: var(--color-text-2); }
+
+/* Scissors controls: one compact button per inter-segment divider line.
+   Only visible while editing; visibility is driven by the hidden attribute. */
+.boundary-scissors {
+  display: block;
+  width: 100%;
+  position: relative;
+  border: 0;
+  border-top: 1px dashed var(--color-border-2);
+  background: none;
+  padding: 0;
+  margin: 2px 0;
+  height: 14px;
+  cursor: pointer;
+  color: var(--color-text-3);
+}
+.boundary-scissors[hidden] { display: none; }
+.boundary-scissors svg {
+  position: absolute;
+  left: 50%;
+  top: -7px;
+  transform: translateX(-50%);
+  background: var(--color-surface);
+  padding: 2px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 50%;
+  box-sizing: content-box;
+}
+.boundary-scissors:hover { border-top-color: var(--color-accent); color: var(--color-accent); }
+.boundary-scissors:hover svg { border-color: var(--color-accent); }
+.boundary-scissors:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.boundary-scissors.is-split { border-top: 2px solid var(--color-warn); color: var(--color-warn); }
+.boundary-scissors.is-split svg { border-color: var(--color-warn); background: var(--color-warn-bg); }
+
+/* Cropped rows are hidden (never merely dimmed) in staged and saved views */
+.transcript-segment[hidden] { display: none; }
+
+/* Inline topic controls rendered inside the transcript flow after a split */
+.section-topic-inline {
+  display: flex; align-items: center; gap: var(--sp-2);
+  margin: var(--sp-1) 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.section-topic-label {
+  font-size: var(--fs-xs); font-weight: 600; color: var(--color-text-3);
+  white-space: nowrap; flex-shrink: 0;
+}
+.topic-input {
+  flex: 1; min-width: 0;
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+.section-topic-readonly .section-topic-value { font-size: var(--fs-sm); color: var(--color-text); font-weight: 600; }
+
+/* Boundary action dialog: stacked action buttons */
+.boundary-action-buttons {
+  display: flex; flex-direction: column; gap: var(--sp-2);
+  margin-bottom: var(--sp-4);
+}
+.boundary-action-buttons .btn { justify-content: flex-start; width: 100%; text-align: left; }
+.boundary-action-buttons .btn[hidden] { display: none; }
+
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .screen { display: none; }
 .screen.active { display: block; }
 
@@ -660,6 +765,12 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   .tag-create-row { flex-direction: column; align-items: stretch; }
   .tag-create-row .btn { width: 100%; }
   .detail-links { gap: var(--sp-3); }
+
+  /* Step 6 editor stacks its compact controls on small screens */
+  .edit-actions { width: 100%; }
+  .edit-actions .btn { flex: 1; justify-content: center; }
+  .crop-view-bar { align-items: flex-start; }
+  .crop-view-bar .btn { width: 100%; }
 }
 
 @media (max-width: 480px) {

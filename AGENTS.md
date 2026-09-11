@@ -1034,8 +1034,55 @@ Non-negotiable principles:
   ownership still enforced. Answers render as plain autoescaped
   fragments plus server-owned citation links — never model HTML or
   model URLs. No history persistence.
-- **Step 6**: user-initiated topic splitting, section-level
-  summaries/tags, retention cleanup (deletion only after successful
-  processing + retention delay), launchd scheduling.
+- **Step 6** (overall plan accepted; **Step 6.0 complete** — see
+  `docs/step-6-plan.md` and the approved `docs/step-6-decisions.md`):
+  user-initiated topic splitting and manual **crop/trim**
+  (non-destructive logical trim selecting a working interval/range while
+  retaining source audio and the full transcript; any derived audio export
+  is a separate deferred feature), section-level summaries/tags, retention
+  cleanup (deletion only after successful processing + retention delay),
+  missing-file reconciliation, launchd scheduling. **Approved Step 6.0
+  rules**: ordinal-0 stays full-recording/fixed and trim never changes the
+  full-recording defaults (ordinal-0 default summary, search, embeddings,
+  Ask) — a saved crop becomes the normal Transcript working presentation
+  (cropped rows hidden by default, "Show full transcript" toggle) while the
+  persisted full transcript data stays complete; a segmented
+  version is one immutable transcript-bound revision holding a working
+  range plus **zero or more** topic sections (zero splits ⇒ zero sections;
+  N+1 splits ⇒ N+1 sections that exactly partition the retained range and
+  require topics), saved
+  atomically (clear crop restores the full range without creating
+  sections); boundaries are segment ordinals
+  with canonical `[start, end_exclusive)`; retranscription creates no
+  segmented version and copies no boundaries/summaries/tags (an unchanged
+  save is a no-op); successful regeneration of the current default summary
+  restarts the retention timer (failed regeneration and
+  non-default/section/tag/layout/trim edits do not; retranscription
+  restarts it once a new default summary exists); Rescan is ONE global
+  POST-only `run_ingest` pass (no manual relink). **Approved UX refinement**:
+  6.1 crop/split editing lives only on the active Transcript page
+  ("Edit trim & splits"; historical transcript versions are read-only, no
+  separate editor screen/route). Pressing Edit only reveals small scissors
+  controls on the inter-segment divider lines (no panel, no modal; no
+  transcript start/end scissors);
+  clicking a scissors opens a small accessible action dialog with Split
+  here, Crop from here (start becomes the boundary), Crop to here
+  (end-exclusive becomes the boundary) or Remove split (only when already a
+  split) — empty crops, outside-range actions, endpoint splits and
+  duplicate splits are rejected. Cropped rows are hidden (never merely
+  dimmed) while editing and in the saved working view, with a compact
+  crop/split status plus Reset/Clear crop and a small "Show full
+  transcript" toggle; crop-only has zero topic sections, and splits create
+  N+1 sections that the user names via inline topic inputs — no automatic
+  or derived topic inference, no section-card/ranges/summaries/tags/
+  provenance in the editor. The staged payload is the crop range + sorted
+  split markers + topic labels and the service materializes the exhaustive
+  `Section` rows (zero for crop-only; no independent section start/end
+  selects). History owns the revision list, not Transcript. The
+  retention/Keep Audio/Rescan **screen** is removed from the
+  prototype (6.4 UX placement deferred; its approved policies are retained).
+  **Step 6.1 is planned/next (structure/history only) and is not
+  implemented.** Actual source file deletion/move/trash/quarantine and
+  installing/enabling any schedule remain separate explicit approval gates.
 - Do not implement features from a later step, and do not claim
   accuracy or completion without executable verification.
