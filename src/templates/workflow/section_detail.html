@@ -1,23 +1,24 @@
 {% extends "base.html" %}
 {% load workflow_extras %}
-{% block title %}{{ section.title }} — Brain{% endblock %}
+{% block title %}{{ display_title }} — Brain{% endblock %}
 {% block content %}
 <p class="breadcrumb muted">
-  <a href="{% url 'recordings' %}">&larr; Library</a> ·
+  <a href="{{ library_return_url }}">&larr; Library</a> ·
   <a href="{% url 'recording-detail' recording.pk %}">{{ card.title }}</a>
 </p>
 
 <div class="detail-header">
-  <h1 class="detail-title">{{ section.title }}</h1>
+  <h1 class="detail-title">{{ display_title }}</h1>
   <div class="detail-meta">
     <span class="meta-item">{{ range_label }}</span>
+    <span class="meta-item">{{ section_duration|duration }}</span>
     <span class="meta-item">{{ card.effective_at_label }} {{ card.effective_at|local_time }}</span>
     <span class="meta-item"><span class="status status-{{ recording.processing_status }}">{{ recording.processing_status }}</span></span>
   </div>
   <div class="detail-links">
     <a class="detail-link" href="{{ transcript_jump_url }}" aria-label="Open this section in the transcript">Section in transcript</a>
-    <a class="detail-link" href="{% url 'recording-transcript' recording.pk %}" aria-label="Open the full transcript">Full transcript</a>
-    <a class="detail-link" href="{% url 'recording-history' recording.pk %}" aria-label="Open the processing history">History</a>
+    <a class="detail-link" href="{{ full_transcript_url }}" aria-label="Open the full transcript">Full transcript</a>
+    <a class="detail-link" href="{{ history_url }}" aria-label="Open the processing history">History</a>
   </div>
 </div>
 
@@ -29,10 +30,9 @@
   </div>
 {% endif %}
 
-<div class="status-panel status-panel-{{ parent_status.level }}" role="status">
-  <span class="status-panel-label">Recording status</span>
-  <span class="status-panel-main">{{ parent_status.label }} — {{ parent_status.detail }}</span>
-  <span class="muted"> (inherited from the parent recording)</span>
+<div class="status-panel status-panel-{{ section_status.level }}" role="status">
+  <span class="status-panel-label">Section summary status</span>
+  <span class="status-panel-main">{{ section_status.label }} — {{ section_status.detail }}</span>
 </div>
 
 {% if active_section_tags or is_active_section %}
@@ -47,11 +47,13 @@
             {% if assignment.origin == 'suggested' %}
               <form method="post" action="{% url 'section-tag-confirm' recording.pk section.pk assignment.tag.pk %}" class="inline-form">
                 {% csrf_token %}
+                {% if library_return_token %}<input type="hidden" name="lib_return" value="{{ library_return_token }}">{% endif %}
                 <button type="submit" class="link-button" aria-label="Confirm {{ assignment.tag.name }}">Confirm</button>
               </form>
             {% endif %}
             <form method="post" action="{% url 'section-tag-remove' recording.pk section.pk assignment.tag.pk %}" class="inline-form">
               {% csrf_token %}
+              {% if library_return_token %}<input type="hidden" name="lib_return" value="{{ library_return_token }}">{% endif %}
               <button type="submit" class="link-button danger" aria-label="Remove {{ assignment.tag.name }}">Remove</button>
             </form>
           {% endif %}
@@ -70,6 +72,7 @@
         <input type="search" id="tag-filter-input" class="tag-filter-input" placeholder="Filter tags" autocomplete="off" data-modal-focus>
         <form method="post" action="{% url 'section-tag-apply' recording.pk section.pk %}" class="tag-selection-form">
           {% csrf_token %}
+          {% if library_return_token %}<input type="hidden" name="lib_return" value="{{ library_return_token }}">{% endif %}
           <fieldset class="tag-selection-fieldset">
             <legend class="visually-hidden">Tag selection</legend>
             <div class="tag-option-list" aria-label="Existing tags">
@@ -142,7 +145,7 @@
       · Source language: {{ variant.summary.language|default:"unknown" }}
       {% if variant.variant_state.regeneration_failed %}<span class="warn-text">(regeneration failed — this summary stays active)</span>{% endif %}
     </p>
-    {% include "workflow/_summary_body.html" with summary=variant.summary embedded=True %}
+    {% include "workflow/_summary_body.html" with summary=variant.summary embedded=True suppress_title=True %}
     <details class="technical-details">
       <summary>Summary provenance</summary>
       <dl class="provenance-grid">

@@ -37,6 +37,7 @@ from django.test import Client
 from django.test.utils import CaptureQueriesContext
 
 from workflow.models import (
+    ProcessingAttempt,
     Recording,
     Section,
     SegmentedVersion,
@@ -321,7 +322,7 @@ class TestEditorVisibility:
         sanitized layout_invalid category and zero DML."""
         recording, transcript, _ = _transcript(sha="seg-corrupt-save")
         _save(recording, transcript, 1, 9, [3, 6], ["A", "B", "C"])
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         self._corrupt_active_layout(recording, transcript)
         # The read-only first-POST validation fails closed (the active
         # layout is no longer canonical).
@@ -437,11 +438,11 @@ class TestEditorStateMetadata:
         assert "A" not in raw and "B" not in raw
         assert result.version_id not in raw
         # Equals the freshly computed fingerprint for the same state.
-        assert raw == segmentation_fingerprint(recording.pk, transcript)
+        assert raw == segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         # A different state produces a different fingerprint.
         _save(recording, transcript, 0, 10, [], [])
         assert (
-            segmentation_fingerprint(recording.pk, transcript) != raw
+            segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki") != raw
         )
 
 
@@ -742,7 +743,7 @@ class TestSaveActionBasics:
 
     def test_confirmation_renders_without_lock_or_write(self, client, monkeypatch):
         recording, transcript, _ = _transcript(sha="seg-confirm")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
 
         def busy(*args, **kwargs):
             raise AssertionError("the confirmation step must not take the pipeline lock")
@@ -774,7 +775,7 @@ class TestSaveActionBasics:
 
     def test_confirmation_escapes_topic_titles(self, client):
         recording, transcript, _ = _transcript(sha="seg-xss-confirm")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         response = client.post(
             f"/recordings/{recording.pk}/transcript/save/",
             {
@@ -796,7 +797,7 @@ class TestSaveActionBasics:
         the submitted opaque fingerprint is compared against a freshly
         computed one — never silently re-synthesized. No lock, no DML."""
         recording, transcript, _ = _transcript(sha="seg-stale-first")
-        stale = segmentation_fingerprint(recording.pk, transcript)
+        stale = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         # State changes after the page was rendered.
         _save(recording, transcript, 1, 5, [], [])
 
@@ -826,7 +827,7 @@ class TestSaveActionBasics:
         write): invalid ranges/splits/titles reject with 400 and never
         reach the confirmation page or any mutation."""
         recording, transcript, _ = _transcript(sha="seg-invalid-first")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
 
         def no_lock(*args, **kwargs):
             raise AssertionError("no pipeline lock may be taken on the first POST")
@@ -869,7 +870,7 @@ class TestSaveActionBasics:
 
     def test_malformed_payloads_rejected_without_write(self, client):
         recording, transcript, _ = _transcript(sha="seg-malformed")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         base = {"transcript_id": str(transcript.pk), "fingerprint": fingerprint}
         cases = [
             ({"start": "1.5", "end_exclusive": "5"}, "malformed"),
@@ -911,7 +912,7 @@ class TestSaveActionBasics:
         fields, malformed fingerprints, and a ``confirmed`` value other
         than exactly one ``1`` are rejected with no write."""
         recording, transcript, _ = _transcript(sha="seg-strict")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         base = {"transcript_id": str(transcript.pk), "fingerprint": fingerprint}
         # Duplicate singleton fields (the same name submitted twice).
         for field in ("transcript_id", "start", "end_exclusive", "fingerprint"):
@@ -1048,7 +1049,7 @@ class TestSaveActionBasics:
 class TestSaveExecution:
     def test_confirmed_save_creates_revision_and_redirects(self, client):
         recording, transcript, _ = _transcript(sha="seg-save-ok")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         response = client.post(
             f"/recordings/{recording.pk}/transcript/save/",
             {
@@ -1077,7 +1078,7 @@ class TestSaveExecution:
     def test_confirmed_save_is_noop_for_unchanged_payload(self, client):
         recording, transcript, _ = _transcript(sha="seg-noop")
         _save(recording, transcript, 2, 8, [4], ["Intro", "Main"])
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         response = client.post(
             f"/recordings/{recording.pk}/transcript/save/",
             {
@@ -1098,7 +1099,7 @@ class TestSaveExecution:
 
     def test_initial_full_zero_save_is_noop(self, client):
         recording, transcript, _ = _transcript(sha="seg-noop0")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         response = client.post(
             f"/recordings/{recording.pk}/transcript/save/",
             {
@@ -1114,7 +1115,7 @@ class TestSaveExecution:
 
     def test_stale_fingerprint_is_safe_noop(self, client):
         recording, transcript, _ = _transcript(sha="seg-stale")
-        stale = segmentation_fingerprint(recording.pk, transcript)
+        stale = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         # Another process saves a revision after the page was rendered.
         _save(recording, transcript, 1, 5, [], [])
         response = client.post(
@@ -1135,7 +1136,7 @@ class TestSaveExecution:
 
     def test_lock_busy_returns_409(self, client, monkeypatch):
         recording, transcript, _ = _transcript(sha="seg-lockbusy")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         from workflow.services.pipeline_lock import PipelineBusy
 
         def busy(config):
@@ -1160,7 +1161,7 @@ class TestSaveExecution:
         from workflow.models import SearchDocument
 
         recording, transcript, _ = _transcript(sha="seg-nosync")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         before = SearchDocument.objects.count()
         response = client.post(
             f"/recordings/{recording.pk}/transcript/save/",
@@ -1180,7 +1181,7 @@ class TestSaveExecution:
     def test_second_revision_supersedes_prior(self, client):
         recording, transcript, _ = _transcript(sha="seg-rev2")
         _save(recording, transcript, 1, 5, [], [])
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         client.post(
             f"/recordings/{recording.pk}/transcript/save/",
             {
@@ -1209,7 +1210,7 @@ class TestSaveExecution:
         from workflow.services.segmentation import SegmentationError
 
         recording, transcript, _ = _transcript(sha="seg-svc-reject")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
 
         def failing_save(*args, **kwargs):
             raise SegmentationError("storage_error")
@@ -1245,7 +1246,7 @@ class TestSaveExecution:
         from workflow.services.segmentation import SegmentationError
 
         recording, transcript, _ = _transcript(sha="seg-fp-fail")
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
 
         def boom(*args, **kwargs):
             raise SegmentationError("layout_invalid")
@@ -1695,14 +1696,34 @@ class TestStaticEditorJsContract:
         assert "SEGMENT_COUNT = initialState.segment_count;" in editor
 
     def test_rebuild_titles_exact_range_contract(self):
-        """A topic title is preserved ONLY by an exact canonical
-        [start,end) range match, independent of index — a split inserted
-        before an unchanged later section never drops its title, and there
-        is no left-prefix heuristic/inference."""
+        """A topic title AND its temporary-title flag are preserved ONLY
+        by an exact canonical [start,end) range match, independent of
+        index — a split inserted before an unchanged later section never
+        drops its title/flag, and there is no left-prefix heuristic/
+        inference. A brand-new range is visibly PREFILLED with the
+        server-authoritative title for its canonical ordinal (picked from
+        the bounded server-rendered list, never derived from the browser
+        clock); a carried-over temporary section whose ordinal changed
+        regenerates its server title instead of retaining a mismatched
+        "Segment N"."""
         source = self._editor_source()
-        editor = source[source.index("function rebuildTitles(prevSections, prevTitles)"):]
+        editor = source[
+            source.index("function rebuildTitles(prevSections, prevTitles, prevFlags)")
+            :
+        ]
         assert "byRange[sec.start + \":\" + sec.end]" in editor
-        assert "byRange[key] || \"\"" in editor
+        assert "flagByRange[sec.start + \":\" + sec.end]" in editor
+        assert "ordinalByRange[sec.start + \":\" + sec.end]" in editor
+        assert "titles.push(byRange[key])" in editor
+        # New ranges: server-prefilled title + True temporary flag.
+        assert "titles.push(serverTemporaryTitle(ordinal))" in editor
+        assert "flags.push(true)" in editor
+        # Ordinal-change regeneration for carried temporary sections.
+        assert "titles[titles.length - 1] = serverTemporaryTitle(ordinal)" in editor
+        # The server list is the source (never the browser clock).
+        editor_full = source[source.index("function initSegmentationControls()"):]
+        assert "initialState.temporary_titles" in editor_full
+        assert "Date" not in editor_full.split("serverTemporaryTitle")[0]
         # No index-based carry-over and no prefix heuristic.
         assert "prevSections[i]" not in editor
         assert "sec.end <= prev.end" not in editor
@@ -1777,3 +1798,253 @@ class TestStaticEditorJsContract:
             in editor
         )
         assert "beforeunload" in editor
+
+
+class TestSectionReturnBreadcrumb:
+    """Objective B: the transcript breadcrumb labels ``← Section`` when a
+    validated ``return_section`` (a readable canonical topic Section of
+    this recording) is supplied; the separately validated ``lib_return``
+    token rides the back link and pagination. Anything invalid keeps the
+    plain ``← Recording overview`` and is never echoed. Existing
+    ``v``/``layout`` identity is untouched."""
+
+    def _split(self, sha="seg-sec-return", count=10, splits=(3,), titles=("A", "B")):
+        recording, transcript, _ = _transcript(count=count, sha=sha)
+        _save(recording, transcript, 0, count, list(splits), list(titles))
+        sections = list(
+            Section.objects.filter(transcript=transcript)
+            .exclude(segmented_version__isnull=True)
+            .order_by("ordinal")
+        )
+        return recording, transcript, sections
+
+    def _token(self):
+        from workflow.query import ListFilters
+        from workflow.services import library_return
+
+        return library_return.make_token(ListFilters(), 1, "cards")
+
+    def test_section_origin_breadcrumb(self, client):
+        recording, _transcript, sections = self._split()
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?return_section={sections[0].pk}"
+        ).content.decode()
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{sections[0].pk}/">'
+            "&larr; Section</a>" in content
+        )
+        assert "&larr; Recording overview" not in content
+
+    def test_section_origin_breadcrumb_preserves_valid_lib_return(self, client):
+        recording, _transcript, sections = self._split(sha="seg-sec-return-tok")
+        token = self._token()
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?return_section={sections[0].pk}"
+            f"&lib_return={token}"
+        ).content.decode()
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{sections[0].pk}/?lib_return={token}">'
+            "&larr; Section</a>" in content
+        )
+        assert "&larr; Recording overview" not in content
+
+    def test_invalid_lib_return_dropped_section_kept(self, client):
+        recording, _transcript, sections = self._split(sha="seg-sec-return-badtok")
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?return_section={sections[0].pk}"
+            "&lib_return=forged"
+        ).content.decode()
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{sections[0].pk}/">'
+            "&larr; Section</a>" in content
+        )
+        assert "lib_return=" not in content
+
+    def test_malformed_return_section_falls_back_to_parent(self, client):
+        recording, _transcript, sections = self._split(sha="seg-sec-return-bad")
+        for bad in (
+            "abc",
+            "-3",
+            "2.5",
+            "0",
+            "00",
+            "01",
+            f"0{sections[0].pk}",  # leading-zero form of a REAL Section pk
+            "9223372036854775808",  # 2**63: one past max signed 64-bit
+            "18446744073709551616",  # 2**64
+            "9" * 100,  # far beyond the BigAutoField digit/length cap
+            "99999999999999999999",
+            "",
+            "٢",
+        ):
+            response = client.get(
+                f"/recordings/{recording.pk}/transcript/?return_section={bad}"
+            )
+            assert response.status_code == 200, bad
+            content = response.content.decode()
+            assert "&larr; Recording overview" in content, bad
+            assert "&larr; Section" not in content, bad
+            assert "return_section" not in content, bad
+
+    def test_noncanonical_return_section_drops_valid_lib_return(self, client):
+        """An invalid/oversized ``return_section`` rejects the WHOLE
+        Section-origin return: even a valid ``lib_return`` token is never
+        echoed (breadcrumb, pagination or links)."""
+        recording, _transcript, sections = self._split(
+            sha="seg-sec-return-drop-token", count=410
+        )
+        token = self._token()
+        for bad in (
+            f"0{sections[0].pk}",  # leading-zero form of a REAL Section pk
+            "9223372036854775808",  # one past max signed 64-bit
+            "9" * 100,
+        ):
+            response = client.get(
+                f"/recordings/{recording.pk}/transcript/?return_section={bad}"
+                f"&lib_return={token}&page=1"
+            )
+            assert response.status_code == 200, bad
+            content = response.content.decode()
+            assert "&larr; Recording overview" in content, bad
+            assert "&larr; Section" not in content, bad
+            assert "return_section" not in content, bad
+            assert "lib_return" not in content, bad
+            assert token not in content, bad
+
+    def test_cross_recording_return_section_falls_back_to_parent(self, client):
+        recording, _transcript, _sections = self._split(sha="seg-sec-return-cross-a")
+        _other, _t_other, sections_b = self._split(sha="seg-sec-return-cross-b")
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?return_section={sections_b[0].pk}"
+        ).content.decode()
+        assert "&larr; Recording overview" in content
+        assert "&larr; Section" not in content
+        assert "return_section" not in content
+
+    def test_fixed_section_return_falls_back_to_parent(self, client):
+        recording, _tx, fixed = _transcript(count=4, sha="seg-sec-return-fixed")
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?return_section={fixed.pk}"
+        ).content.decode()
+        assert "&larr; Recording overview" in content
+        assert "&larr; Section" not in content
+
+    def test_direct_recording_origin_transcript_unchanged(self, client):
+        recording, _transcript, _sections = self._split(sha="seg-sec-return-plain")
+        content = client.get(f"/recordings/{recording.pk}/transcript/").content.decode()
+        assert "&larr; Recording overview" in content
+        assert "&larr; Section" not in content
+        assert "return_section" not in content
+        assert "lib_return=" not in content
+
+    def test_historical_layout_keeps_layout_identity_and_back_link(self, client):
+        recording, transcript, _sections = self._split(sha="seg-sec-return-hist")
+        section = Section.objects.filter(transcript=transcript).exclude(
+            segmented_version__isnull=True
+        ).order_by("ordinal").first()
+        version = section.segmented_version
+        # Supersede the revision: the section becomes historical.
+        _save(recording, transcript, 0, transcript.segments.count())
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?layout={version.pk}"
+            f"&return_section={section.pk}"
+        ).content.decode()
+        # The back link points to the HISTORICAL section detail.
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{section.pk}/">'
+            "&larr; Section</a>" in content
+        )
+        # The historical revision is still identified (read-only note).
+        assert "saved trim &amp; split revision" in content
+
+    def test_historical_transcript_keeps_v_and_layout_identity(self, client):
+        from workflow.models import AttemptOutcome, AttemptStage
+
+        recording, transcript, _sections = self._split(sha="seg-sec-return-vlayout")
+        section = Section.objects.filter(transcript=transcript).exclude(
+            segmented_version__isnull=True
+        ).order_by("ordinal").first()
+        version = section.segmented_version
+        # Retranscription: the transcript (and its layout) become historical.
+        attempt = ProcessingAttempt.objects.create(
+            recording=recording, stage=AttemptStage.TRANSCRIPTION, ordinal=2,
+            outcome=AttemptOutcome.SUCCESS,
+        )
+        transcript.is_active = False
+        transcript.save(update_fields=["is_active"])
+        new_transcript = Transcript.objects.create(
+            recording=recording, attempt=attempt, text_normalized="new"
+        )
+        Section.objects.create(transcript=new_transcript, ordinal=0, title="Full")
+        new_transcript.is_active = True
+        new_transcript.save(update_fields=["is_active"])
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?v={transcript.pk}"
+            f"&layout={version.pk}&return_section={section.pk}"
+        ).content.decode()
+        # Existing v/layout identity unchanged + back to the historical Section.
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{section.pk}/">'
+            "&larr; Section</a>" in content
+        )
+        assert "HISTORICAL transcript version" in content
+        assert "saved trim &amp; split revision" in content
+
+    def test_pagination_preserves_validated_section_return(self, client):
+        recording, _transcript, sections = self._split(
+            sha="seg-sec-return-page", count=410
+        )
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?return_section={sections[0].pk}"
+        ).content.decode()
+        assert "Page 1 of 3" in content
+        assert (
+            f'href="?return_section={sections[0].pk}&amp;page=2"'
+            in content
+        )
+        # The back link keeps working after paging.
+        page2 = client.get(
+            f"/recordings/{recording.pk}/transcript/?page=2"
+            f"&return_section={sections[0].pk}"
+        ).content.decode()
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{sections[0].pk}/">'
+            "&larr; Section</a>" in page2
+        )
+
+    def test_pagination_preserves_lib_return_with_section(self, client):
+        recording, _transcript, sections = self._split(
+            sha="seg-sec-return-page-tok", count=410
+        )
+        token = self._token()
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?return_section={sections[0].pk}"
+            f"&lib_return={token}"
+        ).content.decode()
+        assert (
+            f'href="?return_section={sections[0].pk}&amp;lib_return={token}&amp;page=2"'
+            in content
+        )
+        page2 = client.get(
+            f"/recordings/{recording.pk}/transcript/?page=2"
+            f"&return_section={sections[0].pk}&lib_return={token}"
+        ).content.decode()
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{sections[0].pk}/?lib_return={token}">'
+            "&larr; Section</a>" in page2
+        )
+
+    def test_pagination_does_not_echo_invalid_return_params(self, client):
+        recording, _transcript, _sections = self._split(
+            sha="seg-sec-return-badpage", count=410
+        )
+        content = client.get(
+            f"/recordings/{recording.pk}/transcript/?page=1"
+            "&return_section=abc&lib_return=forged"
+        ).content.decode()
+        assert "&larr; Recording overview" in content
+        assert "&larr; Section" not in content
+        assert "return_section" not in content
+        assert "lib_return" not in content
+        # Plain pagination continues.
+        assert 'href="?page=2"' in content

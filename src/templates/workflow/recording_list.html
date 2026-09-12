@@ -197,12 +197,12 @@
               <td data-label="Date &amp; time">{% if card.effective_at_label == 'Recorded' %}{{ card.effective_at|local_time }}{% else %}Discovered {{ card.effective_at|local_time }}{% endif %}</td>
               <td data-label="Title">
                 {% if card.is_section %}
-                  <a class="col-title" href="{% url 'section-detail' card.recording.pk card.section_id %}">{{ card.title }}</a>
+                  <a class="col-title" href="{% url 'section-detail' card.recording.pk card.section_id %}{% if library_return_token %}?lib_return={{ library_return_token }}{% endif %}">{{ card.title }}</a>
                 {% else %}
-                  <a class="col-title" href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a>
+                  <a class="col-title" href="{% url 'recording-detail' card.recording.pk %}{% if library_return_token %}?lib_return={{ library_return_token }}{% endif %}">{{ card.title }}</a>
                 {% endif %}
               </td>
-              <td data-label="Duration">{{ card.recording.duration_seconds|duration }}</td>
+              <td data-label="Duration">{{ card.duration_seconds|duration }}</td>
               <td data-label="Tags">{% for assignment in card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
               <td data-label="Languages">
                 {% if card.available_languages %}
@@ -229,19 +229,19 @@
           <div class="recording-card-header">
             <div class="recording-card-title">
               {% if card.is_section %}
-                <a href="{% url 'section-detail' card.recording.pk card.section_id %}">{{ card.title }}</a>
+                <a href="{% url 'section-detail' card.recording.pk card.section_id %}{% if library_return_token %}?lib_return={{ library_return_token }}{% endif %}">{{ card.title }}</a>
               {% else %}
-                <a href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a>
+                <a href="{% url 'recording-detail' card.recording.pk %}{% if library_return_token %}?lib_return={{ library_return_token }}{% endif %}">{{ card.title }}</a>
               {% endif %}
             </div>
             <span class="status status-{{ card.recording.processing_status }}">{{ card.recording.get_processing_status_display }}</span>
           </div>
           <div class="recording-card-meta">
             <span>{{ card.effective_at_label }} {{ card.effective_at|local_time }}</span>
-            <span>{{ card.recording.duration_seconds|duration }}</span>
+            <span>{{ card.duration_seconds|duration }}</span>
             {% if card.active_route %}<span>{{ card.active_route.profile_name }}</span>{% endif %}
             {% if card.is_section %}
-              <span class="section-context">Topic · {{ card.range_label }} · in <a href="{% url 'recording-detail' card.recording.pk %}">{{ card.parent_title }}</a></span>
+              <span class="section-context">Topic · {{ card.range_label }} · in <a href="{% url 'recording-detail' card.recording.pk %}{% if library_return_token %}?lib_return={{ library_return_token }}{% endif %}">{{ card.parent_title }}</a></span>
             {% endif %}
           </div>
           {% if card.overview_excerpt %}<p class="recording-card-excerpt">{{ card.overview_excerpt }}</p>{% endif %}

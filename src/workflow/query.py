@@ -27,17 +27,22 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from django.db.models import (
+    Case,
     CharField,
     Count,
     DateTimeField,
     Exists,
     F,
+    FloatField,
     IntegerField,
+    Max,
+    Min,
     OuterRef,
     Prefetch,
     Q,
     Subquery,
     Value,
+    When,
 )
 from django.db.models.functions import Coalesce, Concat
 from django.db.models.expressions import Func, RawSQL
@@ -58,6 +63,7 @@ from workflow.models import (
     Tag,
     TagAssignment,
     Transcript,
+    TranscriptSegment,
 )
 from workflow.services.langresolve import default_output_language_expression
 from workflow.services.library_metadata import (
@@ -486,6 +492,19 @@ def _canonical_layout_predicate() -> tuple[str, list]:
                 OR LENGTH(bad.title) > %s
                 OR INSTR(bad.title, CHAR(0)) > 0
                 OR bad.title GLOB '*[' || CHAR(1) || '-' || CHAR(31) || CHAR(127) || ']*'
+                -- A True temporary flag requires the EXACT canonical
+                -- shape 'Segment <ordinal> of <12 ASCII digits>' (titles
+                -- are immutable creation-time metadata; the digits are
+                -- never compared to the current timestamp on reads). An
+                -- arbitrary custom title on a temporary row is corrupt
+                -- stored state and fails closed.
+                OR (
+                    bad.title_is_temporary = 1
+                    AND NOT (
+                        bad.title GLOB 'Segment ' || bad.ordinal || ' of '
+                        || '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+                    )
+                )
                 OR (
                     SELECT COUNT(*) FROM workflow_section lo
                     WHERE lo.segmented_version_id = v.id AND lo.ordinal < bad.ordinal
@@ -551,6 +570,7 @@ _ITEM_COLUMNS = (
     "recorded_at",
     "range_start",
     "range_end",
+    "duration_seconds",
 )
 
 
@@ -611,6 +631,10 @@ def _recording_item_columns(filters: ListFilters, timezone_name: str, *, using: 
             section_id=Value(None, output_field=CharField(max_length=36)),
             range_start=Value(None, output_field=IntegerField()),
             range_end=Value(None, output_field=IntegerField()),
+            # Recording items retain the recording's OWN duration: it is a
+            # real ``Recording`` field, so ``.values(*_ITEM_COLUMNS)``
+            # projects it directly (never an annotation of the same name,
+            # which Django forbids).
         )
         .order_by()
         .values(*_ITEM_COLUMNS)
@@ -766,11 +790,111 @@ def _section_filter_only(qs, filters: ListFilters, timezone_name: str):
     return qs
 
 
+def _section_display_title_expression():
+    """The single derived Library title source for a topic Section (Step
+    6.2a) — used for BOTH rendering and Title A–Z/Z–A ordering so the two
+    can never diverge.
+
+    The active DEFAULT-language section Summary's title is the Section's
+    user-facing title whenever one exists: it supersedes BOTH a stored
+    temporary title AND a manually entered custom title in presentation
+    (a display override only). Without a default Summary the stored
+    ``Section.title`` is used. ``Section.title`` is NEVER mutated during
+    summary generation: the derived expression reads the Summary row
+    without writing anything, so the custom title stays layout
+    metadata/provenance.
+    """
+    default_summary_title = Subquery(
+        Summary.objects.filter(
+            transcript=OuterRef("transcript_id"),
+            section=OuterRef("pk"),
+            is_active=True,
+            output_language=OuterRef("default_output_language"),
+        )
+        .order_by("ordinal")
+        .values("title")[:1],
+        output_field=CharField(max_length=200),
+    )
+    return Coalesce(
+        default_summary_title,
+        F("title"),
+        output_field=CharField(max_length=255),
+    )
+
+
+def _section_duration_expression():
+    """Approximate duration of a topic Section in seconds (Step 6.2a).
+
+    ``(latest usable end_ms - earliest usable start_ms) / 1000`` where
+    the two endpoints are selected INDEPENDENTLY across the canonical
+    range: the earliest NON-NULL ``start_ms`` and the latest NON-NULL
+    ``end_ms`` (a first segment with only a start and a last segment
+    with only an end still yields a span). Returns NULL when no usable
+    start OR no usable end exists in the range (rendered as "unknown");
+    a nonpositive result is rejected by the card adapter. Bounded: one
+    scalar subquery per projected row (the page row count is capped by
+    ``per_page``), no N+1, no unbounded reads. The
+    ``values("transcript_id")`` BEFORE the aggregate pins the GROUP BY to
+    ONE group (every filtered row shares the outer transcript), so the
+    MIN/MAX span the WHOLE canonical range — never per-segment.
+    """
+    return Subquery(
+        TranscriptSegment.objects.filter(
+            transcript=OuterRef("transcript_id"),
+            ordinal__gte=OuterRef("start_segment_ordinal"),
+            ordinal__lt=OuterRef("end_segment_ordinal_exclusive"),
+        )
+        .values("transcript_id")
+        .annotate(
+            _duration=(
+                Max(Case(When(end_ms__isnull=False, then=F("end_ms")), default=Value(None)))
+                - Min(Case(When(start_ms__isnull=False, then=F("start_ms")), default=Value(None)))
+            )
+            / 1000.0
+        )
+        .values("_duration")[:1],
+        output_field=FloatField(),
+    )
+
+
+def section_duration_seconds(section, *, using: str = "default") -> float | None:
+    """Approximate duration of ONE topic Section (pure bounded aggregate).
+
+    Same semantics as :func:`_section_duration_expression`: the earliest
+    NON-NULL ``start_ms`` to the latest NON-NULL ``end_ms`` across the
+    Section's canonical range, selected independently, divided by 1000.
+    Returns ``None`` ("unknown") when no usable start OR end exists or
+    when the span is nonpositive. One SELECT; never per-row loops.
+    """
+    row = (
+        TranscriptSegment.objects.using(using)
+        .filter(
+            transcript=section.transcript_id,
+            ordinal__gte=section.start_segment_ordinal,
+            ordinal__lt=section.end_segment_ordinal_exclusive,
+        )
+        .aggregate(
+            start=Min(
+                Case(When(start_ms__isnull=False, then=F("start_ms")), default=Value(None))
+            ),
+            end=Max(
+                Case(When(end_ms__isnull=False, then=F("end_ms")), default=Value(None))
+            ),
+        )
+    )
+    if row["start"] is None or row["end"] is None:
+        return None
+    duration = (row["end"] - row["start"]) / 1000.0
+    if duration <= 0:
+        return None
+    return duration
+
+
 def _section_item_columns(filters: ListFilters, timezone_name: str, *, using: str = "default"):
     """The Section branch of the Library item UNION."""
     qs = _section_base_queryset(using=using)
     qs = _section_filter_only(qs, filters, timezone_name)
-    section_title = Coalesce(F("title"), Value(TITLE_PLACEHOLDER))
+    section_title = Coalesce(_section_display_title_expression(), Value(TITLE_PLACEHOLDER))
     return (
         qs.annotate(
             item_kind=Value("section", output_field=CharField(max_length=16)),
@@ -790,6 +914,7 @@ def _section_item_columns(filters: ListFilters, timezone_name: str, *, using: st
             recorded_at=F("transcript__recording__recorded_at"),
             range_start=F("start_segment_ordinal"),
             range_end=F("end_segment_ordinal_exclusive"),
+            duration_seconds=_section_duration_expression(),
         )
         .order_by()
         .values(*_ITEM_COLUMNS)
@@ -1113,6 +1238,26 @@ class LibraryItemCard:
     @property
     def summary_status(self):
         return self._row.get("summary_status")
+
+    @property
+    def duration_seconds(self) -> float | None:
+        """Approximate item duration in seconds, or ``None`` ("unknown").
+
+        A Section item uses its canonical-range span (earliest usable
+        start_ms to latest usable end_ms, /1000); a Recording item keeps
+        the recording's own duration. Unavailable or nonpositive values
+        are safe ``None``. Served from the projected row — no per-item
+        queries."""
+        value = self._row.get("duration_seconds")
+        if value is None:
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        if value <= 0:
+            return None
+        return value
 
     @property
     def default_language(self) -> str:

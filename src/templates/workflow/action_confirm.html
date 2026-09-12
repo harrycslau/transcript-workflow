@@ -14,7 +14,7 @@
   <p class="confirm-buttons">
     <button type="submit" class="confirm-button">Yes, run it</button>
     {% if section %}
-      <a href="{% url 'recording-detail' recording.pk %}">Back to recording</a>
+      <a href="{{ cancel_url }}" data-confirm-exempt>Back to section</a>
     {% endif %}
     {% if cancel_url %}<a href="{{ cancel_url }}">Cancel</a>
     {% else %}<a href="{% url 'recording-detail' recording.pk %}">Cancel</a>{% endif %}

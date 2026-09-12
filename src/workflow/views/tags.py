@@ -241,6 +241,27 @@ def _section_or_404(recording: Recording, section_id: int):
     return section
 
 
+def _section_redirect_url(recording_id, section_id, request) -> str:
+    """Section-detail redirect target preserving a VALIDATED library-return
+    token (Step 6.2a) so the breadcrumb keeps the originating
+    normal-Library page/state. A forged/invalid token is dropped: the
+    plain section-detail URL is returned. Never an arbitrary client URL."""
+    from django.urls import reverse
+
+    from workflow.services import library_return
+    from workflow.views.helpers import get_config
+
+    token = (request.POST.get("lib_return") or "").strip()
+    if token:
+        config = get_config()
+        if library_return.decode_token(token, config.timezone) is not None:
+            return (
+                f"{reverse('section-detail', args=[recording_id, section_id])}"
+                f"?lib_return={token}"
+            )
+    return reverse("section-detail", args=[recording_id, section_id])
+
+
 @require_POST
 def section_tag_apply(request, recording_id, section_id):
     """POST-only bulk section tag apply — the section modal's ONLY Done
@@ -271,7 +292,7 @@ def section_tag_apply(request, recording_id, section_id):
         else:
             message = "Choose a valid tag selection."
         dj_messages.error(request, message)
-        return redirect("section-detail", recording_id, section_id)
+        return redirect(_section_redirect_url(recording_id, section_id, request))
     try:
         apply_section_tag_selection(
             section,
@@ -281,9 +302,9 @@ def section_tag_apply(request, recording_id, section_id):
         )
     except TagOperationError as exc:
         dj_messages.error(request, exc.message)
-        return redirect("section-detail", recording_id, section_id)
+        return redirect(_section_redirect_url(recording_id, section_id, request))
     # Success (changed or unchanged): NO banner.
-    return redirect("section-detail", recording_id, section_id)
+    return redirect(_section_redirect_url(recording_id, section_id, request))
 
 
 @require_POST
@@ -304,7 +325,7 @@ def section_tag_confirm(request, recording_id, section_id, tag_id):
         result = confirm_section_suggestion(section, tag)
     except TagOperationError as exc:
         dj_messages.error(request, exc.message)
-        return redirect("section-detail", recording_id, section_id)
+        return redirect(_section_redirect_url(recording_id, section_id, request))
     if result["already_confirmed"]:
         dj_messages.info(
             request, f"Tag '{tag.name}' was already confirmed — nothing changed."
@@ -314,7 +335,7 @@ def section_tag_confirm(request, recording_id, section_id, tag_id):
             request,
             f"Tag '{tag.name}' confirmed. It is now user-owned and survives re-summarization.",
         )
-    return redirect("section-detail", recording_id, section_id)
+    return redirect(_section_redirect_url(recording_id, section_id, request))
 
 
 @require_POST
@@ -335,7 +356,7 @@ def section_tag_remove(request, recording_id, section_id, tag_id):
         result = remove_section_tag(section, tag)
     except TagOperationError as exc:
         dj_messages.error(request, exc.message)
-        return redirect("section-detail", recording_id, section_id)
+        return redirect(_section_redirect_url(recording_id, section_id, request))
     if result["removed"]:
         dj_messages.success(
             request,
@@ -344,4 +365,4 @@ def section_tag_remove(request, recording_id, section_id, tag_id):
         )
     else:
         dj_messages.info(request, f"Tag '{tag.name}' was not active — nothing changed.")
-    return redirect("section-detail", recording_id, section_id)
+    return redirect(_section_redirect_url(recording_id, section_id, request))

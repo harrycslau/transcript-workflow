@@ -13,11 +13,18 @@ Two modes, chosen by the including template:
   repeated (the page h1 already carries it) and every section heading is
   an h2.
 
+A third include flag, ``suppress_title``, applies ONLY to the embedded
+mode: it suppresses just the embedded title paragraph while keeping the
+h3 heading hierarchy (used by the Section detail page, whose H1 already
+carries the display title — rendering the summary title again inside the
+body would duplicate it). Recording Detail does NOT pass the flag and
+keeps its embedded title paragraph.
+
 All content/actions are identical in both modes; the nested key-point
 ``_key_points.html`` partial is preserved unchanged.
 {% endcomment %}
 <div class="summary-body doc-flow">
-  {% if embedded %}<p class="summary-title">{{ summary.title }}</p>{% endif %}
+  {% if embedded and not suppress_title %}<p class="summary-title">{{ summary.title }}</p>{% endif %}
   <section class="summary-overview">
     {% if embedded %}<h3>Overview</h3>{% else %}<h2>Overview</h2>{% endif %}
     <p>{{ summary.overview }}</p>

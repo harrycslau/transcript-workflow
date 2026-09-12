@@ -2,13 +2,15 @@
 Shared language-tab bar for the recording detail and summary pages.
 
 Expects: variant (read-only variant view-model), tab_base (URL without
-query string — set by the including template via {% url ... as var %}).
-Strictly read-only: links only.
+query string — set by the including template via {% url ... as var %}),
+and optionally variant_tab_query (a pre-encoded query fragment without
+a leading '?' or '&' — e.g. a validated lib_return token — that every
+tab link preserves). Strictly read-only: links only.
 {% endcomment %}
 {% if variant.has_transcript %}
 <nav class="language-tabs" aria-label="Summary language">
   {% for option in variant.options %}
-    <a href="{{ tab_base }}?language={{ option.selector }}"
+    <a href="{{ tab_base }}{% if variant_tab_query %}?{{ variant_tab_query }}&amp;{% else %}?{% endif %}language={{ option.selector }}"
        class="tab{% if variant.requested == option.selector %} active{% endif %}">
       {{ option.label }}{% if option.is_default %} (default){% endif %}
       {% if option.status == 'current' %}<span class="variant-ok" title="Active">&#10003;</span>

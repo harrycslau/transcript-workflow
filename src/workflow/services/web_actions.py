@@ -879,6 +879,11 @@ _SEGMENTATION_MESSAGES = {
     "title_too_long": "A topic name is too long (at most 255 characters).",
     "title_invalid_chars": "A topic name contains forbidden characters.",
     "title_count_mismatch": "The topic count does not match the number of splits.",
+    "title_flag_count_mismatch": "The temporary-title flags do not match the topic count.",
+    "title_flag_forgery": (
+        "A topic marked as auto-named must use the server-generated name — "
+        "type a custom name instead."
+    ),
     "too_many_topics": "Too many topic sections.",
     "recording_not_found": "The recording no longer exists.",
     "transcript_not_found": "The transcript no longer exists.",
@@ -946,7 +951,9 @@ def execute_segmentation_save(
             )
         if expected_fingerprint is not None:
             try:
-                current = segmentation_fingerprint(recording.pk, transcript)
+                current = segmentation_fingerprint(
+                    recording.pk, transcript, timezone_name=config.timezone
+                )
             except SegmentationError as exc:
                 return ActionOutcome(
                     ok=False,
@@ -970,6 +977,8 @@ def execute_segmentation_save(
                 payload["end_exclusive"],
                 payload["splits"],
                 payload["titles"],
+                payload["title_is_temporary"],
+                timezone_name=config.timezone,
             )
         except SegmentationError as exc:
             return ActionOutcome(

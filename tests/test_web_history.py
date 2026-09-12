@@ -34,9 +34,11 @@ from workflow.models import (
     Recording,
     RoutingDecision,
     RoutingMethod,
+    Section,
     Summary,
     Transcript,
 )
+from workflow.services.segmentation import save_segmented_version
 
 from factories import make_summary_version, make_transcribed_recording
 
@@ -292,3 +294,142 @@ class TestTranscriptVersions:
         # The historical target page renders the historical banner.
         page = client.get(f"/recordings/{recording.pk}/transcript/?v={transcript.pk}")
         assert "HISTORICAL transcript version" in page.content.decode()
+
+
+class TestSectionOriginReturn:
+    """Objective B: the History breadcrumb labels ``← Section`` and points
+    to the exact Section detail when a validated ``return_section`` (plus
+    optional ``lib_return``) is supplied; anything invalid/missing keeps
+    the plain ``← Recording overview`` and echoes nothing unsafe."""
+
+    def _split(self, sha="hist-sec-return", count=8):
+        recording, transcript, _fixed = make_transcribed_recording(
+            [f"segment {i}" for i in range(count)], sha=sha
+        )
+        result = save_segmented_version(
+            recording.pk, transcript.pk, 0, count, [3], ["A", "B"]
+        )
+        sections = list(
+            Section.objects.filter(segmented_version_id=result.version_id).order_by("ordinal")
+        )
+        return recording, transcript, sections
+
+    def _token(self):
+        from workflow.query import ListFilters
+        from workflow.services import library_return
+
+        return library_return.make_token(ListFilters(), 1, "cards")
+
+    def test_section_origin_breadcrumb_exact_section(self, client):
+        recording, _transcript, sections = self._split()
+        content = client.get(
+            f"/recordings/{recording.pk}/history/?return_section={sections[0].pk}"
+        ).content.decode()
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{sections[0].pk}/">'
+            "&larr; Section</a>" in content
+        )
+        assert "&larr; Recording overview" not in content
+
+    def test_section_origin_breadcrumb_preserves_valid_lib_return(self, client):
+        recording, _transcript, sections = self._split(sha="hist-sec-return-tok")
+        token = self._token()
+        content = client.get(
+            f"/recordings/{recording.pk}/history/?return_section={sections[0].pk}"
+            f"&lib_return={token}"
+        ).content.decode()
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{sections[0].pk}/?lib_return={token}">'
+            "&larr; Section</a>" in content
+        )
+        assert "&larr; Recording overview" not in content
+
+    def test_invalid_lib_return_dropped_section_kept(self, client):
+        recording, _transcript, sections = self._split(sha="hist-sec-return-badtok")
+        content = client.get(
+            f"/recordings/{recording.pk}/history/?return_section={sections[0].pk}"
+            "&lib_return=forged"
+        ).content.decode()
+        assert (
+            f'<a href="/recordings/{recording.pk}/sections/{sections[0].pk}/">'
+            "&larr; Section</a>" in content
+        )
+        assert "lib_return=" not in content
+
+    def test_malformed_return_section_falls_back_to_parent(self, client):
+        recording, _transcript, sections = self._split(sha="hist-sec-return-bad")
+        for bad in (
+            "abc",
+            "-1",
+            "1.5",
+            "0",
+            "00",
+            "01",
+            f"0{sections[0].pk}",  # leading-zero form of a REAL Section pk
+            "9223372036854775808",  # 2**63: one past max signed 64-bit
+            "18446744073709551616",  # 2**64
+            "9" * 100,  # far beyond the BigAutoField digit/length cap
+            "99999999999999999999",
+            "",
+            "٢",
+        ):
+            response = client.get(
+                f"/recordings/{recording.pk}/history/?return_section={bad}"
+            )
+            assert response.status_code == 200, bad
+            content = response.content.decode()
+            assert "&larr; Recording overview" in content, bad
+            assert "&larr; Section" not in content, bad
+            assert "return_section" not in content, bad
+
+    def test_noncanonical_return_section_drops_valid_lib_return(self, client):
+        """An invalid/oversized ``return_section`` rejects the WHOLE
+        Section-origin return: even a valid ``lib_return`` token is never
+        echoed."""
+        recording, _transcript, sections = self._split(
+            sha="hist-sec-return-drop-token"
+        )
+        token = self._token()
+        for bad in (
+            f"0{sections[0].pk}",  # leading-zero form of a REAL Section pk
+            "9223372036854775808",  # one past max signed 64-bit
+            "9" * 100,
+        ):
+            response = client.get(
+                f"/recordings/{recording.pk}/history/?return_section={bad}"
+                f"&lib_return={token}"
+            )
+            assert response.status_code == 200, bad
+            content = response.content.decode()
+            assert "&larr; Recording overview" in content, bad
+            assert "&larr; Section" not in content, bad
+            assert "return_section" not in content, bad
+            assert "lib_return" not in content, bad
+            assert token not in content, bad
+
+    def test_cross_recording_return_section_falls_back_to_parent(self, client):
+        recording, _transcript, _sections = self._split(sha="hist-sec-return-cross-a")
+        _other, _t_other, sections_b = self._split(sha="hist-sec-return-cross-b")
+        content = client.get(
+            f"/recordings/{recording.pk}/history/?return_section={sections_b[0].pk}"
+        ).content.decode()
+        assert "&larr; Recording overview" in content
+        assert "&larr; Section" not in content
+        assert "return_section" not in content
+
+    def test_fixed_section_return_falls_back_to_parent(self, client):
+        recording, _transcript, fixed = make_transcribed_recording(
+            ["x"], sha="hist-sec-return-fixed"
+        )
+        content = client.get(
+            f"/recordings/{recording.pk}/history/?return_section={fixed.pk}"
+        ).content.decode()
+        assert "&larr; Recording overview" in content
+        assert "&larr; Section" not in content
+
+    def test_direct_recording_origin_history_unchanged(self, client):
+        recording, _t, _s = _summary_recording(sha="hist-sec-return-plain")
+        content = client.get(f"/recordings/{recording.pk}/history/").content.decode()
+        assert "&larr; Recording overview" in content
+        assert "&larr; Section" not in content
+        assert "return_section" not in content

@@ -3,8 +3,12 @@
 {% block title %}Transcript — Brain{% endblock %}
 {% block content %}
 <p class="breadcrumb muted">
-  <a href="{% url 'recording-detail' recording.pk %}">&larr; Recording overview</a> ·
-  <a href="{% url 'recording-history' recording.pk %}">History</a>
+  {% if section_return %}
+    <a href="{{ section_return_url }}">&larr; Section</a>
+  {% else %}
+    <a href="{% url 'recording-detail' recording.pk %}">&larr; Recording overview</a>
+  {% endif %}
+   · <a href="{% url 'recording-history' recording.pk %}">History</a>
 </p>
 
 <div class="detail-header">

@@ -2,7 +2,11 @@
 {% load workflow_extras %}
 {% block title %}History — Brain{% endblock %}
 {% block content %}
+{% if section_return %}
+<p class="breadcrumb muted"><a href="{{ section_return_url }}">&larr; Section</a></p>
+{% else %}
 <p class="breadcrumb muted"><a href="{% url 'recording-detail' recording.pk %}">&larr; Recording overview</a></p>
+{% endif %}
 
 <div class="detail-header">
   <h1 class="detail-title">History</h1>

@@ -54,7 +54,15 @@
   // submit proceeds normally (native POST -> redirect -> GET preserved)
   // while its submit button is disabled and relabelled "Running…" and the
   // form is marked busy; repeated submit events are guarded in memory so
-  // the action is never submitted twice. When JS is absent the form is an
+  // the action is never submitted twice. The synchronous POST is a normal
+  // browser navigation, so every navigation anchor INSIDE the form must
+  // also become non-actionable while it is running: leaving the page
+  // mid-request aborts the browser connection. ONE deliberate, narrowly
+  // scoped exception: the Section confirmation's ``Back to section``
+  // anchor (``[data-confirm-exempt]``) stays enabled/clickable while the
+  // request runs — the user explicitly accepts that navigating away
+  // mid-request may abort the connection. Cancel and every other anchor
+  // keep the full disable behaviour. When JS is absent the form is an
   // ordinary POST form — no inline handlers, no CSP change.
   function initConfirmForms() {
     var submitted = new WeakSet();
@@ -73,6 +81,23 @@
           button.textContent = "Running…";
         }
         form.setAttribute("aria-busy", "true");
+        // Disable every navigation anchor inside the form except the
+        // narrowly scoped ``[data-confirm-exempt]`` escape: remove
+        // non-exempt links from the tab order, suppress clicks, and give
+        // them a visible disabled state. The submit button alone cannot
+        // prevent an in-flight Back/Cancel from aborting the request.
+        var links = form.querySelectorAll('a[href]');
+        Array.prototype.forEach.call(links, function (link) {
+          if (link.hasAttribute("data-confirm-exempt")) {
+            return;
+          }
+          link.setAttribute("tabindex", "-1");
+          link.setAttribute("aria-disabled", "true");
+          link.classList.add("confirm-form-link-disabled");
+          link.addEventListener("click", function (event) {
+            event.preventDefault();
+          });
+        });
       });
     });
   }
@@ -322,6 +347,7 @@
         end: initialState.end,
         splits: initialState.splits.slice(),
         titles: initialState.titles.slice(),
+        titleFlags: (initialState.title_is_temporary || []).slice(),
       };
     }
     function cloneState(s) {
@@ -330,6 +356,7 @@
         end: s.end,
         splits: s.splits.slice(),
         titles: s.titles.slice(),
+        titleFlags: s.titleFlags.slice(),
       };
     }
     var activeState = makeState();
@@ -363,21 +390,51 @@
       return out;
     }
 
-    // Preserve topic names ONLY by exact canonical [start,end) range match,
-    // independent of index: a section whose range is unchanged keeps its
-    // title; a boundary-changed/new section starts blank. No left-prefix
-    // heuristic, no positional carry-over, no inference.
-    function rebuildTitles(prevSections, prevTitles) {
+    // SERVER-authoritative temporary title for a canonical ordinal:
+    // picked from the bounded list rendered in the editor JSON (never
+    // derived from the browser clock). Index = ordinal - 1.
+    function serverTemporaryTitle(ordinal) {
+      var list = (initialState && initialState.temporary_titles) || [];
+      return list[ordinal - 1] || "";
+    }
+
+    // Preserve topic names AND their temporary-title flags ONLY by exact
+    // canonical [start,end) range match, independent of index: a section
+    // whose range is unchanged keeps its title + flag (existing exact
+    // ranges preserve title/provenance); a carried-over TEMPORARY section
+    // whose canonical ordinal CHANGED in the revised layout regenerates
+    // the appropriate SERVER title (never retains a mismatched
+    // "Segment N"); a brand-new range is visibly PREFILLED with the
+    // server title for its ordinal (a True temporary flag; any input
+    // event makes it custom). No left-prefix heuristic, no positional
+    // carry-over, no inference.
+    function rebuildTitles(prevSections, prevTitles, prevFlags) {
       var sections = deriveSections(staged.start, staged.end, staged.splits);
       var byRange = {};
+      var flagByRange = {};
+      var ordinalByRange = {};
       prevSections.forEach(function (sec, i) {
         byRange[sec.start + ":" + sec.end] = prevTitles[i] || "";
+        flagByRange[sec.start + ":" + sec.end] = !!(prevFlags && prevFlags[i]);
+        ordinalByRange[sec.start + ":" + sec.end] = i + 1; // previous ordinal
       });
       var titles = [];
-      sections.forEach(function (sec) {
+      var flags = [];
+      sections.forEach(function (sec, index) {
         var key = sec.start + ":" + sec.end;
-        titles.push(byRange[key] || "");
+        var ordinal = index + 1;
+        if (key in byRange) {
+          titles.push(byRange[key]);
+          flags.push(flagByRange[key]);
+          if (flagByRange[key] && ordinalByRange[key] !== ordinal) {
+            titles[titles.length - 1] = serverTemporaryTitle(ordinal);
+          }
+        } else {
+          titles.push(serverTemporaryTitle(ordinal));
+          flags.push(true); // brand-new range: server-derived temporary title
+        }
       });
+      staged.titleFlags = flags;
       return titles;
     }
 
@@ -527,35 +584,39 @@
       if (selectedBoundary === null || !canSplit(selectedBoundary)) return;
       var prevSections = deriveSections(staged.start, staged.end, staged.splits);
       var prevTitles = staged.titles;
+      var prevFlags = staged.titleFlags.slice();
       staged.splits = staged.splits.concat(selectedBoundary)
         .sort(function (a, b) { return a - b; });
-      staged.titles = rebuildTitles(prevSections, prevTitles);
+      staged.titles = rebuildTitles(prevSections, prevTitles, prevFlags);
       renderAll();
     }
     function applyCropFrom() {
       if (selectedBoundary === null || !insideRange(selectedBoundary)) return;
       var prevSections = deriveSections(staged.start, staged.end, staged.splits);
       var prevTitles = staged.titles;
+      var prevFlags = staged.titleFlags.slice();
       staged.start = selectedBoundary;
       staged.splits = staged.splits.filter(function (s) { return s > staged.start && s < staged.end; });
-      staged.titles = rebuildTitles(prevSections, prevTitles);
+      staged.titles = rebuildTitles(prevSections, prevTitles, prevFlags);
       renderAll();
     }
     function applyCropTo() {
       if (selectedBoundary === null || !insideRange(selectedBoundary)) return;
       var prevSections = deriveSections(staged.start, staged.end, staged.splits);
       var prevTitles = staged.titles;
+      var prevFlags = staged.titleFlags.slice();
       staged.end = selectedBoundary;
       staged.splits = staged.splits.filter(function (s) { return s > staged.start && s < staged.end; });
-      staged.titles = rebuildTitles(prevSections, prevTitles);
+      staged.titles = rebuildTitles(prevSections, prevTitles, prevFlags);
       renderAll();
     }
     function applyRemoveSplit() {
       if (selectedBoundary === null || !canRemoveSplit(selectedBoundary)) return;
       var prevSections = deriveSections(staged.start, staged.end, staged.splits);
       var prevTitles = staged.titles;
+      var prevFlags = staged.titleFlags.slice();
       staged.splits = staged.splits.filter(function (s) { return s !== selectedBoundary; });
-      staged.titles = rebuildTitles(prevSections, prevTitles);
+      staged.titles = rebuildTitles(prevSections, prevTitles, prevFlags);
       renderAll();
     }
     splitBtn.addEventListener("click", function () { applySplit(); closeBoundaryDialog(); });
@@ -581,11 +642,19 @@
       input.id = "topic-" + index;
       input.maxLength = 255;
       input.value = staged.titles[index] || "";
-      input.placeholder = "Name this section";
+      // A temporary (True-flag) section is auto-named by the server on
+      // save ("Segment N of YYYYMMDDHHMM"); typing ANY custom name flips
+      // it to custom (False flag) — "editing title makes it custom".
+      input.placeholder = staged.titleFlags[index]
+        ? "Auto-named — type a custom name"
+        : "Name this section";
       input.setAttribute("aria-label",
         "Topic " + (index + 1) + " for the section starting at segment " + sec.start);
       input.addEventListener("input", function () {
         staged.titles[index] = input.value;
+        if (input.value !== "") {
+          staged.titleFlags[index] = false;
+        }
         updateStatus();
       });
       row.appendChild(label);
@@ -705,7 +774,10 @@
       var sections = deriveSections(staged.start, staged.end, staged.splits);
       for (var i = 0; i < sections.length; i++) {
         var title = staged.titles[i] || "";
-        if (title.trim() === "") {
+        var temporary = !!staged.titleFlags[i];
+        // A temporary section may stay blank (the server derives its
+        // title); a custom section must be named.
+        if (!temporary && title.trim() === "") {
           return { ok: false, message: "Every section needs a topic — name each resulting section." };
         }
         if (/[\u0000-\u001f\u007f]/.test(title)) {
@@ -724,6 +796,7 @@
       var sections = deriveSections(staged.start, staged.end, staged.splits);
       for (var i = 0; i < sections.length; i++) {
         if ((staged.titles[i] || "") !== (activeState.titles[i] || "")) return true;
+        if (!!staged.titleFlags[i] !== !!activeState.titleFlags[i]) return true;
       }
       return false;
     }
@@ -781,10 +854,11 @@
       if (staged.start === 0 && staged.end === SEGMENT_COUNT) return;
       var prevSections = deriveSections(staged.start, staged.end, staged.splits);
       var prevTitles = staged.titles;
+      var prevFlags = staged.titleFlags.slice();
       staged.start = 0;
       staged.end = SEGMENT_COUNT;
       staged.splits = staged.splits.filter(function (s) { return s > 0 && s < SEGMENT_COUNT; });
-      staged.titles = rebuildTitles(prevSections, prevTitles);
+      staged.titles = rebuildTitles(prevSections, prevTitles, prevFlags);
       renderAll();
     });
     editReset.addEventListener("click", function () {
@@ -795,7 +869,9 @@
     // Save: ONE confirmed immutable revision via the POST-only two-step
     // route. The server renders the confirmation before any mutation.
     function clearPayloadInputs() {
-      var existing = saveForm.querySelectorAll('input[name="split"], input[name="title"]');
+      var existing = saveForm.querySelectorAll(
+        'input[name="split"], input[name="title"], input[name="title_is_temporary"]'
+      );
       Array.prototype.forEach.call(existing, function (el) {
         if (el.parentNode) el.parentNode.removeChild(el);
       });
@@ -815,6 +891,13 @@
         input.type = "hidden";
         input.name = "title";
         input.value = t;
+        saveForm.appendChild(input);
+      });
+      staged.titleFlags.forEach(function (flag) {
+        var input = document.createElement("input");
+        input.type = "hidden";
+        input.name = "title_is_temporary";
+        input.value = flag ? "1" : "0";
         saveForm.appendChild(input);
       });
       if (fingerprintInput) fingerprintInput.value = fingerprint;

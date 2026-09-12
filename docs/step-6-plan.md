@@ -1,10 +1,12 @@
-# Step 6 — Planning document (overall plan accepted; Step 6.0 complete; Step 6.1 and Step 6.2 delivered; 6.3 next)
+# Step 6 — Planning document (overall plan accepted; Step 6.0 complete; Step 6.1, Step 6.2 and Step 6.2a delivered; 6.3 next)
 
 > **Status: the overall Step 6 plan has been accepted by the user as the
 > working baseline, Step 6.0 is COMPLETE, Step 6.1 (segmented
 > versions: logical trim + topic layout/history, structure/history only)
-> is DELIVERED, and Step 6.2 (section-level summaries/tags + derived
-> Library items) is DELIVERED.** The approved Step 6.0
+> is DELIVERED, Step 6.2 (section-level summaries/tags + derived
+> Library items) is DELIVERED, and Step 6.2a (safe Library return,
+> temporary split titles, derived display title, section duration) is
+> DELIVERED.** The approved Step 6.0
 > decisions D1–D12 and the phase acceptance contracts live in
 > `docs/step-6-decisions.md`; the Step 6 screens in `design/ui-prototype/`
 > prototype those approved decisions, and this document's §8 is the
@@ -543,6 +545,43 @@ topic sections; do not create a parallel topic-section model.
 > exposes topic Sections as derived items through the read-only
 > `workflow/query.py` UNION projection (no `LibraryItem` model).
 > Step 6.3 (search/embedding/Ask integration) remains NOT implemented.
+
+### Phase 6.2a — Safe Library return, temporary split titles, derived display title, section duration (DELIVERED)
+
+> **Delivery note (2026-09-12):** this bounded follow-up to 6.2 is
+> implemented in the working tree — see the project-status handoff and
+> the durable Step 6.2a invariant bullet in `AGENTS.md`. Final
+> implementation calls: the safe Library-return token lives in
+> `workflow/services/library_return.py` (one server-signed token per
+> normal Library render encoding only canonical de-duplicated filter/
+> sort pairs + a positive page + the cards/table view; destination always
+> `reverse('recordings')`; the token is the sole carrier of state — raw
+> `view=` never affects rendering nor the view cookie — and
+> invalid/forged/duplicate/non-canonical tokens fall back to the plain
+> Library using the view cookie/default only; propagated verbatim
+> through section-detail tabs, the section summary confirmation/
+> execution redirects (including the Cancel link) and the section tag
+> redirects); temporary split titles live in
+> `workflow/services/segmentation.py` (server-derived
+> `Segment N of YYYYMMDDHHMM` visibly prefilled in the editor from a
+> bounded server-rendered `temporary_titles` list, exact per-title
+> `title_is_temporary` flags with writer forgery rejection and raw-payload
+> no-op comparison, and read-side canonical-SHAPE validation
+> `Segment <ordinal> of <12 ASCII digits>` that never compares stored
+> titles to the current timestamp; migration `workflow.0013_...`
+> `Section.title_is_temporary` Boolean default False, additive and fully
+> reversible); the derived display title and section duration live in
+> `workflow/query.py` (the same derived SQL expression — active
+> DEFAULT-language Summary title first, stored `Section.title`
+> fallback — drives the rendered Library title and Title A–Z/Z–A
+> ordering; the section detail H1 uses that derived display title and is
+> stable across tabs, rendering it exactly once (the embedded summary
+> title paragraph is suppressed there); `Section.title` is never mutated
+> during summary generation; section duration is one bounded scalar
+> subquery per page
+> row with safe `None` for unavailable/nonpositive, endpoints selected
+> independently over the canonical range). Step 6.3 remains
+> NOT implemented.
 
 - Section summaries scope exactly as the existing
   (transcript, section, output_language) contract; ordinal-0 derivation is

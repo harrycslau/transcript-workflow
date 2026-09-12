@@ -356,7 +356,7 @@ class TestMobileTable:
         content = client.get("/recordings/?view=table").content.decode()
         for label in ("Date &amp; time", "Title", "Duration", "Tags", "Languages", "Status"):
             assert f'data-label="{label}"' in content
-        assert f'<a class="col-title" href="/recordings/{rec.pk}/">' in content
+        assert f'<a class="col-title" href="/recordings/{rec.pk}/?lib_return=' in content
 
 
 # ---------------------------------------------------------------------------
@@ -424,9 +424,10 @@ class TestTableViewDateAndSectionLabels:
         )
         content = client.get("/recordings/?view=table").content.decode()
         # Each topic renders as its own independent item: only the topic
-        # title link to the section detail page.
-        assert f'href="/recordings/{rec.pk}/sections/{sections[0].pk}/"' in content
-        assert f'href="/recordings/{rec.pk}/sections/{sections[1].pk}/"' in content
+        # title link to the section detail page (carrying the server-signed
+        # library-return token so the breadcrumb keeps this page).
+        assert f'href="/recordings/{rec.pk}/sections/{sections[0].pk}/?lib_return=' in content
+        assert f'href="/recordings/{rec.pk}/sections/{sections[1].pk}/?lib_return=' in content
         assert "First topic" in content and "Second topic" in content
         # The secondary provenance line ('Topic · segments ... · in
         # <parent>') is gone from the table.
@@ -450,10 +451,10 @@ class TestTableViewDateAndSectionLabels:
             Section.objects.filter(segmented_version_id=result.version_id).order_by("ordinal")
         )
         content = client.get("/recordings/").content.decode()  # default cards view
-        assert f'href="/recordings/{rec.pk}/sections/{sections[0].pk}/"' in content
+        assert f'href="/recordings/{rec.pk}/sections/{sections[0].pk}/?lib_return=' in content
         assert (
             f'<span class="section-context">Topic · segments 0–1 · in '
-            f'<a href="/recordings/{rec.pk}/">' in content
+            f'<a href="/recordings/{rec.pk}/?lib_return=' in content
         )
 
 

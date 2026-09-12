@@ -30,6 +30,7 @@ from workflow.query import (
     RecordingCard,
     list_filters,
     recording_detail_queryset,
+    section_duration_seconds,
 )
 from workflow.views.helpers import get_config
 from workflow.services.web_actions import attempt_summary_for_display
@@ -44,6 +45,12 @@ VIEW_COOKIE_MAX_AGE = 31536000  # one year
 DETAIL_PREVIEW_SEGMENTS = 5
 HISTORY_LIMIT = 100
 
+# Section pks are Django/SQLite BigAutoFields (signed 64-bit integers).
+# ``return_section`` values are validated as canonical positive decimal
+# strings and capped to this range BEFORE any ORM use.
+_MAX_BIGAUTOFIELD_PK = 2**63 - 1
+_MAX_BIGAUTOFIELD_PK_DIGITS = len(str(_MAX_BIGAUTOFIELD_PK))
+
 
 def _effective_view(request) -> str:
     """Explicit valid ``view=`` wins; otherwise the validated cookie;
@@ -54,10 +61,16 @@ def _effective_view(request) -> str:
     view = (source.get("view") or "").strip().lower()
     if view in VALID_VIEWS:
         return view
+    return _cookie_only_view(request)
+
+
+def _cookie_only_view(request) -> str:
+    """The validated view COOKIE only, or ``cards``. Used when a
+    library-return token is present: the token is the SOLE carrier of
+    state, so a raw ``view=`` query parameter must never affect rendering
+    (nor the view cookie)."""
     cookie = (request.COOKIES.get(VIEW_COOKIE) or "").strip().lower()
-    if cookie in VALID_VIEWS:
-        return cookie
-    return "cards"
+    return cookie if cookie in VALID_VIEWS else "cards"
 
 
 def _request_view_value(request):
@@ -118,17 +131,56 @@ def _search_result_context(*, search, filters, view, configured_tags):
 def recording_list(request):
     config = get_config()
     raw_q = request.GET.get("q")
-    # A missing or blank/whitespace q is the NORMAL Library: no
-    # validation, no health gate, no engine call — never an
-    # "invalid query" state. A forged ``mode=semantic|hybrid`` on a GET
-    # is IGNORED: GET stays strictly read-only keyword/library, with zero
-    # embedding or network calls.
-    searching = raw_q is not None and bool(raw_q.strip())
-    # Search mode extends the sort contract (relevance default/fallback
-    # through the structured sort_error channel); Library mode is the
-    # historical parser.
-    filters = list_filters(request.GET, config.timezone, allow_relevance=searching)
-    view = _effective_view(request)
+
+    # Safe Library-return token (Step 6.2a): when a ``lib_return``
+    # parameter is present it is the SOLE carrier of the normal-Library
+    # state (canonical validated filter/sort pairs + positive page +
+    # cards/table view). A valid token completely defines the render and
+    # the raw query string (including any ``q``) is ignored; an invalid/
+    # forged/oversized token falls back to the PLAIN Library (default
+    # filters, cookie/default only, page 1). Tokens never encode
+    # search state and are never generated for search results.
+    from workflow.services import library_return
+
+    library_return_state = None
+    library_return_present = "lib_return" in request.GET
+    if library_return_present:
+        library_return_state = library_return.decode_token(
+            request.GET.get("lib_return"), config.timezone
+        )
+
+    if library_return_state is not None:
+        # The token is the sole carrier of state: ``searching`` stays
+        # False, ``filters``/``view``/``page_number`` come from the
+        # validated token, and the raw query string (including any ``q``
+        # or forged ``mode=``) is ignored.
+        searching = False
+        filters = library_return_state.filters
+        view = library_return_state.view
+        page_number = str(library_return_state.page)
+    elif library_return_present:
+        # An invalid/forged/oversized/non-canonical token: the Library
+        # falls back to its PLAIN state (default filters, view from the
+        # COOKIE only, page 1) — the token is the sole carrier, so the
+        # rest of the raw query string (including any raw ``view=``) is
+        # ignored entirely.
+        searching = False
+        filters = ListFilters()
+        view = _cookie_only_view(request)
+        page_number = None
+    else:
+        # A missing or blank/whitespace q is the NORMAL Library: no
+        # validation, no health gate, no engine call — never an
+        # "invalid query" state. A forged ``mode=semantic|hybrid`` on a
+        # GET is IGNORED: GET stays strictly read-only keyword/library,
+        # with zero embedding or network calls.
+        searching = raw_q is not None and bool(raw_q.strip())
+        # Search mode extends the sort contract (relevance default/fallback
+        # through the structured sort_error channel); Library mode is the
+        # historical parser.
+        filters = list_filters(request.GET, config.timezone, allow_relevance=searching)
+        view = _effective_view(request)
+        page_number = request.GET.get("page")
     from workflow.models import Tag
 
     search = None
@@ -139,7 +191,7 @@ def recording_list(request):
             raw_query=raw_q,
             filters=filters,
             timezone_name=config.timezone,
-            page_number=request.GET.get("page"),
+            page_number=page_number,
             per_page=config.web.recordings_per_page,
             segments_per_page=config.web.transcript_segments_per_page,
         )
@@ -148,7 +200,8 @@ def recording_list(request):
         # Search results REPLACE the normal Library list on this same
         # page. The engine already applied filters, truncation flags
         # and ranking; sorting/pagination happened in the service —
-        # this branch only renders.
+        # this branch only renders. NO library-return token is generated
+        # for search results (no search-origin support).
         context = _search_result_context(
             search=search,
             filters=filters,
@@ -175,22 +228,28 @@ def recording_list(request):
         if filters.valid:
             queryset = library_item_queryset(filters, config.timezone)
             queryset = apply_item_sort(queryset, filters.sort)
+            count_filters = filters
         else:
             queryset = library_item_queryset(ListFilters(), config.timezone)
             queryset = apply_item_sort(queryset, "newest")
+            count_filters = ListFilters()
         paginator = Paginator(queryset, config.web.recordings_per_page)
         # The presentation projection carries subqueries irrelevant to a
         # COUNT; use the dedicated minimal count query (same branches,
         # same filters — DB-side, never a Python expansion).
-        paginator.count = (
-            library_item_count(filters, config.timezone)
-            if filters.valid
-            else library_item_count(ListFilters(), config.timezone)
-        )
-        page = paginator.get_page(request.GET.get("page"))
+        paginator.count = library_item_count(count_filters, config.timezone)
+        page = paginator.get_page(page_number)
         cards = hydrate_library_items(page.object_list)
 
         base_qs = filters_qs + (f"&view={view}" if filters_qs else f"view={view}")
+        # ONE server-signed library-return token per normal Library
+        # render: encodes the effective (rendered) filter/sort state,
+        # the positive page and the cards/table view. It is added to the
+        # recording and section links so their breadcrumbs can return
+        # here.
+        library_return_token = library_return.make_token(
+            count_filters, page.number, view
+        )
         context = {
             "searching": False,
             "search_query": None,
@@ -207,22 +266,28 @@ def recording_list(request):
             "search_mode": "",
             "show_month_headings": filters.sort in ("newest", "oldest"),
             "configured_tags": Tag.objects.filter(is_configured=True).order_by("name"),
+            "library_return_token": library_return_token,
         }
 
     response = render(request, "workflow/recording_list.html", context)
-    explicit_view = _request_view_value(request)
-    if explicit_view is not None:
-        # Server-owned preference; explicit query param always wins over
-        # the cookie, and a valid explicit value refreshes it.
-        response.set_cookie(
-            VIEW_COOKIE,
-            explicit_view,
-            max_age=VIEW_COOKIE_MAX_AGE,
-            samesite="Lax",
-            path="/",
-            httponly=True,
-            secure=request.is_secure(),
-        )
+    # A raw ``view=`` query parameter NEVER mutates the view cookie when a
+    # library-return token is present: the token is the SOLE carrier of
+    # state (its own encoded view), and an invalid token falls back to the
+    # cookie/default only.
+    if not library_return_present:
+        explicit_view = _request_view_value(request)
+        if explicit_view is not None:
+            # Server-owned preference; explicit query param always wins
+            # over the cookie, and a valid explicit value refreshes it.
+            response.set_cookie(
+                VIEW_COOKIE,
+                explicit_view,
+                max_age=VIEW_COOKIE_MAX_AGE,
+                samesite="Lax",
+                path="/",
+                httponly=True,
+                secure=request.is_secure(),
+            )
     return response
 
 
@@ -467,6 +532,150 @@ def _status_panel(recording: Recording, routing_decision) -> dict:
     }
 
 
+def _section_summary_panel(variant) -> dict:
+    """Section-scoped summary status presentation (Step 6.2).
+
+    Derived ONLY from the selected Section variant's state — never from
+    the parent Recording summary tuple (section summaries intentionally
+    do not mutate that tuple). Pure read-only local presentation over
+    the already-resolved :class:`~workflow.services.variant_view.VariantView`:
+
+    - active selected summary, no regeneration failure => ok;
+    - active selected summary + ``regeneration_failed`` => warn;
+    - no active selected summary + failed variant state => danger;
+    - no active selected summary otherwise => warn/neutral.
+
+    Returns a ``{level, label, detail}`` dict driving the single
+    Section summary status panel on the section detail page.
+    """
+    from workflow.models import SummaryVariantState
+
+    if variant.summary is not None:
+        regen_failed = (
+            variant.variant_state is not None
+            and variant.variant_state.regeneration_failed
+        )
+        if regen_failed:
+            return {
+                "level": "warn",
+                "label": "Section re-summarization failed",
+                "detail": (
+                    "The current section summary was kept — retry is available "
+                    "for this section variant."
+                ),
+            }
+        if variant.resolved:
+            return {
+                "level": "ok",
+                "label": "Section summary current",
+                "detail": (
+                    f"The {variant.resolved} summary for this section is current — "
+                    "no action required."
+                ),
+            }
+        return {
+            "level": "ok",
+            "label": "Section summary current",
+            "detail": "The selected summary for this section is current — no action required.",
+        }
+    if (
+        variant.variant_state is not None
+        and variant.variant_state.status == SummaryVariantState.VariantStatus.FAILED
+    ):
+        return {
+            "level": "danger",
+            "label": "Section summary failed",
+            "detail": (
+                "The last generation attempt for this section variant failed — "
+                "retry is available."
+            ),
+        }
+    return {
+        "level": "warn",
+        "label": "Section summary not generated",
+        "detail": (
+            "No summary for this section/language variant yet — independent of "
+            "the parent recording's summary status."
+        ),
+    }
+
+
+def _validated_section_return(request, recording, config):
+    """Read-only validation of Section-origin return parameters.
+
+    ``return_section`` must be a canonical positive ASCII decimal integer
+    (no sign, whitespace, Unicode digits, zero or leading zeros) naming a
+    readable canonical TOPIC Section of ``recording`` (active or
+    historical; fixed, malformed and cross-parent sections fail closed).
+    The value is explicitly length- and value-capped to the signed 64-bit
+    Django/SQLite BigAutoField range BEFORE any ORM use, so an oversized
+    or overflowing value can never reach a query. ``lib_return`` is
+    accepted ONLY when it decodes as a valid library-return token AND the
+    Section is valid. Returns ``(section, lib_return_token)`` where
+    ``section`` is None (and the token ``""``) for any invalid/missing
+    input — callers then retain the plain Recording-origin breadcrumb and
+    echo nothing unsafe. SELECTs only; the destination is always
+    constructed by the caller from ``reverse('section-detail', ...)`` —
+    arbitrary client URLs are never accepted.
+    """
+    from workflow.services import library_return
+    from workflow.services.segmentation import (
+        SegmentationError,
+        canonical_layout_for_transcript,
+    )
+
+    section = None
+    raw_section = request.GET.get("return_section")
+    if (
+        raw_section is not None
+        and raw_section.isascii()
+        and raw_section.isdecimal()
+        and len(raw_section) <= _MAX_BIGAUTOFIELD_PK_DIGITS
+    ):
+        pk = int(raw_section)
+        # Canonical positive decimal only: the exact ``str`` round-trip
+        # rejects zero and leading zeros, and the value must fit a signed
+        # 64-bit BigAutoField BEFORE it reaches the ORM.
+        if 0 < pk <= _MAX_BIGAUTOFIELD_PK and str(pk) == raw_section:
+            section = (
+                Section.objects.select_related("transcript", "segmented_version")
+                .filter(pk=pk, transcript__recording=recording)
+                .first()
+            )
+        if section is not None:
+            # Only canonical readable TOPIC sections qualify: the fixed
+            # whole-recording section, malformed layouts and cross-parent
+            # rows fail closed to the plain Recording-origin breadcrumb.
+            if section.segmented_version_id is None:
+                section = None
+            else:
+                try:
+                    canonical = canonical_layout_for_transcript(
+                        section.segmented_version, section.transcript
+                    )
+                except SegmentationError:
+                    section = None
+                else:
+                    if not any(
+                        sec["ordinal"] == section.ordinal for sec in canonical["sections"]
+                    ):
+                        section = None
+
+    if section is None:
+        # An invalid/oversized/overflow/missing ``return_section`` rejects
+        # the whole Section-origin return: ``lib_return`` is never echoed
+        # either.
+        return None, ""
+
+    lib_return = ""
+    raw_lib_return = request.GET.get("lib_return")
+    if raw_lib_return and library_return.decode_token(
+        raw_lib_return, config.timezone
+    ) is not None:
+        lib_return = raw_lib_return
+    return section, lib_return
+
+
 def _format_confidence(value) -> str | None:
     """Two-decimal label for a routing confidence score, or None when
     absent/unusable. Safe bounded formatting — never raw evidence."""
@@ -520,6 +729,23 @@ def _routing_rows_for_display(recording: Recording, limit: int) -> tuple[list[di
 
 def recording_detail(request, recording_id):
     config, recording, card = _detail_base(request, recording_id)
+
+    # Safe Library-return token (Step 6.2a): an optional server-signed
+    # token from an originating normal-Library render is validated and,
+    # when valid, restores the originating Library state through the
+    # top-left breadcrumb. Absent/invalid/forged/oversized tokens leave
+    # the plain Library breadcrumb — never echoed, never trusted, never
+    # reconstructed from raw query parameters. GET stays strictly
+    # read-only.
+    from workflow.services import library_return
+
+    library_return_url = reverse("recordings")
+    raw_lib_return = request.GET.get("lib_return")
+    if raw_lib_return and library_return.decode_token(
+        raw_lib_return, config.timezone
+    ) is not None:
+        library_return_url = library_return.return_url(raw_lib_return)
+
     transcript = recording.transcripts.filter(is_active=True).first()
     transcript_segment_count = 0
     preview_segments: list = []
@@ -589,6 +815,7 @@ def recording_detail(request, recording_id):
         "retired_tag_options": retired_tag_options,
         "default_output_language": variant.default_language,
         "selected_language": variant.requested,
+        "library_return_url": library_return_url,
     }
     return render(request, "workflow/recording_detail.html", context)
 
@@ -666,6 +893,23 @@ def summary_detail(request, recording_id, summary_id):
 
 def recording_transcript(request, recording_id):
     config, recording, card = _detail_base(request, recording_id)
+
+    # Section-origin return (Step 6.2 follow-up): a validated
+    # ``return_section`` (a readable canonical topic Section of this
+    # recording) labels the breadcrumb ``← Section`` pointing back to the
+    # exact Section detail; an invalid/missing marker keeps the plain
+    # ``← Recording overview``. The separately validated ``lib_return``
+    # token rides the back link and pagination verbatim. GET stays
+    # strictly read-only.
+    section_return, lib_return = _validated_section_return(request, recording, config)
+    section_return_url = ""
+    if section_return is not None:
+        section_return_url = reverse(
+            "section-detail", args=[recording.pk, section_return.pk]
+        )
+        if lib_return:
+            section_return_url = f"{section_return_url}?lib_return={lib_return}"
+
     version = request.GET.get("v")
     # Metadata rendering (model, language, ...) reads the attempt row, so
     # the transcript is fetched with select_related("attempt") on BOTH the
@@ -770,26 +1014,49 @@ def recording_transcript(request, recording_id):
             "The full transcript is displayed instead."
         )
 
-    # Complete staged layout metadata ONLY (range/splits/titles, bounded to
-    # 200 topics) is client-side and submitted; transcript text never is.
+    # Complete staged layout metadata ONLY (range/splits/titles + the
+    # temporary-title flags AND the bounded server-derived temporary
+    # titles map, capped at MAX_TOPIC_SECTIONS) is client-side and
+    # submitted; transcript text never is.
     editor_state = None
     fingerprint = ""
     if editable:
-        from workflow.services.segmentation import segmentation_fingerprint
+        from workflow.services.segmentation import (
+            MAX_TOPIC_SECTIONS,
+            derive_temporary_section_title,
+            segmentation_fingerprint,
+        )
 
-        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        fingerprint = segmentation_fingerprint(
+            recording.pk, transcript, timezone_name=config.timezone
+        )
         if canonical is not None:
             splits = list(canonical["splits"])
             titles = list(canonical["titles"])
+            title_is_temporary = [
+                sec["title_is_temporary"] for sec in canonical["sections"]
+            ]
         else:
             splits = []
             titles = []
+            title_is_temporary = []
+        # Bounded SERVER-authoritative temporary titles: ``temporary_titles``
+        # maps a 0-based index (ordinal - 1) to the exact derived
+        # ``Segment N of YYYYMMDDHHMM`` for that canonical ordinal, so the
+        # editor can visibly prefill new split-created sections without
+        # ever deriving a timestamp from the browser clock.
+        temporary_titles = [
+            derive_temporary_section_title(recording, ordinal, config.timezone)
+            for ordinal in range(1, MAX_TOPIC_SECTIONS + 1)
+        ]
         editor_state = {
             "segment_count": paginator.count,
             "start": working_start,
             "end": working_end,
             "splits": splits,
             "titles": titles,
+            "title_is_temporary": title_is_temporary,
+            "temporary_titles": temporary_titles,
         }
 
     crop_view_message = ""
@@ -816,6 +1083,13 @@ def recording_transcript(request, recording_id):
         pagination_parts.append(f"v={transcript.pk}")
     if explicit_layout is not None:
         pagination_parts.append(f"layout={explicit_layout.pk}")
+    if section_return is not None:
+        # Only the VALIDATED Section-origin parameters ride pagination so
+        # the back link keeps working after paging; invalid values are
+        # never echoed.
+        pagination_parts.append(f"return_section={section_return.pk}")
+        if lib_return:
+            pagination_parts.append(f"lib_return={lib_return}")
     pagination_base_qs = "&".join(pagination_parts)
 
     context = {
@@ -824,6 +1098,8 @@ def recording_transcript(request, recording_id):
         "recording_title": card.title,
         "transcript": transcript,
         "is_active_version": transcript.is_active,
+        "section_return": section_return,
+        "section_return_url": section_return_url,
         "page_obj": page,
         "segment_count": paginator.count,
         "transcript_model": model_id,
@@ -883,6 +1159,26 @@ def section_detail(request, recording_id, section_id):
     if section.segmented_version_id is None:
         raise Http404("Section not available")
 
+    # Safe Library-return token (Step 6.2a): the server-signed token from
+    # the originating normal-Library render is validated and propagated
+    # verbatim — the breadcrumb link, the variant tabs and every action
+    # form keep the originating page/state. Invalid/forged tokens simply
+    # leave the plain Library breadcrumb (no error, no fallback page).
+    from workflow.services import library_return
+
+    library_return_token = ""
+    if "lib_return" in request.GET:
+        decoded = library_return.decode_token(
+            request.GET.get("lib_return"), config.timezone
+        )
+        if decoded is not None:
+            library_return_token = request.GET["lib_return"]
+    library_return_url = (
+        library_return.return_url(library_return_token)
+        if library_return_token
+        else reverse("recordings")
+    )
+
     from workflow.services.segmentation import (
         SegmentationError,
         canonical_layout_for_transcript,
@@ -926,6 +1222,45 @@ def section_detail(request, recording_id, section_id):
     )
     segment_count = section.end_segment_ordinal_exclusive - section.start_segment_ordinal
 
+    # Stable user-facing title (Step 6.2a): NEVER mutate ``Section.title``
+    # during summary generation. The active DEFAULT-language section
+    # Summary's title is the page title whenever one exists — it supersedes
+    # BOTH a stored temporary title AND a manually entered custom title in
+    # presentation (a display override only; the stored custom title stays
+    # layout metadata/provenance). Without a default Summary the stored
+    # title is used. The title is derived from the DEFAULT variant only —
+    # switching tabs never changes the page identity (H1/page title).
+    display_title = section.title
+    if variant.default_summary is not None:
+        display_title = variant.default_summary.title
+
+    # Approximate section duration: (latest usable end_ms - earliest usable
+    # start_ms) / 1000 where the two endpoints are selected INDEPENDENTLY
+    # over the canonical range — the earliest NON-NULL start_ms and the
+    # latest NON-NULL end_ms (a start-only first segment and an end-only
+    # last segment still yield a span) — via ONE bounded aggregate. None
+    # when unavailable or nonpositive ("unknown").
+    section_duration = section_duration_seconds(section)
+
+    # Variant tab query fragment (Step 6.2a): the validated library-return
+    # token rides every language tab so the breadcrumb keeps the
+    # originating page/state; recording-detail pages leave it empty.
+    variant_tab_query = f"lib_return={library_return_token}" if library_return_token else ""
+
+    # Section-origin return marker: every link leaving this Section page
+    # (History, Section in transcript, Full transcript) carries the
+    # server-owned ``return_section=<pk>`` plus the already validated
+    # ``lib_return`` token when present, so the History/transcript
+    # breadcrumbs can point back to this exact Section. The value is
+    # always the Section's own bounded integer pk — never a URL.
+    return_query = f"return_section={section.pk}"
+    if library_return_token:
+        return_query += f"&lib_return={library_return_token}"
+    history_url = f"{reverse('recording-history', args=[recording.pk])}?{return_query}"
+    full_transcript_url = (
+        f"{reverse('recording-transcript', args=[recording.pk])}?{return_query}"
+    )
+
     # Transcript jump link: the active-transcript page at the page
     # containing the Section's first segment, anchored to that segment.
     # An ACTIVE section keeps the plain current link; a HISTORICAL
@@ -938,6 +1273,9 @@ def section_detail(request, recording_id, section_id):
         jump_parts.append(f"v={section.transcript_id}")
     if not section.segmented_version.is_active:
         jump_parts.append(f"layout={section.segmented_version_id}")
+    jump_parts.append(f"return_section={section.pk}")
+    if library_return_token:
+        jump_parts.append(f"lib_return={library_return_token}")
     transcript_jump_url = (
         f"{reverse('recording-transcript', args=[recording.pk])}"
         f"?{'&'.join(jump_parts)}#segment-{section.start_segment_ordinal}"
@@ -997,7 +1335,11 @@ def section_detail(request, recording_id, section_id):
         "range_label": range_label(
             section.start_segment_ordinal, section.end_segment_ordinal_exclusive
         ),
+        "display_title": display_title,
+        "section_duration": section_duration,
         "transcript_jump_url": transcript_jump_url,
+        "history_url": history_url,
+        "full_transcript_url": full_transcript_url,
         "preview_segments": preview_segments,
         "segment_count": segment_count,
         "variant": variant,
@@ -1010,13 +1352,31 @@ def section_detail(request, recording_id, section_id):
         "routing_decision": routing_decision,
         "default_output_language": variant.default_language,
         "selected_language": variant.requested,
-        "parent_status": _status_panel(recording, routing_decision),
+        "section_status": _section_summary_panel(variant),
+        "library_return_url": library_return_url,
+        "library_return_token": library_return_token,
+        "variant_tab_query": variant_tab_query,
     }
     return render(request, "workflow/section_detail.html", context)
 
 
 def recording_history(request, recording_id):
     config, recording, card = _detail_base(request, recording_id)
+
+    # Section-origin return (Step 6.2 follow-up): a validated
+    # ``return_section`` (a readable canonical topic Section of this
+    # recording) labels the breadcrumb ``← Section`` pointing back to the
+    # exact Section detail; an invalid/missing marker keeps the plain
+    # ``← Recording overview``. The separately validated ``lib_return``
+    # token rides the back link verbatim. GET stays strictly read-only.
+    section_return, lib_return = _validated_section_return(request, recording, config)
+    section_return_url = ""
+    if section_return is not None:
+        section_return_url = reverse(
+            "section-detail", args=[recording.pk, section_return.pk]
+        )
+        if lib_return:
+            section_return_url = f"{section_return_url}?lib_return={lib_return}"
 
     # Bounded queries: every potentially long collection is fetched with
     # a limit+1 sentinel row so the truncation notice is exact without
@@ -1081,6 +1441,8 @@ def recording_history(request, recording_id):
     context = {
         "card": card,
         "recording": recording,
+        "section_return": section_return,
+        "section_return_url": section_return_url,
         "transcripts": transcripts,
         "transcripts_truncated": transcripts_truncated,
         "summaries": summaries,

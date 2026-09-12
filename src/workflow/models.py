@@ -461,6 +461,15 @@ class Section(models.Model):
     transcript = models.ForeignKey(Transcript, on_delete=models.CASCADE, related_name="sections")
     ordinal = models.PositiveIntegerField(default=0)
     title = models.CharField(max_length=255, blank=True, default="")
+    # Provenance of a topic title (Step 6.2a): True when the title was
+    # SERVER-DERIVED at save time ("Segment N of YYYYMMDDHHMM", see
+    # workflow.services.segmentation) for a split-created section; False
+    # for every custom/user-owned title AND every pre-0013 row (existing
+    # rows migrate as custom). A temporary title is display-only
+    # metadata: the stable user-facing Library/section-detail title is
+    # superseded by the active DEFAULT-language section Summary's title
+    # when one exists (never mutated during summary generation).
+    title_is_temporary = models.BooleanField(default=False)
     segmented_version = models.ForeignKey(
         "workflow.SegmentedVersion",
         on_delete=models.PROTECT,

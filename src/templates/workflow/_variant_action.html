@@ -19,6 +19,7 @@ submits itself as a generation target. The form posts:
 {% if variant.action_selector and variant.action_mode %}
 <form method="post" action="{% if action_url %}{{ action_url }}{% else %}{% url 'action-summarize' recording.pk %}{% endif %}" class="inline-form">
   {% csrf_token %}
+  {% if library_return_token %}<input type="hidden" name="lib_return" value="{{ library_return_token }}">{% endif %}
   <input type="hidden" name="fingerprint" value="{% if actions %}{{ actions.fingerprint }}{% elif section_actions %}{{ section_actions.fingerprint }}{% endif %}">
   <input type="hidden" name="mode" value="{{ variant.action_mode }}">
   <input type="hidden" name="language" value="{{ variant.action_selector }}">

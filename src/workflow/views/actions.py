@@ -347,10 +347,13 @@ def _section_or_404(recording: Recording, section_id: int):
 
 
 def _redirect_section_outcome(
-    request, recording: Recording, section, outcome, *, return_language: str | None = None
+    request, recording: Recording, section, outcome, *, return_language: str | None = None,
+    lib_return: str = "",
 ):
     """Redirect a section action outcome to the section detail page with
-    the validated read selector — never an arbitrary return URL."""
+    the validated read selector — never an arbitrary return URL. A
+    validated library-return token is preserved so the breadcrumb keeps
+    the originating Library page/state."""
     if isinstance(outcome, ActionOutcome):
         if not outcome.ok:
             dj_messages.error(request, outcome.message)
@@ -359,11 +362,16 @@ def _redirect_section_outcome(
         else:
             dj_messages.success(request, outcome.message)
         target = return_language or "default"
+        parts = []
         if target and target != "default":
+            parts.append(f"language={target}")
+        if lib_return:
+            parts.append(f"lib_return={lib_return}")
+        if parts:
             from django.urls import reverse
 
             url = reverse("section-detail", args=[recording.pk, section.pk])
-            return redirect(f"{url}?language={target}")
+            return redirect(f"{url}?{'&'.join(parts)}")
         return redirect("section-detail", recording.pk, section.pk)
     return outcome
 
@@ -384,6 +392,7 @@ def action_section_summarize(request, recording_id, section_id):
     """
     from workflow.models import Section
 
+    config = get_config()
     recording = _recording_or_404(recording_id)
     section = _section_or_404(recording, section_id)
     language = (request.POST.get("language") or "default").strip()
@@ -395,6 +404,18 @@ def action_section_summarize(request, recording_id, section_id):
             section_summarize_friendly_message("unsupported_language", language=language),
             "unsupported_language",
         )
+    # Validated Library-return token (Step 6.2a): carried through the
+    # confirmation and execution redirect so the section breadcrumb keeps
+    # the originating normal-Library page/state. A forged/invalid token is
+    # dropped silently (the redirect then returns to the plain section
+    # detail page).
+    from workflow.services import library_return
+
+    lib_return = ""
+    raw_lib_return = (request.POST.get("lib_return") or "").strip()
+    if raw_lib_return:
+        if library_return.decode_token(raw_lib_return, config.timezone) is not None:
+            lib_return = raw_lib_return
     # Optional READ selector to return to after the action; validated
     # against the read-only section view-model (unknown falls back).
     return_language = (request.POST.get("return_language") or "").strip() or None
@@ -508,8 +529,16 @@ def action_section_summarize(request, recording_id, section_id):
         }
         if return_language:
             hidden["return_language"] = return_language
+        if lib_return:
+            hidden["lib_return"] = lib_return
         from django.urls import reverse
 
+        cancel_url = reverse("section-detail", args=[recording.pk, section.pk])
+        if lib_return:
+            # Cancel returns to the section detail page WITH the already
+            # validated library-return token (never a raw/unvalidated
+            # value) so the breadcrumb keeps the originating page/state.
+            cancel_url = f"{cancel_url}?lib_return={lib_return}"
         return render(
             request,
             "workflow/action_confirm.html",
@@ -519,10 +548,9 @@ def action_section_summarize(request, recording_id, section_id):
                 "title": f"{label} this section — are you sure?",
                 "note": note,
                 "hidden": hidden,
-                "cancel_url": reverse("section-detail", args=[recording.pk, section.pk]),
+                "cancel_url": cancel_url,
             },
         )
-    config = get_config()
     from workflow.services.web_actions import execute_section_summarize
 
     try:
@@ -537,5 +565,6 @@ def action_section_summarize(request, recording_id, section_id):
     except PipelineBusy as exc:
         return conflict_response(request, exc.holder_pid)
     return _redirect_section_outcome(
-        request, recording, section, outcome, return_language=return_language
+        request, recording, section, outcome,
+        return_language=return_language, lib_return=lib_return,
     )

@@ -20,6 +20,8 @@ Proves the approved read contract:
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -27,9 +29,12 @@ from django.test import Client
 
 from workflow.models import (
     ProcessingAttempt,
+    Recording,
     Section,
     SegmentedVersion,
     Summary,
+    SummaryState,
+    SummaryVariantState,
     Transcript,
 )
 from workflow.services.segmentation import save_segmented_version
@@ -78,8 +83,11 @@ class TestActiveSection:
         assert f"<h1 class=\"detail-title\">{section.title}</h1>" in content
         assert section.title == "First topic"
         assert "segments 0–2" in content  # canonical range label
-        assert f'href="/recordings/{rec.pk}/transcript/?page=1#segment-0"' in content
-        assert f'href="/recordings/{rec.pk}/history/"' in content
+        assert (
+            f'href="/recordings/{rec.pk}/transcript/?page=1&amp;return_section={section.pk}#segment-0"'
+            in content
+        )
+        assert f'href="/recordings/{rec.pk}/history/?return_section={section.pk}"' in content
         assert f'href="/recordings/{rec.pk}/"' in content  # parent recording link
         assert "action-section-summarize" in content or "Generate" in content
         assert f'/recordings/{rec.pk}/sections/{section.pk}/tags/apply/' in content
@@ -322,10 +330,18 @@ class TestHistoricalSection:
     def test_concrete_existing_read_language_renders(self, client):
         rec, transcript, _fixed = _transcript(sha="sec-lang-conc")
         sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
-        make_summary_version(rec, transcript, sections[0], title="FI S", output_language="fi")
+        make_summary_version(
+            rec, transcript, sections[0], title="FI S",
+            overview="Finnish overview.", output_language="fi",
+        )
         response = client.get(_url(rec, sections[0]) + "?language=fi")
         assert response.status_code == 200
-        assert "FI S" in response.content.decode()
+        # The concrete variant's content stays readable; its title is NOT
+        # repeated inside the summary body (the H1 is the stored/display
+        # title because no DEFAULT summary exists for this section).
+        assert "Finnish overview." in response.content.decode()
+        assert "FI S" not in response.content.decode()
+        assert 'class="summary-title"' not in response.content.decode()
 
 
 class TestHistoricalSectionTagsReadOnly:
@@ -407,8 +423,8 @@ class TestHistoricalSectionJumpLinks:
         # The jump link opens the SECTION'S OWN (superseded) revision.
         # (``&`` is autoescaped to ``&amp;`` in the rendered HTML.)
         assert (
-            f'href="/recordings/{rec.pk}/transcript/?page=1&amp;layout={version.pk}#segment-0"'
-            in content
+            f'href="/recordings/{rec.pk}/transcript/?page=1&amp;layout={version.pk}'
+            f"&amp;return_section={section.pk}#segment-0" in content
         )
         # The active transcript gets no ?v=, and the plain current link is
         # NOT used for the historical section.
@@ -442,7 +458,7 @@ class TestHistoricalSectionJumpLinks:
         # both preserved so the jump opens EXACTLY this revision.
         assert (
             f'href="/recordings/{rec.pk}/transcript/?page=1&amp;v={transcript.pk}'
-            f"&amp;layout={version.pk}#segment-0" in content
+            f"&amp;layout={version.pk}&amp;return_section={section.pk}#segment-0" in content
         )
 
     def test_active_section_jump_link_is_plain_current_link(self, client):
@@ -450,7 +466,7 @@ class TestHistoricalSectionJumpLinks:
         sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
         content = client.get(_url(rec, sections[0])).content.decode()
         assert (
-            f'href="/recordings/{rec.pk}/transcript/?page=1#segment-0"'
+            f'href="/recordings/{rec.pk}/transcript/?page=1&amp;return_section={sections[0].pk}#segment-0"'
             in content
         )
         assert "?page=1&amp;v=" not in content
@@ -484,10 +500,17 @@ class TestHistoricalSectionVariantScope:
 
     def test_historical_section_exposes_its_own_concrete_variant(self, client):
         rec, transcript, section = self._historical_layout()
-        make_summary_version(rec, transcript, section, title="Old FI", output_language="fi")
+        make_summary_version(
+            rec, transcript, section, title="Old FI",
+            overview="Finnish overview.", output_language="fi",
+        )
         response = client.get(_url(rec, section) + "?language=fi")
         assert response.status_code == 200
-        assert "Old FI" in response.content.decode()
+        # The concrete variant's content stays readable; its title is NOT
+        # repeated inside the summary body (only the DEFAULT summary
+        # drives the H1, and no default exists for this section).
+        assert "Finnish overview." in response.content.decode()
+        assert "Old FI" not in response.content.decode()
         # Read-only: no action form on the historical page.
         assert "action-section-summarize" not in response.content.decode()
 
@@ -522,10 +545,14 @@ class TestHistoricalSectionVariantScope:
         assert section_view.source_language == "yue"
         whole_view = build_variant_view(rec, "default")
         assert whole_view.default_language == "en"  # the ACTIVE transcript
-        # The historical section's own concrete variant stays readable.
+        # The historical section's own concrete variant stays readable;
+        # its title is NOT repeated inside the summary body (the H1 is
+        # the stored/display title — no DEFAULT summary exists for this
+        # section, whose default language is zh-Hant).
         response = client.get(_url(rec, section) + "?language=en")
         assert response.status_code == 200
-        assert "Old summary" in response.content.decode()
+        assert "Old summary" not in response.content.decode()
+        assert "Discussed grading plans." in response.content.decode()
 
     def test_historical_section_exposes_no_action_selector_or_mode(self, client):
         """Fix: a historical/non-actionable section scope exposes NO
@@ -621,3 +648,219 @@ class TestHistoricalSectionVariantScope:
             f"?format=markdown&language=fi"
         )
         assert response.status_code == 404
+
+
+class TestSectionStatusPanel:
+    """Objective A: the Section detail status panel is Section-scoped and
+    derived ONLY from the selected VariantView/Section summary state —
+    never the parent Recording summary tuple (section summaries
+    intentionally do not mutate that tuple)."""
+
+    def _section_with_summary(self, sha="sec-status"):
+        rec, transcript, _fixed = _transcript(sha=sha)
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        make_summary_version(
+            rec, transcript, sections[0], title="Sec S", output_language="en"
+        )
+        # make_summary_version flips the parent tuple to CURRENT; force it
+        # back to MISSING so the Section panel is provably independent.
+        Recording.objects.filter(pk=rec.pk).update(summary_status=SummaryState.MISSING)
+        return rec, transcript, sections[0]
+
+    def _current_variant_state(self, transcript, section, *, regen=False):
+        return SummaryVariantState.objects.create(
+            transcript=transcript, section=section, output_language="en",
+            status="current", regeneration_failed=regen,
+        )
+
+    def test_panel_is_section_scoped_label(self, client):
+        rec, transcript, section = self._section_with_summary()
+        self._current_variant_state(transcript, section)
+        content = client.get(_url(rec, section)).content.decode()
+        assert "Section summary status" in content
+        assert "inherited from the parent recording" not in content
+        assert "Recording status" not in content
+
+    def test_active_summary_current_ok(self, client):
+        rec, transcript, section = self._section_with_summary()
+        self._current_variant_state(transcript, section)
+        content = client.get(_url(rec, section)).content.decode()
+        assert 'class="status-panel status-panel-ok"' in content
+        assert "Section summary current" in content
+        assert "no action required" in content
+        # The misleading parent missing text never appears.
+        assert "An active transcript exists but the current summary is missing" not in content
+
+    def test_active_summary_with_regen_failure_warn_kept(self, client):
+        rec, transcript, section = self._section_with_summary(sha="sec-status-regen")
+        self._current_variant_state(transcript, section, regen=True)
+        content = client.get(_url(rec, section)).content.decode()
+        assert 'class="status-panel status-panel-warn"' in content
+        assert "Section re-summarization failed" in content
+        assert "current section summary was kept" in content
+
+    def test_failed_state_no_summary_danger(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-status-fail")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        SummaryVariantState.objects.create(
+            transcript=transcript, section=sections[0],
+            output_language="en", status="failed",
+        )
+        content = client.get(_url(rec, sections[0])).content.decode()
+        assert 'class="status-panel status-panel-danger"' in content
+        assert "Section summary failed" in content
+        assert "retry is available" in content
+
+    def test_no_summary_warn_section_variant_scoped(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-status-none")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        content = client.get(_url(rec, sections[0])).content.decode()
+        assert 'class="status-panel status-panel-warn"' in content
+        assert "Section summary not generated" in content
+        # Explicitly this Section/language variant, not the parent recording.
+        assert "section/language variant" in content
+        assert "An active transcript exists but the current summary is missing" not in content
+
+    def test_parent_recording_summary_state_never_used(self, client):
+        """The parent Recording summary tuple (CURRENT/FAILED/MISSING) is
+        irrelevant: the panel follows the Section variant state only."""
+        rec, transcript, section = self._section_with_summary(sha="sec-status-parent")
+        Recording.objects.filter(pk=rec.pk).update(summary_status=SummaryState.FAILED)
+        content = client.get(_url(rec, section)).content.decode()
+        assert 'class="status-panel status-panel-ok"' in content
+        assert "Section summary current" in content
+        # The parent "Summary failed" label/detail is never shown here.
+        assert "Summary failed" not in content
+        assert "retry is available" not in content
+
+    def test_unresolved_original_panel_is_not_generated(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-status-uo")
+        transcript.language_observed = ""
+        transcript.save(update_fields=["language_observed"])
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        content = client.get(_url(rec, sections[0]) + "?language=original").content.decode()
+        assert "Section summary not generated" in content
+        assert "status-panel-warn" in content
+        # The existing unresolved-Original empty-state presentation stays.
+        assert "source language is not known" in content
+
+
+class TestSectionOriginReturnLinks:
+    """Objective B: the three Section-detail links (History, Section in
+    transcript, Full transcript) carry a server-owned ``return_section``
+    marker plus the already validated ``lib_return`` token when present —
+    so History/transcript breadcrumbs can point back to this exact
+    Section."""
+
+    def _token(self):
+        from workflow.query import ListFilters
+        from workflow.services import library_return
+
+        return library_return.make_token(ListFilters(), 1, "cards")
+
+    def test_all_three_links_carry_return_section(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-return-links")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        section = sections[0]
+        content = client.get(_url(rec, section)).content.decode()
+        assert f'href="/recordings/{rec.pk}/history/?return_section={section.pk}"' in content
+        assert f'href="/recordings/{rec.pk}/transcript/?return_section={section.pk}"' in content
+        assert (
+            f'href="/recordings/{rec.pk}/transcript/?page=1&amp;return_section={section.pk}#segment-0"'
+            in content
+        )
+
+    def test_valid_lib_return_propagates_to_all_links(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-return-token")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        section = sections[0]
+        token = self._token()
+        content = client.get(_url(rec, section) + f"?lib_return={token}").content.decode()
+        q = f"return_section={section.pk}&amp;lib_return={token}"
+        assert f'href="/recordings/{rec.pk}/history/?{q}"' in content
+        assert f'href="/recordings/{rec.pk}/transcript/?{q}"' in content
+        assert (
+            f'href="/recordings/{rec.pk}/transcript/?page=1&amp;return_section={section.pk}'
+            f"&amp;lib_return={token}#segment-0" in content
+        )
+
+    def test_forged_lib_return_not_echoed_on_section_links(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-return-badtok")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        section = sections[0]
+        content = client.get(_url(rec, section) + "?lib_return=forged").content.decode()
+        # The Section marker is always present; the forged token is never echoed.
+        assert f'href="/recordings/{rec.pk}/history/?return_section={section.pk}"' in content
+        assert "lib_return=" not in content
+
+    def test_follow_history_link_shows_section_breadcrumb(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-return-flow-hist")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        section = sections[0]
+        content = client.get(_url(rec, section)).content.decode()
+        match = re.search(
+            rf'href="(/recordings/{rec.pk}/history/\?return_section={section.pk})"', content
+        )
+        assert match, "history link not found"
+        page = client.get(match.group(1)).content.decode()
+        assert (
+            f'<a href="/recordings/{rec.pk}/sections/{section.pk}/">&larr; Section</a>'
+            in page
+        )
+        assert "&larr; Recording overview" not in page
+
+    def test_follow_section_in_transcript_link_shows_section_breadcrumb(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-return-flow-jump")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        section = sections[0]
+        content = client.get(_url(rec, section)).content.decode()
+        match = re.search(
+            rf'href="(/recordings/{rec.pk}/transcript/\?page=1&amp;return_section={section.pk}#segment-0)"',
+            content,
+        )
+        assert match, "transcript jump link not found"
+        # The rendered href is HTML-escaped (&amp;); decode before following.
+        import html as html_module
+
+        page = client.get(html_module.unescape(match.group(1))).content.decode()
+        assert (
+            f'<a href="/recordings/{rec.pk}/sections/{section.pk}/">&larr; Section</a>'
+            in page
+        )
+        assert "&larr; Recording overview" not in page
+
+    def test_follow_full_transcript_link_shows_section_breadcrumb(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-return-flow-full")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        section = sections[0]
+        content = client.get(_url(rec, section)).content.decode()
+        match = re.search(
+            rf'href="(/recordings/{rec.pk}/transcript/\?return_section={section.pk})"', content
+        )
+        assert match, "full transcript link not found"
+        page = client.get(match.group(1)).content.decode()
+        assert (
+            f'<a href="/recordings/{rec.pk}/sections/{section.pk}/">&larr; Section</a>'
+            in page
+        )
+        assert "&larr; Recording overview" not in page
+
+    def test_follow_history_link_preserves_valid_lib_return(self, client):
+        rec, transcript, _fixed = _transcript(sha="sec-return-flow-tok")
+        sections = _split(rec, transcript, splits=[3], titles=["A", "B"])
+        section = sections[0]
+        token = self._token()
+        content = client.get(_url(rec, section) + f"?lib_return={token}").content.decode()
+        match = re.search(
+            rf'href="(/recordings/{rec.pk}/history/\?return_section={section.pk}&amp;lib_return={token})"',
+            content,
+        )
+        assert match, "history link with token not found"
+        import html as html_module
+
+        page = client.get(html_module.unescape(match.group(1))).content.decode()
+        assert (
+            f'<a href="/recordings/{rec.pk}/sections/{section.pk}/?lib_return={token}">'
+            "&larr; Section</a>" in page
+        )
+        assert "&larr; Recording overview" not in page

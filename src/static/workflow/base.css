@@ -209,6 +209,7 @@ button:hover, .link-button:hover { background: var(--bg); }
 .link-button { border: none; color: var(--accent); padding: 0 0.2em; text-decoration: underline; }
 .link-button.danger { color: var(--danger); }
 .confirm-button { font-weight: 700; }
+.confirm-form-link-disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ============================================================
    LIBRARY FILTER AREA — two rows, no caption

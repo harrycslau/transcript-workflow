@@ -49,27 +49,38 @@ def _recording_or_404(recording_id: str) -> Recording:
     return get_object_or_404(Recording, pk=recording_id)
 
 
-def _payload_summary(recording: Recording, transcript, payload: dict) -> dict:
+def _payload_summary(recording: Recording, transcript, payload: dict, timezone_name: str) -> dict:
     """Bounded, value-free summary fields for the confirmation page.
 
     The only user content carried is the topic title list; the template
-    renders it with normal autoescaping (never raw HTML).
+    renders it with normal autoescaping (never raw HTML). Blank
+    temporary titles are replaced with the SERVER-derived
+    ``Segment N of YYYYMMDDHHMM`` value so the confirmation shows what
+    will actually be saved.
     """
+    from workflow.services.segmentation import derive_temporary_section_title
+
     segment_count = transcript.segments.count()
     start = payload["start"]
     end = payload["end_exclusive"]
     splits = payload["splits"]
+    topics = []
+    for index, title in enumerate(payload["titles"]):
+        if payload["title_is_temporary"][index] and not title:
+            topics.append(derive_temporary_section_title(recording, index + 1, timezone_name))
+        else:
+            topics.append(title)
     return {
         "range_label": range_label(start, end),
         "segment_count": segment_count,
         "cropped_above": start,
         "cropped_below": segment_count - end,
         "split_count": len(splits),
-        "topics": list(payload["titles"]),
+        "topics": list(topics),
     }
 
 
-def _render_confirmation(request, recording, transcript, payload: dict):
+def _render_confirmation(request, recording, transcript, payload: dict, timezone_name: str):
     hidden = {
         "fingerprint": payload["fingerprint"],
         "transcript_id": str(payload["transcript_id"]),
@@ -83,7 +94,7 @@ def _render_confirmation(request, recording, transcript, payload: dict):
             "recording": recording,
             "transcript": transcript,
             "payload": payload,
-            "summary": _payload_summary(recording, transcript, payload),
+            "summary": _payload_summary(recording, transcript, payload, timezone_name),
             "hidden": hidden,
         },
     )
@@ -118,6 +129,7 @@ def action_segmentation_save(request, recording_id):
     BEFORE the pipeline lock.
     """
     recording = _recording_or_404(recording_id)
+    config = get_config()
     try:
         payload = parse_segmentation_payload(request.POST)
     except SegmentationError as exc:
@@ -137,13 +149,14 @@ def action_segmentation_save(request, recording_id):
     # bounds/endpoints/duplicates/titles, existing current layout state).
     # No lock, no recovery, no write.
     try:
-        validate_payload_for_transcript(recording, transcript, payload)
+        validate_payload_for_transcript(
+            recording, transcript, payload, timezone_name=config.timezone
+        )
     except SegmentationError as exc:
         return rejection_response(
             request, segmentation_friendly_message(exc.code), exc.code
         )
     if payload["confirmed"]:
-        config = get_config()
         try:
             outcome = execute_segmentation_save(
                 config,
@@ -158,7 +171,9 @@ def action_segmentation_save(request, recording_id):
     # computed read-only one — a stale page is rejected here, never
     # silently re-synthesized.
     try:
-        current_fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        current_fingerprint = segmentation_fingerprint(
+            recording.pk, transcript, timezone_name=config.timezone
+        )
     except SegmentationError as exc:
         return rejection_response(
             request, segmentation_friendly_message(exc.code), exc.code
@@ -167,4 +182,6 @@ def action_segmentation_save(request, recording_id):
         return rejection_response(
             request, segmentation_friendly_message("stale_state"), "stale_state"
         )
-    return _render_confirmation(request, recording, transcript, payload)
+    return _render_confirmation(
+        request, recording, transcript, payload, config.timezone
+    )

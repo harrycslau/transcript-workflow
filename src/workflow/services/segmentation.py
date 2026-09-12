@@ -18,6 +18,24 @@ Contract (approved Step 6.1):
   (``MAX_TOPIC_SECTIONS``), nonblank titles (preserved exactly after
   the strip-based blank check), no newline/control characters, no
   coercion;
+- an optional parallel ``title_is_temporary`` flags list (exact
+  ``bool`` per title) marks SERVER-DERIVED titles: a True flag with a
+  blank title is filled with ``Segment N of YYYYMMDDHHMM`` (N = the
+  1-based canonical section ordinal; timestamp = ``recorded_at`` else
+  ``discovered_at`` in the configured timezone) and a True flag with a
+  non-blank title must EXACTLY equal that derived value or the save
+  fails closed with the stable ``title_flag_forgery`` category — a
+  custom title can never be claimed temporary; the no-op comparison
+  uses the RAW submitted payload, so an UNCHANGED active layout stays a
+  usable no-op even when the stored temporary titles were derived under
+  an older effective timestamp;
+- READ-side validation (``canonical_layout_*``, the fingerprint, the
+  Library SQL predicate) requires a True temporary flag to carry the
+  EXACT canonical SHAPE ``Segment <ordinal> of <12 ASCII digits>`` —
+  an arbitrary custom title on a temporary row is corrupt stored state
+  and fails closed as ``layout_invalid``; reads NEVER compare a stored
+  temporary title to the CURRENT timestamp (titles are immutable
+  creation-time metadata);
 - segment ordinals are derived from the database and must be exactly
   contiguous ``0..count-1`` with a nonempty transcript; the working
   range must satisfy ``0 <= start < end <= count``;
@@ -44,6 +62,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.db.models import Count, Max, Min
@@ -65,6 +84,8 @@ _MESSAGES = {
     "title_too_long": "topic title is too long",
     "title_invalid_chars": "topic title contains forbidden characters",
     "title_count_mismatch": "topic title count does not match split count",
+    "title_flag_count_mismatch": "temporary-title flag count does not match the topic count",
+    "title_flag_forgery": "A topic title marked temporary does not match the server-derived name.",
     "too_many_topics": "too many topic sections",
     "recording_not_found": "recording not found",
     "transcript_not_found": "transcript not found or does not belong to the recording",
@@ -170,6 +191,53 @@ def _stored_title_valid(title) -> bool:
     )
 
 
+def _temporary_title_shape_valid(ordinal, title) -> bool:
+    """Strict canonical SHAPE of a stored TEMPORARY title (Step 6.2a
+    read contract): exactly ``Segment <ordinal> of <12 ASCII digits>``.
+
+    Titles are immutable creation-time metadata and the configured
+    timezone / effective timestamp may later change, so reads NEVER
+    compare a stored temporary title to the CURRENT server-derived
+    value — only the exact canonical shape is validated. A corrupt row
+    with ``title_is_temporary=True`` and an arbitrary custom title
+    therefore fails closed in every canonical service read.
+    """
+    if type(title) is not str or type(ordinal) is not int or ordinal < 1:
+        return False
+    prefix = f"Segment {ordinal} of "
+    if not title.startswith(prefix):
+        return False
+    digits = title[len(prefix):]
+    return len(digits) == 12 and digits.isascii() and digits.isdigit()
+
+
+def derive_temporary_section_title(recording, ordinal: int, timezone_name: str) -> str:
+    """Server-authoritative auto title for a split-created topic Section.
+
+    ``Segment N of YYYYMMDDHHMM`` where N is the 1-based canonical
+    Section ordinal and the timestamp is the recording's effective time
+    (``recorded_at`` else ``discovered_at``) rendered in the configured
+    timezone. The client NEVER derives this value:
+
+    - a blank True-flag title is FILLED with this value at save time;
+    - a non-blank True-flag title MUST EXACTLY equal this value (any
+      other non-blank value is a forgery — a custom title can never be
+      claimed temporary).
+
+    An aware datetime is converted to the configured zone; a naive one
+    is formatted as already-local (the same convention as the Library's
+    month labels). Pure and deterministic; never a write/network.
+    """
+    if type(ordinal) is not int or ordinal < 1:
+        raise SegmentationError("invalid_input")
+    dt = recording.recorded_at or recording.discovered_at
+    if dt is None:
+        dt = timezone.now()
+    if timezone.is_aware(dt):
+        dt = dt.astimezone(ZoneInfo(timezone_name))
+    return f"Segment {ordinal} of {dt.strftime('%Y%m%d%H%M')}"
+
+
 def canonical_layout_for_transcript(version, transcript, *, using: str = "default") -> dict:
     """Bounded READ-ONLY canonical validation of one SegmentedVersion.
 
@@ -183,7 +251,7 @@ def canonical_layout_for_transcript(version, transcript, *, using: str = "defaul
 
     Returns:
       {"id", "revision", "start", "end_exclusive",
-       "sections": tuple[{ordinal,start,end,title}, ...],
+       "sections": tuple[{ordinal,start,end,title,title_is_temporary}, ...],
        "splits": tuple[int, ...], "titles": tuple[str, ...]}
     """
     if version is None or version.transcript_id != transcript.pk:
@@ -194,7 +262,7 @@ def canonical_layout_for_transcript(version, transcript, *, using: str = "defaul
         .order_by("ordinal")
         .values_list(
             "transcript_id", "ordinal", "start_segment_ordinal",
-            "end_segment_ordinal_exclusive", "title",
+            "end_segment_ordinal_exclusive", "title", "title_is_temporary",
         )[: MAX_TOPIC_SECTIONS + 1]
     )
     return canonical_layout_from_rows(version, transcript, count, lo, hi, rows)
@@ -210,11 +278,12 @@ def canonical_layout_from_rows(
     (the Library prepass) so the SAME fail-closed validation runs without
     a per-layout query. ``rows`` are exactly the tuples
     ``(transcript_id, ordinal, start_segment_ordinal,
-    end_segment_ordinal_exclusive, title)`` in ordinal order (the shape
-    ``canonical_layout_for_transcript`` fetches); ``segment_count``/
-    ``segment_lo``/``segment_hi`` come from the shared bounded segment
-    aggregate. Malformed stored state raises the one fixed sanitized
-    ``layout_invalid`` category — never a partial result.
+    end_segment_ordinal_exclusive, title, title_is_temporary)`` in
+    ordinal order (the shape ``canonical_layout_for_transcript``
+    fetches); ``segment_count``/``segment_lo``/``segment_hi`` come from
+    the shared bounded segment aggregate. Malformed stored state raises
+    the one fixed sanitized ``layout_invalid`` category — never a
+    partial result.
     """
     if segment_count == 0 or segment_lo != 0 or segment_hi != segment_count - 1:
         raise SegmentationError("layout_invalid")
@@ -239,9 +308,11 @@ def canonical_layout_from_rows(
         # == end; every Section row must belong to the SAME transcript as
         # its layout (SQLite cannot CHECK this cross-table). A crop-only
         # version legitimately has ZERO rows (its range may still be
-        # nonempty).
+        # nonempty). The temporary-title flag is part of the immutable
+        # layout state and must be an exact bool (a non-bool stored value
+        # is corrupt state, never silently coerced).
         cursor = start
-        for index, (row_transcript_id, ordinal, sec_start, sec_end, title) in enumerate(rows, start=1):
+        for index, (row_transcript_id, ordinal, sec_start, sec_end, title, flag) in enumerate(rows, start=1):
             if (
                 row_transcript_id != transcript.pk
                 or ordinal != index
@@ -249,10 +320,23 @@ def canonical_layout_from_rows(
                 or type(sec_end) is not int
                 or sec_end <= sec_start
                 or not _stored_title_valid(title)
+                or type(flag) is not bool
+                # A True temporary flag requires the exact canonical
+                # "Segment <ordinal> of <12 ASCII digits>" SHAPE — an
+                # arbitrary custom title on a temporary row is corrupt
+                # stored state (reads never compare to the current
+                # timestamp, only the shape).
+                or (flag and not _temporary_title_shape_valid(ordinal, title))
             ):
                 raise SegmentationError("layout_invalid")
             sections.append(
-                {"ordinal": ordinal, "start": sec_start, "end": sec_end, "title": title}
+                {
+                    "ordinal": ordinal,
+                    "start": sec_start,
+                    "end": sec_end,
+                    "title": title,
+                    "title_is_temporary": flag,
+                }
             )
             titles.append(title)
             cursor = sec_end
@@ -333,15 +417,18 @@ def require_active_topic_section(section, *, using: str = "default") -> dict:
 
 
 def _canonical_payload(version, transcript, *, using: str = "default") -> tuple:
-    """The canonical ``(start, end_exclusive, splits, titles)`` payload of
-    a version — fail-closed: malformed stored state raises
-    ``layout_invalid`` instead of being treated as a no-op."""
+    """The canonical ``(start, end_exclusive, splits, titles, flags)``
+    payload of a version — fail-closed: malformed stored state raises
+    ``layout_invalid`` instead of being treated as a no-op. The
+    temporary-title flags are part of the immutable layout state and
+    therefore part of the no-op comparison."""
     canonical = canonical_layout_for_transcript(version, transcript, using=using)
     return (
         canonical["start"],
         canonical["end_exclusive"],
         canonical["splits"],
         canonical["titles"],
+        tuple(sec["title_is_temporary"] for sec in canonical["sections"]),
     )
 
 
@@ -352,7 +439,9 @@ def save_segmented_version(
     end_exclusive,
     split_markers=(),
     topic_titles=(),
+    title_is_temporary=(),
     *,
+    timezone_name: str = "UTC",
     using: str = "default",
 ) -> SegmentationResult:
     """Create (or no-op) the active segmented version for a transcript.
@@ -364,6 +453,21 @@ def save_segmented_version(
     one additional topic section. ``topic_titles`` holds exactly the
     ordered titles (zero titles for zero splits; N+1 titles for N
     splits).
+
+    ``title_is_temporary`` (optional) holds exactly one exact ``bool``
+    per topic title (0/1-style ``True``/``False`` only; ``bool``
+    subclasses are rejected). Semantics (Step 6.2a):
+
+    - a True flag means the title is SERVER-DERIVED: a blank title is
+      filled with ``Segment N of YYYYMMDDHHMM`` (N = the 1-based
+      canonical Section ordinal; timestamp = ``recorded_at`` else
+      ``discovered_at`` in ``timezone_name``) and a non-blank title must
+      EXACTLY equal that derived value or the whole save fails closed
+      with the stable ``title_flag_forgery`` category (a custom title
+      can never be claimed temporary);
+    - a False flag (or an omitted flags tuple — the legacy/custom
+      default) validates the title exactly as before and stores it
+      verbatim with ``title_is_temporary=False``.
 
     Returns a :class:`SegmentationResult` with safe counts only, or
     raises :class:`SegmentationError` (nothing written on failure).
@@ -381,6 +485,7 @@ def save_segmented_version(
     end_exclusive = _require_int(end_exclusive)
     split_markers = _require_sequence(split_markers)
     topic_titles = _require_sequence(topic_titles)
+    title_is_temporary = _require_sequence(title_is_temporary)
 
     # Bound collection sizes BEFORE touching any element: a hostile
     # oversized list (objects whose type/str behavior must never be
@@ -391,11 +496,38 @@ def save_segmented_version(
         raise SegmentationError("too_many_topics")
     if len(topic_titles) > MAX_TOPIC_SECTIONS:
         raise SegmentationError("too_many_topics")
+    if len(title_is_temporary) > MAX_TOPIC_SECTIONS:
+        raise SegmentationError("too_many_topics")
 
     for marker in split_markers:
         _require_int(marker)
-    for title in topic_titles:
-        _validate_title(title)
+    # Exact flags only: any non-bool flag is rejected BEFORE any element
+    # of the titles is touched (a hostile object's ``__str__`` is never
+    # invoked on this path).
+    if title_is_temporary:
+        if len(title_is_temporary) != len(topic_titles):
+            raise SegmentationError("title_flag_count_mismatch")
+        for flag in title_is_temporary:
+            if type(flag) is not bool:
+                raise SegmentationError("invalid_input")
+    else:
+        # Omitted flags = the legacy/custom default: every title is
+        # custom (migration 0013 default). The editor always sends
+        # explicit flags; this keeps pre-0013 callers/tests valid.
+        title_is_temporary = tuple(False for _ in topic_titles)
+
+    # Title shape validation, flag-aware: a True-flag title may be blank
+    # (the server fills the derived name inside the transaction) but any
+    # non-blank True-flag title must still be shape-valid; a False-flag
+    # (custom) title is validated exactly as before. The exact
+    # derived-equality check for non-blank True-flag titles happens in the
+    # transactional save (it needs the Recording row).
+    for index, title in enumerate(topic_titles):
+        if title_is_temporary[index]:
+            if title:
+                _validate_title(title)
+        else:
+            _validate_title(title)
 
     # Zero splits -> zero titles; N splits (N >= 1) -> exactly N+1 titles.
     topic_count = len(split_markers) + 1 if split_markers else 0
@@ -415,6 +547,8 @@ def save_segmented_version(
             end_exclusive,
             splits,
             topic_titles,
+            title_is_temporary,
+            timezone_name=timezone_name,
             using=using,
         )
     except SegmentationError:
@@ -433,7 +567,9 @@ def _save_locked(
     end_exclusive: int,
     splits: tuple,
     topic_titles: list | tuple,
+    topic_flags: list | tuple,
     *,
+    timezone_name: str,
     using: str,
 ) -> SegmentationResult:
     """Locked single-transaction save; unexpected failures are mapped to
@@ -480,17 +616,17 @@ def _save_locked(
             if marker == start or marker == end_exclusive:
                 raise SegmentationError("split_at_endpoint")
 
-        # Exhaustive contiguous topic Sections over [start, end_exclusive).
-        if splits:
-            bounds = (start,) + splits + (end_exclusive,)
-            topic_sections = [
-                (ordinal, bounds[i], bounds[i + 1], topic_titles[i])
-                for i, ordinal in enumerate(range(1, len(bounds)))
-            ]
-        else:
-            topic_sections = []
-
-        expected_payload = (start, end_exclusive, splits, tuple(topic_titles))
+        # The no-op comparison uses the RAW submitted titles/flags: an
+        # unchanged active payload stays a no-op even when the stored
+        # temporary titles were derived under an older effective timestamp
+        # (reads validate shape only, never current-timestamp equality).
+        raw_payload = (
+            start,
+            end_exclusive,
+            splits,
+            tuple(topic_titles),
+            tuple(topic_flags),
+        )
 
         current = (
             SegmentedVersion.objects.using(using)
@@ -505,10 +641,37 @@ def _save_locked(
         current_payload = None
         if current is not None:
             current_payload = _canonical_payload(current, transcript, using=using)
-        if current_payload == expected_payload:
+        if current_payload == raw_payload:
             return SegmentationResult(created=False)
-        if current is None and expected_payload == (0, count, (), ()):
+        if current is None and raw_payload == (0, count, (), (), ()):
             return SegmentationResult(created=False)
+
+        # A REAL change: apply the temporary-title writer rules. A True
+        # flag with a non-blank title must EXACTLY equal the CURRENT
+        # server-derived name (forgery); a blank True-flag title is
+        # filled with it; a False flag validates the custom title
+        # exactly as before.
+        if splits:
+            bounds = (start,) + splits + (end_exclusive,)
+            topic_sections = []
+            for i in range(1, len(bounds)):
+                ordinal = i
+                title = topic_titles[i - 1]
+                flag = topic_flags[i - 1]
+                if flag:
+                    expected = derive_temporary_section_title(
+                        recording, ordinal, timezone_name
+                    )
+                    if title and title != expected:
+                        raise SegmentationError("title_flag_forgery")
+                    title = expected
+                else:
+                    _validate_title(title)
+                topic_sections.append(
+                    (ordinal, bounds[i - 1], bounds[i], title, flag)
+                )
+        else:
+            topic_sections = []
 
         now = timezone.now()
         superseded_revision = None
@@ -541,10 +704,11 @@ def _save_locked(
                     segmented_version=version,
                     ordinal=ordinal,
                     title=title,
+                    title_is_temporary=flag,
                     start_segment_ordinal=lo,
                     end_segment_ordinal_exclusive=hi,
                 )
-                for ordinal, lo, hi, title in topic_sections
+                for ordinal, lo, hi, title, flag in topic_sections
             ]
         )
         return SegmentationResult(
@@ -568,7 +732,9 @@ def range_label(start: int, end_exclusive: int) -> str:
     return f"segments {start}–{end_exclusive - 1}"
 
 
-def segmentation_fingerprint(recording_id, transcript, *, using: str = "default") -> str:
+def segmentation_fingerprint(
+    recording_id, transcript, *, timezone_name: str = "UTC", using: str = "default"
+) -> str:
     """Opaque read-only fingerprint of the segmentation state a page was
     rendered from.
 
@@ -582,7 +748,11 @@ def segmentation_fingerprint(recording_id, transcript, *, using: str = "default"
     - the active ``SegmentedVersion`` identity/revision/range and its
       canonical bounded section metadata (via
       :func:`canonical_layout_for_transcript` — malformed stored state
-      raises ``layout_invalid``, it is never folded into the hash).
+      raises ``layout_invalid``, it is never folded into the hash);
+    - the timezone name and the recording's effective timestamp
+      (``recorded_at`` else ``discovered_at``): temporary split titles
+      are derived from them, so a change in either invalidates every
+      rendered save form.
 
     The value is OPAQUE: titles/ids never appear in the hidden form value.
     The confirmed save re-computes this after the pipeline lock and treats
@@ -595,6 +765,17 @@ def segmentation_fingerprint(recording_id, transcript, *, using: str = "default"
         .values_list("pk", flat=True)
         .first()
     )
+    effective_row = (
+        Recording.objects.using(using)
+        .filter(pk=str(recording_id))
+        .values_list("recorded_at", "discovered_at")
+        .first()
+    )
+    effective_iso = None
+    if effective_row is not None:
+        effective = effective_row[0] or effective_row[1]
+        if effective is not None:
+            effective_iso = effective.isoformat()
     count, lo, hi = _transcript_stats(transcript, using=using)
     active = (
         SegmentedVersion.objects.using(using)
@@ -618,6 +799,8 @@ def segmentation_fingerprint(recording_id, transcript, *, using: str = "default"
         "segment_count": count,
         "segment_lo": lo,
         "segment_hi": hi,
+        "timezone": timezone_name,
+        "effective_at": effective_iso,
         "version": version_state,
     }
     return hashlib.sha256(
@@ -625,16 +808,25 @@ def segmentation_fingerprint(recording_id, transcript, *, using: str = "default"
     ).hexdigest()
 
 
-def validate_payload_for_transcript(recording, transcript, payload, *, using: str = "default") -> None:
+def validate_payload_for_transcript(
+    recording, transcript, payload, *, timezone_name: str = "UTC", using: str = "default"
+) -> None:
     """READ-ONLY semantic validation of a parsed payload (no lock/recovery/
     write). Rejects, with a fixed sanitized category:
 
     - a transcript that is not the recording's ACTIVE transcript;
     - a nonempty non-contiguous segment shape;
     - out-of-bounds/empty ranges, endpoint/out-of-range/duplicate splits;
-    - blank/oversized/control-character titles;
+    - blank/oversized/control-character titles (custom titles) and
+      temporary-title flag forgeries (a True-flag non-blank title that
+      does not EXACTLY equal the server-derived ``Segment N of
+      YYYYMMDDHHMM`` value for its ordinal) — EXCEPT for an UNCHANGED
+      payload, whose stored temporary titles are immutable creation-time
+      metadata and remain a usable no-op even after the effective
+      timestamp/timezone changed;
     - a corrupt current active layout (fail-closed, via the shared
-      canonical validator).
+      canonical validator — a temporary row with an arbitrary custom
+      title is corrupt).
 
     The fingerprint STALENESS comparison is deliberately NOT part of this
     helper: the first POST compares it in the view before showing the
@@ -665,18 +857,53 @@ def validate_payload_for_transcript(recording, transcript, payload, *, using: st
             raise SegmentationError("split_out_of_range")
         if marker == start or marker == end:
             raise SegmentationError("split_at_endpoint")
-    for title in payload["titles"]:
-        _validate_title(title)
+
+    # Title + temporary-flag validation: exact flags only (cardinality and
+    # type). For a REAL change, a True flag with a non-blank title must
+    # EXACTLY equal the CURRENT server-derived temporary title (forgery)
+    # and a False flag validates the custom title exactly as before. An
+    # UNCHANGED payload (a no-op re-submission of the current active
+    # layout) skips the current-timestamp equality check: stored
+    # temporary titles are immutable creation-time metadata and remain
+    # usable even when the effective timestamp/timezone later changed.
+    flags = payload["title_is_temporary"]
+    if len(flags) != len(payload["titles"]):
+        raise SegmentationError("title_flag_count_mismatch")
+    for flag in flags:
+        if type(flag) is not bool:
+            raise SegmentationError("invalid_input")
 
     # Existing current state: the active layout must be canonical (fail
-    # closed on corrupt stored state before any confirmation/execution).
+    # closed on corrupt stored state before any confirmation/execution;
+    # a corrupt temporary row raises layout_invalid here).
     current = (
         SegmentedVersion.objects.using(using)
         .filter(transcript=transcript, is_active=True)
         .first()
     )
+    raw_payload = (
+        payload["start"],
+        payload["end_exclusive"],
+        tuple(payload["splits"]),
+        tuple(payload["titles"]),
+        tuple(flags),
+    )
+    unchanged = False
     if current is not None:
-        canonical_layout_for_transcript(current, transcript, using=using)
+        unchanged = _canonical_payload(current, transcript, using=using) == raw_payload
+    elif raw_payload == (0, count, (), (), ()):
+        unchanged = True
+    if unchanged:
+        return
+
+    for index, title in enumerate(payload["titles"]):
+        flag = flags[index]
+        if flag:
+            expected = derive_temporary_section_title(recording, index + 1, timezone_name)
+            if title and title != expected:
+                raise SegmentationError("title_flag_forgery")
+        else:
+            _validate_title(title)
 
 
 def _require_decimal_int(value) -> int:
@@ -703,6 +930,7 @@ _ALLOWED_FIELDS = frozenset(
         "confirmed",
         "split",
         "title",
+        "title_is_temporary",
     }
 )
 
@@ -734,14 +962,18 @@ def parse_segmentation_payload(data) -> dict:
       canonical 64-lowercase-hex SHA-256);
     - ``confirmed`` absent or exactly one ``1``;
     - ``csrfmiddlewaretoken`` at most once (CSRF control);
-    - ``split`` (<= ``MAX_TOPIC_SECTIONS - 1``) and ``title``
+    - ``split`` (<= ``MAX_TOPIC_SECTIONS - 1``), ``title``
+      (<= ``MAX_TOPIC_SECTIONS``) and ``title_is_temporary``
       (<= ``MAX_TOPIC_SECTIONS``) as the only bounded repeated fields;
+      every ``title_is_temporary`` value is exactly ``1`` or ``0`` and —
+      when present — the count must exactly equal the title count
+      (absent flags normalize to all ``0`` = custom, the legacy default);
     - unknown fields rejected.
 
     Returns
     ``{"transcript_id", "start", "end_exclusive", "splits", "titles",
-    "fingerprint", "confirmed"}``. Semantic validation against the
-    database is deliberately NOT here — see
+    "title_is_temporary", "fingerprint", "confirmed"}``. Semantic
+    validation against the database is deliberately NOT here — see
     :func:`validate_payload_for_transcript` (first POST) and
     :func:`save_segmented_version` (confirmed, transactional).
     """
@@ -787,12 +1019,31 @@ def parse_segmentation_payload(data) -> dict:
     topic_count = len(splits) + 1 if splits else 0
     if len(titles) != topic_count:
         raise SegmentationError("title_count_mismatch")
+
+    # Temporary-title flags: exact ``0``/``1`` values only (nothing else —
+    # ``True``/``on``/blank/foreign digits are rejected before any lock).
+    flag_values = data.getlist("title_is_temporary")
+    if len(flag_values) > MAX_TOPIC_SECTIONS:
+        raise SegmentationError("too_many_topics")
+    if flag_values:
+        if len(flag_values) != len(titles):
+            raise SegmentationError("title_flag_count_mismatch")
+        flags = []
+        for value in flag_values:
+            if value not in ("0", "1"):
+                raise SegmentationError("invalid_input")
+            flags.append(value == "1")
+    else:
+        # Legacy payload without flags: every title is custom (migration
+        # 0013 default). The editor always sends explicit flags.
+        flags = [False] * len(titles)
     return {
         "transcript_id": transcript_id,
         "start": start,
         "end_exclusive": end_exclusive,
         "splits": splits,
         "titles": titles,
+        "title_is_temporary": flags,
         "fingerprint": fingerprint,
         "confirmed": confirmed,
     }

@@ -34,6 +34,7 @@
   {% endfor %}
   {% for split in payload.splits %}<input type="hidden" name="split" value="{{ split }}">{% endfor %}
   {% for title in payload.titles %}<input type="hidden" name="title" value="{{ title }}">{% endfor %}
+  {% for flag in payload.title_is_temporary %}<input type="hidden" name="title_is_temporary" value="{% if flag %}1{% else %}0{% endif %}">{% endfor %}
   <input type="hidden" name="confirmed" value="1">
   <p class="confirm-buttons">
     <button type="submit" class="confirm-button">Yes, save revision</button>

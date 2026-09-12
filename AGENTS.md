@@ -373,7 +373,7 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- Migrations `0001`–`0012` define the current schema (0007 is the
+- Migrations `0001`–`0013` define the current schema (0007 is the
   multilingual-summary migration: `Summary.output_language`,
   `SummaryVariantState`, transcript language-verification fields;
   intentionally irreversible — repair it in place, never add an 0008
@@ -408,7 +408,11 @@ Non-negotiable principles:
   recording-only constraints — additive and fully reversible, no data
   migration (existing rows stay recording-scoped; the reverse deletes
   section-only assignment rows before restoring the old global
-  `(recording, tag)` unique, preserving recording assignments)). Add NEW
+  `(recording, tag)` unique, preserving recording assignments); 0013 is
+  the approved Step-6.2a temporary-split-title migration: the nullable
+  `Section.title_is_temporary` Boolean (default False, existing rows
+  migrate as custom) — additive and fully reversible with no data
+  migration). Add NEW
   migrations, never
   edit existing/applied ones. Enforce invariants with DB constraints
   (partial uniques, check constraints), not just application logic.
@@ -856,10 +860,11 @@ Non-negotiable principles:
   status/rebuild/repair (above); **5B.4 (delivered — see the dedicated
   bullet below)** incremental embedding synchronization. **Step 5C
   semantic/hybrid retrieval is now delivered too** (see the Step 5C
-  bullet below) and **Step 5D Ask with Citations is delivered too**
-  (see the Step 5D bullet below); **Step 6.0, Step 6.1 and Step 6.2 are
-  delivered** (see the Step 6 bullets below) and the next planned work is
-  **Step 6.3**.
+bullet below) and **Step 5D Ask with Citations is delivered too**
+   (see the Step 5D bullet below); **Step 6.0, Step 6.1, Step 6.2 and
+   Step 6.2a are delivered** (see the Step 6 bullets below) and the next
+   planned work is
+   **Step 6.3**.
 - **Step 5B.4 — Incremental embedding synchronization (delivered)**:
   `workflow/services/embedding_sync.py` is the ONLY incremental
   `EmbeddingDocument` writer; `embedding_index.py` keeps the explicit
@@ -1199,6 +1204,15 @@ Non-negotiable principles:
     `recover_interruptions`, guarded by the OPAQUE bounded
     `section_state_fingerprint` — SELECT-only; stale/duplicate
     submissions are safe no-ops, lock busy is the friendly 409). The
+    confirmation's `Back to section` anchor carries the narrowly scoped
+    `data-confirm-exempt` marker and STAYS enabled/clickable while the
+    synchronous request runs — the user explicitly accepts that
+    navigating away mid-request may abort the connection (a dev-server
+    Broken pipe response write is possible) — while the submit button
+    still disables/relabels, duplicate submits stay blocked, and the
+    Cancel link and every other confirmation anchor keep the full
+    disable behaviour (`app.js` `initConfirmForms` skips only
+    `[data-confirm-exempt]` anchors). The
     target must be a TOPIC Section of the ACTIVE transcript's ACTIVE
     layout (shared `segmentation.require_active_topic_section`); fixed,
     historical, cross-parent and malformed-layout targets are stable
@@ -1244,6 +1258,157 @@ Non-negotiable principles:
     warning; `manage.py check`,
     `makemigrations --check` (0012) and `git diff --check` clean; the
     focused Step 6.1/6.2 section set is **326 passed**. No
+    real-database migration is claimed; the work and its tests are in
+    the working tree, uncommitted.
+- **Step 6.2a — Safe Library return, temporary split titles, derived
+  display title, section duration (delivered)**: a bounded follow-up to
+  6.2 that improves the section Library/detail UX; the search/index/Ask
+  contract is unchanged and **Step 6.3 remains unimplemented** (see the
+  explicit 6.3 requirement at the end of this bullet). Migration **0013**
+  is additive and fully reversible; NO real-database migration is
+  claimed and the work stays uncommitted in the working tree.
+  - **Safe Library return** (`workflow/services/library_return.py`):
+    ONE small server-signed (Django HMAC signer, salt-scoped, URL-safe
+    base64) token per NORMAL Library render encoding ONLY the canonical
+    validated normal-Library state: the `ListFilters.as_pairs()`
+    filter/sort pairs (STABLY DE-DUPLICATED so a redundant duplicate
+    tag value never survives), a bounded positive `page`, and the
+    `cards`/`table` view. The destination is ALWAYS
+    `reverse('recordings')`; a `lib_return` parameter present on the
+    Library is the SOLE carrier of state (a valid token ignores the raw
+    query string, including any `q` and any raw `view=` — which also
+    never mutates the view cookie), and an invalid/forged/oversized/
+    non-canonical token decodes to `None` so the Library falls back to
+    its PLAIN state using the view COOKIE/default only while ignoring
+    all raw query state. Decoding re-validates every pair through the
+    shared `list_filters(..., allow_relevance=False)` and requires an
+    exact canonical round-trip — a smuggled search query, `relevance`
+    sort, unknown, redundant or DUPLICATE pair rejects the WHOLE token.
+    The token is
+    added to the normal-Library recording AND section links
+    (recording-backed title links in card/table, the section-card parent
+    Recording link and the section title links) and propagated verbatim
+    through section-detail tabs, the section summary confirmation/
+    execution redirects (including the confirmation CANCEL link, built
+    only from the already validated token) and the section tag redirects;
+    `recording_detail` validates an optional `lib_return` through the
+    shared decoder and, when valid, restores the originating page/state
+    through its top-left `← Library` breadcrumb
+    (`library_return.return_url`); absent/invalid/forged tokens leave
+    the plain `reverse('recordings')` breadcrumb and are never echoed.
+    Direct section links
+    still work
+    and search results never generate a token (no search-origin
+    support). GETs stay strictly read-only.
+  - **Temporary split titles** (`workflow/services/segmentation.py` +
+    migration 0013 `Section.title_is_temporary`, Boolean default False,
+    existing rows custom): new editor-created ranges get the
+    server-authoritative `Segment N of YYYYMMDDHHMM` (N = the 1-based
+    canonical Section ordinal; timestamp = `recorded_at` else
+    `discovered_at` rendered in the CONFIGURED timezone). The editor
+    JSON carries a BOUNDED server-generated `temporary_titles` list
+    (index = ordinal − 1, capped at `MAX_TOPIC_SECTIONS`) so new
+    split-created sections are visibly PREFILLED immediately — the
+    browser clock is never used — and a carried-over temporary section
+    whose canonical ordinal CHANGED in a revised layout regenerates the
+    appropriate server title instead of retaining a mismatched
+    `Segment N`; ANY input event makes a title custom. The editor
+    payload carries bounded exact flags; the parser validates
+    cardinality and exact `0`/`1` values and the WRITER boundaries
+    require a new True-flag title to be blank OR EXACTLY equal the
+    CURRENT server-derived value (`title_flag_forgery`/`title_flag_count_mismatch`
+    — a custom title can never be claimed temporary); the no-op
+    comparison uses the RAW submitted payload, so an unchanged active
+    layout stays a ZERO-DML no-op even when the stored temporary titles
+    were derived under an older effective timestamp. READ-side
+    validation (canonical service reads, the fingerprint, the Library
+    SQL validity predicate) requires a True temporary flag to carry the
+    EXACT canonical SHAPE `Segment <ordinal> of <12 ASCII digits>` — an
+    arbitrary custom title on a temporary row is corrupt stored state
+    and fails closed (`layout_invalid`); reads NEVER compare a stored
+    temporary title to the CURRENT timestamp (titles are immutable
+    creation-time metadata). Existing exact ranges preserve
+    title/provenance, segmentation remains the ONLY writer, and layouts
+    stay immutable (a flag-only change creates a new revision). No
+    search/embedding sync is scheduled on save.
+  - **Derived display title** (`workflow/query.py` +
+    `views/recordings.py:section_detail`): `Section.title` is NEVER
+    mutated during summary generation. Whenever an active
+    DEFAULT-language section Summary exists, its `Summary.title` is the
+    Section's ONE user-facing title — it supersedes BOTH a stored
+    temporary title AND a manually entered custom title in presentation
+    (a display override only; the custom title stays layout
+    metadata/provenance, no prompt/new persistence is needed). The
+    Section detail page renders that title exactly once (H1/page
+    title): `_summary_body.html` suppresses only its embedded title
+    paragraph on Section detail (`suppress_title=True`, h3 hierarchy
+    retained) while Recording Detail and the standalone summary pages
+    keep their existing title rendering. Without a default Summary the
+    stored `Section.title` is used. The Library projection's derived
+    SQL expression (default Summary title first, stored title fallback)
+    drives BOTH the rendered title and the Title A–Z/Z–A ordering (they
+    can never diverge), and the section detail H1 is derived from the
+    DEFAULT variant only — optional variant titles never replace it and
+    switching tabs never changes the page identity.
+  - **Section duration** (`workflow/query.py`): section Library items
+    project an approximate duration — `(latest usable end_ms - earliest
+    usable start_ms) / 1000` where the two endpoints are selected
+    INDEPENDENTLY over the canonical range (the earliest NON-NULL
+    `start_ms` and the latest NON-NULL `end_ms`; a start-only first
+    segment and an end-only last segment still yield a span) — as one
+    bounded scalar subquery per projected page row
+    (never N+1/unbounded); recording items keep the recording's own
+    duration. `LibraryItemCard.duration_seconds` is safe `None`
+    ("unknown") when unavailable/nonpositive and renders in the normal
+    card/table; the section detail page always shows the same bounded
+    aggregate (rendering the literal `unknown` when unavailable).
+  - **Explicit 6.3 requirement (recorded, NOT implemented)**: the normal
+    Library tag filters ALREADY suppress a valid split parent and use
+    the active Section items (the derived projection); the current
+    keyword/semantic/hybrid/Ask stack remains whole-recording-only and
+    unchanged. The user requires **Step 6.3 to mirror that Library
+    replacement**: a valid active split layout must yield the active
+    Section search/filter results with the parent recording result
+    SUPPRESSED — never parent + section duplicates — while
+    historical/malformed layouts fail closed. Step 6.3 remains
+    unimplemented.
+  - **Section-scoped summary status + Section-origin returns (bug-fix
+    delivery)**: the Section detail status panel is Section-scoped
+    (`_section_summary_panel` over the selected `VariantView`) — derived
+    ONLY from the Section variant state (`Section summary current` /
+    `Section re-summarization failed` with the kept-summary note /
+    `Section summary failed` / `Section summary not generated`,
+    explicitly this section/language variant), never the parent
+    Recording summary tuple; the misleading parent "summary missing"
+    text and the `(inherited from the parent recording)` note are gone
+    and the panel label is `Section summary status`. The three
+    Section-detail links (History, Section in transcript, Full
+    transcript) carry a server-owned bounded `return_section=<Section pk>`
+    marker plus the already validated `lib_return` token when present;
+    History and transcript GETs validate `return_section` as an exact
+    positive ASCII-decimal integer naming a readable canonical topic
+    Section of the URL recording (active or historical; fixed/malformed/
+    cross-parent fail closed) and label the breadcrumb `← Section`
+    pointing to the exact Section detail (with a valid `lib_return` if
+    supplied) — the plain `← Recording overview` is retained otherwise
+    and nothing unsafe is echoed. Transcript pagination preserves only
+    the validated return parameters; History internal `v`/`layout`
+    links, recording-origin pages, action flows and search are NOT
+    broadened; GETs stay strictly read-only.
+  - **Verification (independently confirmed, current state)**: full
+    suite **2857 collected and 2857 passed** (the Step 6.2a state was
+    2819 — historical; the bug-fix delta is **38 tests** added across
+    `tests/test_web_section_detail.py` (14), `tests/test_web_history.py`
+    (8), `tests/test_web_segmentation.py` (13),
+    `tests/test_web_section_summarize.py` (1) and
+    `tests/test_temporary_section_titles.py` (2); the focused Step
+    6.2a/6.2 web set is **255 passed**
+    (`tests/test_library_return_token.py`,
+    `tests/test_temporary_section_titles.py`,
+    `tests/test_section_title_migration_0013.py`,
+    `tests/test_web_segmentation.py`, `tests/test_web_library.py`)),
+    only the known `audioop` warning; `manage.py check`,
+    `makemigrations --check` (0013) and `git diff --check` clean. No
     real-database migration is claimed; the work and its tests are in
     the working tree, uncommitted.
 - Do not implement features from a later step, and do not claim

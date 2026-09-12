@@ -33,6 +33,7 @@ from workflow.models import (
     ProcessingAttempt,
     Recording,
     Section,
+    Summary,
     SummaryState,
     SummaryVariantState,
 )
@@ -120,11 +121,17 @@ class TestFirstPost:
         assert 'name="section_id"' in content
         assert ProcessingAttempt.objects.filter(recording=rec).count() == attempts_before
 
-    def test_first_post_confirmation_has_back_to_recording_link(self, client):
+    def test_first_post_confirmation_has_back_to_section_link(self, client):
         """SECTION summarization confirmations carry an explicit,
-        always-visible ``Back to recording`` anchor to the parent
-        recording detail page, while the existing Cancel link back to the
-        section detail page stays."""
+        always-visible ``Back to section`` anchor to the section detail
+        page (the server-provided safe cancel URL) — never the parent
+        recording page, whose plain breadcrumb could not restore a
+        tokenized Library state. The anchor carries the narrowly scoped
+        ``data-confirm-exempt`` marker so the JS busy guard leaves it
+        clickable while the synchronous request runs (the user explicitly
+        accepts that navigating away may abort the connection); the
+        existing Cancel link back to the section detail page stays
+        non-exempt and keeps the disable behaviour."""
         rec, _t, sections = _split(sha="sec-web-back")
         response = client.post(
             _post_url(rec, sections[0]),
@@ -132,15 +139,20 @@ class TestFirstPost:
         )
         assert response.status_code == 200
         content = response.content.decode()
-        # The link is a plain anchor with no extra attributes (never
-        # disabled), so it stays usable after the submit button is
-        # relabelled "Running…" by the JS handler.
-        assert f'<a href="/recordings/{rec.pk}/">Back to recording</a>' in content
-        # The existing Cancel link back to the section detail page stays.
+        # Without a library-return token the Back link is the plain
+        # section detail URL — never the parent recording detail page.
+        assert (
+            f'<a href="/recordings/{rec.pk}/sections/{sections[0].pk}/" '
+            "data-confirm-exempt>Back to section</a>"
+        ) in content
+        assert f'href="/recordings/{rec.pk}/"' not in content
+        # The existing Cancel link back to the section detail page stays,
+        # and it is NOT exempt from the busy guard.
         assert (
             f'<a href="/recordings/{rec.pk}/sections/{sections[0].pk}/">Cancel</a>'
             in content
         )
+        assert "data-confirm-exempt>Cancel</a>" not in content
 
     def test_first_post_validates_language(self, client):
         rec, _t, sections = _split()
@@ -770,15 +782,18 @@ class TestLockContention:
 
 
 class TestSharedConfirmationPagesUnchanged:
-    """The ``Back to recording`` link is added ONLY to SECTION
+    """The ``Back to section`` link is added ONLY to SECTION
     summarization confirmations. The recording-level confirmation pages
     share the same ``action_confirm.html`` template but must stay
-    unchanged: no ``Back to recording`` link, and Cancel still targets
-    the recording detail page. The confirm-form JS disables only the
-    submit button, so the section page's link remains a normal usable
-    anchor after submit while the button reads ``Running…``."""
+    unchanged: no ``Back to section`` link, and Cancel still targets
+    the recording detail page. The confirm-form JS disables the submit
+    button AND every navigation anchor inside the form while the
+    synchronous POST is running, so Back/Cancel cannot abort the
+    in-flight request — except the ONE narrowly scoped ``Back to
+    section`` escape (``[data-confirm-exempt]``), which stays clickable
+    while the request runs."""
 
-    def test_recording_level_confirmations_have_no_back_to_recording_link(self, client):
+    def test_recording_level_confirmations_have_no_back_to_section_link(self, client):
         rec, _t, _s = _split(sha="sec-shared-1")
         cases = [
             ("/route/", {"profile": "mandarin"}),
@@ -794,11 +809,14 @@ class TestSharedConfirmationPagesUnchanged:
             )
             assert response.status_code == 200, suffix
             content = response.content.decode()
+            assert "Back to section" not in content, suffix
             assert "Back to recording" not in content, suffix
-            # Cancel still targets the recording detail page.
+            # Cancel still targets the recording detail page and is never
+            # exempt from the busy guard.
             assert f'<a href="/recordings/{rec.pk}/">Cancel</a>' in content, suffix
+            assert "data-confirm-exempt" not in content, suffix
 
-    def test_confirm_form_js_disables_only_the_submit_button(self):
+    def test_confirm_form_js_disables_anchors_while_running(self):
         from pathlib import Path
 
         from django.contrib.staticfiles import finders
@@ -807,12 +825,109 @@ class TestSharedConfirmationPagesUnchanged:
         start = source.index("function initConfirmForms()")
         end = source.index("var FOCUSABLE_SELECTOR", start)
         block = source[start:end]
-        # The busy guard disables and relabels ONLY the submit button...
+        # The busy guard disables and relabels the submit button and
+        # marks the form busy (existing behaviour)...
         assert 'form.querySelector(\'button[type="submit"]\')' in block
         assert "button.disabled = true" in block
         assert 'button.textContent = "Running…"' in block
-        # ...and never touches anchors, so the Back to recording link
-        # stays a normal usable anchor after submit.
-        assert "href" not in block
-        assert 'querySelectorAll("a' not in block
-        assert "querySelectorAll('a" not in block
+        assert 'form.setAttribute("aria-busy", "true")' in block
+        # ...and makes EVERY navigation anchor inside the form
+        # non-actionable while the synchronous POST is running: removed
+        # from the tab order, marked aria-disabled, click-suppressed and
+        # given the visible disabled CSS class. The button alone is not
+        # enough — a still-clickable Back/Cancel aborts the request.
+        assert "form.querySelectorAll('a[href]')" in block
+        assert 'link.setAttribute("tabindex", "-1")' in block
+        assert 'link.setAttribute("aria-disabled", "true")' in block
+        assert 'link.classList.add("confirm-form-link-disabled")' in block
+        assert "event.preventDefault()" in block
+        # The ONE narrowly scoped exemption: a ``[data-confirm-exempt]``
+        # anchor (the Section ``Back to section`` escape) is skipped by
+        # the disable loop and stays enabled/clickable while running.
+        assert 'link.hasAttribute("data-confirm-exempt")' in block
+        # The visible disabled state is actually styled.
+        css = Path(finders.find("workflow/base.css")).read_text(encoding="utf-8")
+        assert ".confirm-form-link-disabled" in css
+
+
+class TestRealSectionGenerationIntegration:
+    """Objective A integration: run confirmed Section generation through
+    the REAL web/service orchestration (``execute_section_summarize``,
+    the pipeline lock/recovery and ``summarize_section_one``) with ONLY
+    the LLM boundary stubbed, then follow the redirect and prove the
+    Section-scoped status panel is honest while the parent Recording
+    summary tuple may remain MISSING."""
+
+    def _integration_config(self, tmp_path):
+        from brainlib.config import LLMConfig
+
+        from factories import make_config
+
+        return make_config(
+            tmp_path,
+            llm=LLMConfig(
+                provider="openai_compatible",
+                base_url="http://127.0.0.1:1/v1",
+                model="test-model",
+                api_key_env="BRAIN_TEST_LLM_API_KEY",
+                temperature=0.2,
+                timeout_seconds=600,
+            ),
+        )
+
+    def test_confirmed_generation_section_panel_current(self, client, tmp_path, monkeypatch):
+        from factories import final_summary_json
+
+        rec, transcript, sections = _split(sha="sec-integration")
+        section = sections[0]
+        # The parent Recording starts with no whole-recording summary.
+        assert rec.summary_status == SummaryState.MISSING
+
+        # Stub ONLY the LLM boundary: the real section service, the real
+        # web orchestration, the pipeline lock and recovery all run.
+        def fake_chat(config, **kwargs):
+            return final_summary_json(
+                title="Integration Section Summary",
+                overview="Integration overview text.",
+            )
+
+        monkeypatch.setattr(
+            "workflow.services.summarize.llm_service.chat_completion", fake_chat
+        )
+        monkeypatch.setattr(
+            "workflow.views.actions.get_config",
+            lambda: self._integration_config(tmp_path),
+        )
+
+        fingerprint = section_state_fingerprint(rec, section)
+        response = client.post(
+            _post_url(rec, section),
+            {"confirmed": "1", "language": "default", "mode": "first",
+             "fingerprint": fingerprint},
+        )
+        assert response.status_code == 302
+        detail = client.get(response["Location"]).content.decode()
+
+        # Active Summary with the exact section/transcript/output language.
+        summary = Summary.objects.get(
+            transcript=transcript, section=section, output_language="en", is_active=True
+        )
+        assert summary.title == "Integration Section Summary"
+        # Linked successful attempt.
+        assert summary.attempt is not None
+        assert summary.attempt.outcome == AttemptOutcome.SUCCESS
+        # Current Section-scoped variant state.
+        variant_state = SummaryVariantState.objects.get(
+            transcript=transcript, section=section, output_language="en"
+        )
+        assert variant_state.status == SummaryVariantState.VariantStatus.CURRENT
+        # The generated summary renders on the section detail page.
+        assert "Integration Section Summary" in detail
+        assert "Integration overview text." in detail
+        # The parent Recording tuple MAY remain missing while the Section
+        # panel says current and never shows the misleading parent text.
+        rec.refresh_from_db()
+        assert rec.summary_status == SummaryState.MISSING
+        assert "Section summary current" in detail
+        assert "An active transcript exists but the current summary is missing" not in detail
+        assert "inherited from the parent recording" not in detail

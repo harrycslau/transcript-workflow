@@ -3,7 +3,7 @@
 {% block title %}{{ card.title }} — Brain{% endblock %}
 {% block content %}
 <p class="breadcrumb muted">
-  <a href="{% url 'recordings' %}">&larr; Library</a>
+  <a href="{{ library_return_url }}">&larr; Library</a>
 </p>
 
 <div class="detail-header">

@@ -473,6 +473,112 @@ Bounded to structure/history only. The concrete implementation plan is
   destructive retention command is scheduled (D9/D10, §10).
 - No new framework/dependency.
 
+## 9a. Step 6.2a — Safe Library return, temporary split titles, derived display title, section duration (delivered)
+
+A bounded follow-up to 6.2 delivered in the working tree (migration
+0013). It changes NO search/index/Ask contract and **Step 6.3 remains
+unimplemented**.
+
+- **Safe Library return.** ONE small server-signed token per normal
+  Library render encoding ONLY canonical validated normal-Library
+  state: the `ListFilters.as_pairs()` filter/sort pairs (stably
+  de-duplicated so a redundant duplicate tag never survives), a bounded
+  positive `page`, and the `cards`/`table` view. Destination is always
+  `reverse('recordings')`. A `lib_return` parameter is the SOLE carrier
+  of state: a valid token ignores the raw query string including any
+  `q` and any raw `view=` (which never mutates the view cookie), and an
+  invalid/forged/oversized/non-canonical token falls back to the plain
+  Library using the view cookie/default only while ignoring all raw
+  query state; a duplicate pair rejects the whole token on decode. The
+  token rides the normal-Library recording AND section links
+  (recording-backed title links in card/table, the section-card parent
+  Recording link and the section title links) and propagates verbatim
+  through section-detail tabs, the section summary confirmation/
+  execution redirects (including the confirmation CANCEL link, built
+  only from the already validated token) and the section tag redirects;
+  `recording_detail` validates an optional `lib_return` through the
+  shared decoder and, when valid, restores the originating page/state
+  through its top-left `← Library` breadcrumb
+  (`library_return.return_url`); absent/invalid/forged tokens leave
+  the plain `reverse('recordings')` breadcrumb and are never echoed.
+  Direct section links
+  still work; search results never generate a token (no search-origin
+  support).
+- **Temporary split titles.** New editor-created ranges get the
+  server-authoritative `Segment N of YYYYMMDDHHMM` (N = the 1-based
+  canonical section ordinal; timestamp = `recorded_at` else
+  `discovered_at` in the configured timezone). The editor JSON carries a
+  bounded server-generated `temporary_titles` list (index = ordinal −
+  1) so new split-created sections are visibly prefilled immediately —
+  never from the browser clock — and a carried-over temporary section
+  whose ordinal changed regenerates its server title. The editor
+  payload carries bounded exact flags; the parser/service validate
+  cardinality/type and the WRITER requires a new True flag's non-blank
+  title to EXACTLY equal the current server-derived value (a custom
+  title can never be claimed temporary), while the no-op comparison
+  uses the raw submitted payload so an unchanged layout stays a
+  zero-DML no-op even after effective-timestamp drift. READ-side
+  validation (canonical service reads and the Library SQL predicate)
+  requires a True flag to carry the exact canonical shape
+  `Segment <ordinal> of <12 ASCII digits>` and never compares a stored
+  title to the current timestamp (titles are immutable creation-time
+  metadata). Blank True-flag titles are filled at save; editing a title
+  makes it custom; existing exact ranges preserve title/provenance;
+  layouts stay immutable; migration 0013 adds
+  `Section.title_is_temporary` (Boolean, default False, existing rows
+  custom) — additive and fully reversible.
+- **Derived display title.** `Section.title` is NEVER mutated during
+  summary generation. Whenever an active DEFAULT-language section
+  Summary exists its `Summary.title` is the Section's ONE user-facing
+  title — it supersedes BOTH a stored temporary title AND a manually
+  entered custom title in presentation (display override only; the
+  custom title stays layout metadata/provenance). The Section detail
+  page renders that title exactly once (H1/page title) — the
+  `_summary_body.html` embedded title paragraph is suppressed there
+  (`suppress_title=True`, h3 hierarchy retained) while Recording Detail
+  keeps its embedded title paragraph. Without a default Summary the
+  stored `Section.title` is used. The Library's derived SQL expression
+  (default Summary title first, stored title fallback) drives both the
+  rendered title and Title A–Z/Z–A ordering; optional variant titles
+  never replace the H1 and switching tabs never changes the page
+  identity. This supersedes the earlier "custom titles always win"
+  display invariant, but NOT custom ownership/storage.
+- **Section duration.** Library section items project an approximate
+  duration from the canonical range's usable segment span, safe unknown
+  when unavailable/nonpositive; recording items keep the recording
+  duration; no N+1/unbounded reads; the duration renders in the normal
+  card/table and on section detail.
+- **Explicit 6.3 requirement (recorded, NOT implemented).** The normal
+  Library tag filters ALREADY suppress a valid split parent and use the
+  active Section items (the derived projection). The user requires
+  **Step 6.3 to mirror that Library replacement**: a valid active split
+  layout must yield the active Section search/filter results with the
+  parent recording result SUPPRESSED — never parent + section
+  duplicates — while historical/malformed layouts fail closed. The
+  current keyword/semantic/hybrid/Ask stack remains
+  whole-recording-only and unchanged; 6.3 is not implemented.
+- **Section-scoped summary status + Section-origin returns (bug-fix
+  delivery).** The Section detail status panel is Section-scoped
+  (`_section_summary_panel` over the selected `VariantView`) — derived
+  ONLY from the Section variant state (current / regeneration_failed /
+  failed / not-generated, explicitly this section/language variant),
+  never the parent Recording summary tuple; the misleading parent
+  "summary missing" text and the `(inherited from the parent recording)`
+  note are gone and the panel label is `Section summary status`. The
+  three Section-detail links (History, Section in transcript, Full
+  transcript) carry a server-owned bounded `return_section=<Section pk>`
+  marker plus the already validated `lib_return` token when present;
+  History and transcript GETs validate `return_section` as an exact
+  positive ASCII-decimal integer naming a readable canonical topic
+  Section of the URL recording (active or historical; fixed/malformed/
+  cross-parent fail closed) and label the breadcrumb `← Section`
+  pointing to the exact Section detail (with a valid `lib_return` if
+  supplied) — the plain `← Recording overview` is retained otherwise and
+  nothing unsafe is echoed. Transcript pagination preserves only the
+  validated return parameters; History internal `v`/`layout` links,
+  recording-origin pages, action flows and search are NOT broadened;
+  GETs stay strictly read-only.
+
 ## 10. Separate unresolved approval gates
 
 These are explicitly **not approved** by Step 6.0 and remain separate,
