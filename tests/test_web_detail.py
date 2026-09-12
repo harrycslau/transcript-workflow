@@ -352,6 +352,40 @@ class TestDetailTagEditorMarkup:
         assert "/tags/{}/confirm/".format(suggested.pk) in content
         assert "/tags/{}/remove/".format(manual.pk) in content
 
+    def test_section_scoped_tags_do_not_render_as_recording_chips(self, client):
+        """Defense-in-depth: the Library/detail tag chips stay
+        whole-recording only; a Step 6.2 section-scoped assignment is a
+        per-section concern and never appears on the recording."""
+        from django.utils import timezone as dj_timezone
+
+        from workflow.models import Section, SegmentedVersion, TagAssignment
+
+        recording, _t, _s, _summary = _summary_recording()
+        transcript = recording.transcripts.get(is_active=True)
+        version = SegmentedVersion.objects.create(
+            transcript=transcript, revision=1, start_segment_ordinal=0,
+            end_segment_ordinal_exclusive=2, is_active=True,
+            activated_at=dj_timezone.now(),
+        )
+        topic = Section.objects.create(
+            transcript=transcript, segmented_version=version, ordinal=1,
+            title="Topic", start_segment_ordinal=0, end_segment_ordinal_exclusive=2,
+        )
+        rec_tag = make_tag("RecChip")
+        sec_tag = make_tag("SecChip")
+        make_tag_assignment(recording, rec_tag, origin="manual")
+        TagAssignment.objects.create(
+            recording=recording, section=topic, tag=sec_tag,
+            origin="manual", is_active=True,
+        )
+        content = client.get(f"/recordings/{recording.pk}/").content.decode()
+        assert "RecChip" in content
+        # RecChip renders as an ACTIVE chip; SecChip appears only as an
+        # available option inside the + Add tag modal (never as a chip).
+        assert '<li class="tag-chip tag-manual"' in content
+        assert 'data-tag-name="RecChip"' in content or 'tag-manual">RecChip' in content
+        assert 'tag-manual">SecChip' not in content
+
     def test_add_editor_renders_one_bulk_form_with_checkboxes(self, client):
         recording, _t, _s, _summary = _summary_recording()
         work = make_tag("Work")
@@ -543,8 +577,8 @@ class TestEnhancedDetailsOverlay:
     def test_versioned_static_urls_on_detail(self, client):
         recording, _t, _s, _summary = _summary_recording()
         content = client.get(f"/recordings/{recording.pk}/").content.decode()
-        assert 'href="/static/workflow/base.css?v=3"' in content
-        assert 'src="/static/workflow/app.js?v=3" defer' in content
+        assert 'href="/static/workflow/base.css?v=5"' in content
+        assert 'src="/static/workflow/app.js?v=5" defer' in content
 
 
 class TestBulkTagEditorMarkup:

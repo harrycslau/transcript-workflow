@@ -169,7 +169,7 @@
 {% else %}
 
 <div class="results-header">
-  <span class="results-count">{{ page.paginator.count }} recording{{ page.paginator.count|pluralize }}</span>
+  <span class="results-count">{{ page.paginator.count }} item{{ page.paginator.count|pluralize }}</span>
 </div>
 
 {% if cards %}
@@ -177,7 +177,7 @@
   {% if effective_view == 'table' %}
     <div class="recording-table-wrap">
       <table class="recording-table">
-        <caption class="visually-hidden">Recordings</caption>
+        <caption class="visually-hidden">Library items</caption>
         <thead>
           <tr>
             <th scope="col">Date &amp; time</th>
@@ -194,11 +194,25 @@
               {% ifchanged card.month_label %}<tr class="month-separator"><td colspan="6">{{ card.month_label }}</td></tr>{% endifchanged %}
             {% endif %}
             <tr class="{% if card.needs_attention %}needs-attention{% endif %}">
-              <td data-label="Date &amp; time">{{ card.effective_at_label }} {{ card.effective_at|local_time }}</td>
-              <td data-label="Title"><a class="col-title" href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a></td>
+              <td data-label="Date &amp; time">{% if card.effective_at_label == 'Recorded' %}{{ card.effective_at|local_time }}{% else %}Discovered {{ card.effective_at|local_time }}{% endif %}</td>
+              <td data-label="Title">
+                {% if card.is_section %}
+                  <a class="col-title" href="{% url 'section-detail' card.recording.pk card.section_id %}">{{ card.title }}</a>
+                {% else %}
+                  <a class="col-title" href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a>
+                {% endif %}
+              </td>
               <td data-label="Duration">{{ card.recording.duration_seconds|duration }}</td>
               <td data-label="Tags">{% for assignment in card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
-              <td data-label="Languages">{% for lang in card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
+              <td data-label="Languages">
+                {% if card.available_languages %}
+                  {% for lang in card.available_languages %}<span class="lang-code">{{ lang }}</span>{% endfor %}
+                {% elif card.is_section and card.summary_status == 'failed' %}
+                  <span class="warn-text">summary failed</span>
+                {% else %}
+                  <span class="muted">—</span>
+                {% endif %}
+              </td>
               <td data-label="Status"><span class="status status-{{ card.recording.processing_status }}">{{ card.recording.get_processing_status_display }}</span></td>
             </tr>
           {% endfor %}
@@ -213,18 +227,35 @@
         {% endif %}
         <li class="recording-card {% if card.needs_attention %}needs-attention{% endif %}">
           <div class="recording-card-header">
-            <div class="recording-card-title"><a href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a></div>
+            <div class="recording-card-title">
+              {% if card.is_section %}
+                <a href="{% url 'section-detail' card.recording.pk card.section_id %}">{{ card.title }}</a>
+              {% else %}
+                <a href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a>
+              {% endif %}
+            </div>
             <span class="status status-{{ card.recording.processing_status }}">{{ card.recording.get_processing_status_display }}</span>
           </div>
           <div class="recording-card-meta">
             <span>{{ card.effective_at_label }} {{ card.effective_at|local_time }}</span>
             <span>{{ card.recording.duration_seconds|duration }}</span>
             {% if card.active_route %}<span>{{ card.active_route.profile_name }}</span>{% endif %}
+            {% if card.is_section %}
+              <span class="section-context">Topic · {{ card.range_label }} · in <a href="{% url 'recording-detail' card.recording.pk %}">{{ card.parent_title }}</a></span>
+            {% endif %}
           </div>
           {% if card.overview_excerpt %}<p class="recording-card-excerpt">{{ card.overview_excerpt }}</p>{% endif %}
           <div class="recording-card-footer">
             <div class="recording-card-tags">{% for assignment in card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">no tags</span>{% endfor %}</div>
-            <div class="recording-card-langs" aria-label="Available summary languages">{% for lang in card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">no summaries</span>{% endfor %}</div>
+            <div class="recording-card-langs" aria-label="Available summary languages">
+              {% if card.available_languages %}
+                {% for lang in card.available_languages %}<span class="lang-code">{{ lang }}</span>{% endfor %}
+              {% elif card.is_section and card.summary_status == 'failed' %}
+                <span class="warn-text">summary failed</span>
+              {% else %}
+                <span class="muted">no summaries</span>
+              {% endif %}
+            </div>
           </div>
         </li>
       {% endfor %}
@@ -234,7 +265,7 @@
   {% include "workflow/_pagination.html" with page=page %}
 
 {% else %}
-  <p class="empty-state">No recordings match these filters.</p>
+  <p class="empty-state">No items match these filters.</p>
 {% endif %}
 
 {% endif %}

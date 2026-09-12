@@ -17,6 +17,7 @@ Design (per the approved plan):
 from __future__ import annotations
 
 from django.contrib import messages as dj_messages
+from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_POST
 
@@ -330,3 +331,211 @@ def action_retry(request, recording_id):
         expected_fingerprint=request.POST.get("fingerprint") or None,
     )
     return _redirect_outcome(request, recording, outcome)
+
+
+def _section_or_404(recording: Recording, section_id: int):
+    """Parent-scoped topic-Section lookup: the Section must belong to
+    ``recording`` (cross-recording/missing is a 404)."""
+    from workflow.models import Section
+
+    section = Section.objects.filter(
+        pk=section_id, transcript__recording=recording
+    ).select_related("transcript", "segmented_version").first()
+    if section is None or section.segmented_version_id is None:
+        raise Http404("Section not found")
+    return section
+
+
+def _redirect_section_outcome(
+    request, recording: Recording, section, outcome, *, return_language: str | None = None
+):
+    """Redirect a section action outcome to the section detail page with
+    the validated read selector — never an arbitrary return URL."""
+    if isinstance(outcome, ActionOutcome):
+        if not outcome.ok:
+            dj_messages.error(request, outcome.message)
+        elif outcome.result == "state_changed":
+            dj_messages.warning(request, outcome.message)
+        else:
+            dj_messages.success(request, outcome.message)
+        target = return_language or "default"
+        if target and target != "default":
+            from django.urls import reverse
+
+            url = reverse("section-detail", args=[recording.pk, section.pk])
+            return redirect(f"{url}?language={target}")
+        return redirect("section-detail", recording.pk, section.pk)
+    return outcome
+
+
+@require_POST
+def action_section_summarize(request, recording_id, section_id):
+    """Step 6.2 POST-only two-step section summary action.
+
+    First POST (without ``confirmed=1``): validates the generation
+    selector/read selector/mode and renders the confirmation — NO lock,
+    NO network, NO write. Confirmed POST: schema preflight, global
+    pipeline lock, interruption recovery, live-section re-validation,
+    opaque section-fingerprint comparison (stale => safe no-op), mode
+    re-derivation, then ``summarize_section_one`` (caller-held lock
+    contract). Busy => friendly 409; failures are stable sanitized
+    messages; the redirect always targets the section detail page with
+    the validated read selector. GET is a 405 via ``require_POST``.
+    """
+    from workflow.models import Section
+
+    recording = _recording_or_404(recording_id)
+    section = _section_or_404(recording, section_id)
+    language = (request.POST.get("language") or "default").strip()
+    if language not in ("default", "original", "en", "zh-Hant"):
+        from workflow.services.web_actions import section_summarize_friendly_message
+
+        return rejection_response(
+            request,
+            section_summarize_friendly_message("unsupported_language", language=language),
+            "unsupported_language",
+        )
+    # Optional READ selector to return to after the action; validated
+    # against the read-only section view-model (unknown falls back).
+    return_language = (request.POST.get("return_language") or "").strip() or None
+    if return_language is not None:
+        from workflow.services.variant_view import build_variant_view
+
+        if build_variant_view(recording, return_language, section=section).error:
+            return_language = None
+    # Live active-topic-section guard BEFORE any lock/write (read-only
+    # canonical validation; historical sections are never actionable).
+    # The guard applies to the FIRST POST only: the confirmation page is
+    # reachable only for a LIVE actionable section. On the CONFIRMED
+    # POST the live-section re-validation happens UNDER the pipeline lock
+    # inside ``execute_section_summarize`` — a section that became
+    # historical after the confirmation is a safe stale no-op (302
+    # redirect with a warning), never a hard rejection.
+    from workflow.services.segmentation import SegmentationError, require_active_topic_section
+    from workflow.services.variant_view import build_variant_view
+    from workflow.services.web_actions import (
+        section_state_fingerprint,
+        section_summarize_friendly_message,
+    )
+
+    is_confirmed = request.POST.get("confirmed") == _CONFIRMED
+    if not is_confirmed:
+        try:
+            require_active_topic_section(section)
+        except SegmentationError as exc:
+            return rejection_response(
+                request, section_summarize_friendly_message(exc.code), exc.code
+            )
+    # Strict confirmed-POST input contract (BEFORE any pipeline lock,
+    # recovery, network or write): exactly ONE canonical 64-hex opaque
+    # fingerprint (upper or lower case, normalized to lowercase) and
+    # exactly ONE valid section action mode. Missing/duplicate/malformed
+    # values are a friendly rejection — never a run against unvalidated
+    # state, never a 500.
+    from workflow.services.web_actions import (
+        SECTION_ACTION_MODES,
+        canonical_section_fingerprint,
+    )
+
+    requested_mode = None
+    fingerprint = None
+    if is_confirmed:
+        fingerprint_values = request.POST.getlist("fingerprint")
+        if len(fingerprint_values) != 1:
+            return rejection_response(
+                request,
+                "The state fingerprint is missing or invalid — reload the page.",
+                "invalid_fingerprint",
+            )
+        fingerprint = canonical_section_fingerprint(fingerprint_values[0])
+        if fingerprint is None:
+            return rejection_response(
+                request,
+                "The state fingerprint is missing or invalid — reload the page.",
+                "invalid_fingerprint",
+            )
+        mode_values = request.POST.getlist("mode")
+        if len(mode_values) != 1:
+            return rejection_response(
+                request,
+                "The submitted action mode is missing or invalid — reload the page.",
+                "invalid_mode",
+            )
+        requested_mode = (mode_values[0] or "").strip().lower()
+        if requested_mode not in SECTION_ACTION_MODES:
+            return rejection_response(
+                request,
+                "The submitted action mode is missing or invalid — reload the page.",
+                "invalid_mode",
+            )
+    variant = build_variant_view(recording, language, section=section)
+    mode = variant.action_mode
+    # On the FIRST (unconfirmed) POST the section is guaranteed live, so a
+    # missing mode is a genuine ineligible state and is rejected here. On
+    # the CONFIRMED POST the section may have become historical AFTER the
+    # confirmation was rendered (the fresh read above already reflects
+    # it); the service under the lock re-validates the LIVE section and
+    # re-derives the mode, so a stale section is a safe no-op there —
+    # never a hard rejection.
+    if not is_confirmed and mode is None:
+        return rejection_response(
+            request,
+            "Summarization is not available for this section in its current state.",
+            "ineligible_state",
+        )
+    if request.POST.get("confirmed") != _CONFIRMED:
+        try:
+            fingerprint = section_state_fingerprint(recording, section)
+        except SegmentationError as exc:
+            return rejection_response(
+                request, section_summarize_friendly_message(exc.code), exc.code
+            )
+        label = SUMMARIZE_MODE_LABELS.get(mode, "Summarize")
+        note = SUMMARIZE_MODE_NOTES.get(mode, SUMMARIZE_MODE_NOTES["first"])
+        if language == "original" and not variant.resolved:
+            note += (
+                " Target language: Original. If the source language is not known yet, "
+                "it will be detected locally first (one bounded request, retried at "
+                "most once on invalid output)."
+            )
+        elif language != "default":
+            note += f" Target language: {language}."
+        hidden = {
+            "fingerprint": fingerprint,
+            "mode": mode,
+            "language": language,
+            "section_id": str(section.pk),
+        }
+        if return_language:
+            hidden["return_language"] = return_language
+        from django.urls import reverse
+
+        return render(
+            request,
+            "workflow/action_confirm.html",
+            {
+                "recording": recording,
+                "section": section,
+                "title": f"{label} this section — are you sure?",
+                "note": note,
+                "hidden": hidden,
+                "cancel_url": reverse("section-detail", args=[recording.pk, section.pk]),
+            },
+        )
+    config = get_config()
+    from workflow.services.web_actions import execute_section_summarize
+
+    try:
+        outcome = execute_section_summarize(
+            config,
+            recording,
+            section,
+            requested_mode=requested_mode,
+            expected_fingerprint=fingerprint,
+            language=language,
+        )
+    except PipelineBusy as exc:
+        return conflict_response(request, exc.holder_pid)
+    return _redirect_section_outcome(
+        request, recording, section, outcome, return_language=return_language
+    )

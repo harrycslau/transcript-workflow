@@ -131,7 +131,9 @@ def _assignment_or_404(recording: Recording, tag_id: int) -> tuple[TagAssignment
         tag = Tag.objects.get(pk=tag_id)
     except (Tag.DoesNotExist, ValueError):
         raise Http404("Tag not found") from None
-    assignment = TagAssignment.objects.filter(recording=recording, tag=tag).first()
+    assignment = TagAssignment.objects.filter(
+        recording=recording, tag=tag, section__isnull=True
+    ).first()
     if assignment is None:
         raise Http404("No tag assignment for this recording")
     return assignment, tag
@@ -214,3 +216,132 @@ def tag_remove(request, recording_id, tag_id):
     else:
         dj_messages.info(request, f"Tag '{tag.name}' was not active — nothing changed.")
     return redirect("recording-detail", recording_id)
+
+
+# ---------------------------------------------------------------------------
+# Section-scoped tag editing (Step 6.2)
+#
+# Parent + section scoped POST routes for the section detail page's tag
+# editor: bulk atomic apply (modal Done), confirm suggested, and remove.
+# Active topic sections only — historical sections are read-only and
+# rejected by the backend section tag services (stable sanitized
+# errors); CSRF/POST; safe redirect to the SAME section detail page.
+# Section-scoped changes never schedule a recording search sync.
+# ---------------------------------------------------------------------------
+
+
+def _section_or_404(recording: Recording, section_id: int):
+    from workflow.models import Section
+
+    section = Section.objects.filter(
+        pk=section_id, transcript__recording=recording
+    ).first()
+    if section is None:
+        raise Http404("Section not found")
+    return section
+
+
+@require_POST
+def section_tag_apply(request, recording_id, section_id):
+    """POST-only bulk section tag apply — the section modal's ONLY Done
+    path. One service call applies the COMPLETE desired active
+    section-scoped selection atomically
+    (:func:`workflow.services.tags.apply_section_tag_selection`); the
+    section must be a live topic target of the ACTIVE layout (historical
+    sections are rejected). Success — including an unchanged selection —
+    emits NO banner; errors show one sanitized message after the
+    redirect. No recording search sync. GET is a 405.
+    """
+    from workflow.services.tags import (
+        TagOperationError,
+        apply_section_tag_selection,
+    )
+
+    recording = _recording_or_404(recording_id)
+    section = _section_or_404(recording, section_id)
+    tags = list(Tag.objects.order_by("name"))
+    form = TagSelectionForm(
+        data=request.POST,
+        available=[tag for tag in tags if tag.is_configured],
+        retired=[tag for tag in tags if not tag.is_configured],
+    )
+    if not form.is_valid():
+        if "new_tag_name" in form.errors:
+            message = str(form.errors["new_tag_name"][0])
+        else:
+            message = "Choose a valid tag selection."
+        dj_messages.error(request, message)
+        return redirect("section-detail", recording_id, section_id)
+    try:
+        apply_section_tag_selection(
+            section,
+            form.cleaned_data["selected_tags"],
+            form.cleaned_data["selected_retired_tags"],
+            new_tag_name=form.cleaned_data["new_tag_name"],
+        )
+    except TagOperationError as exc:
+        dj_messages.error(request, exc.message)
+        return redirect("section-detail", recording_id, section_id)
+    # Success (changed or unchanged): NO banner.
+    return redirect("section-detail", recording_id, section_id)
+
+
+@require_POST
+def section_tag_confirm(request, recording_id, section_id, tag_id):
+    """POST-only confirm of a section-scoped suggested tag."""
+    from workflow.services.tags import (
+        TagOperationError,
+        confirm_section_suggestion,
+    )
+
+    recording = _recording_or_404(recording_id)
+    section = _section_or_404(recording, section_id)
+    try:
+        tag = Tag.objects.get(pk=tag_id)
+    except (Tag.DoesNotExist, ValueError):
+        raise Http404("Tag not found") from None
+    try:
+        result = confirm_section_suggestion(section, tag)
+    except TagOperationError as exc:
+        dj_messages.error(request, exc.message)
+        return redirect("section-detail", recording_id, section_id)
+    if result["already_confirmed"]:
+        dj_messages.info(
+            request, f"Tag '{tag.name}' was already confirmed — nothing changed."
+        )
+    else:
+        dj_messages.success(
+            request,
+            f"Tag '{tag.name}' confirmed. It is now user-owned and survives re-summarization.",
+        )
+    return redirect("section-detail", recording_id, section_id)
+
+
+@require_POST
+def section_tag_remove(request, recording_id, section_id, tag_id):
+    """POST-only removal of a section-scoped tag (user suppression)."""
+    from workflow.services.tags import (
+        TagOperationError,
+        remove_section_tag,
+    )
+
+    recording = _recording_or_404(recording_id)
+    section = _section_or_404(recording, section_id)
+    try:
+        tag = Tag.objects.get(pk=tag_id)
+    except (Tag.DoesNotExist, ValueError):
+        raise Http404("Tag not found") from None
+    try:
+        result = remove_section_tag(section, tag)
+    except TagOperationError as exc:
+        dj_messages.error(request, exc.message)
+        return redirect("section-detail", recording_id, section_id)
+    if result["removed"]:
+        dj_messages.success(
+            request,
+            f"Tag '{tag.name}' removed. Future model suggestions for it stay visible but "
+            "will not restore it automatically.",
+        )
+    else:
+        dj_messages.info(request, f"Tag '{tag.name}' was not active — nothing changed.")
+    return redirect("section-detail", recording_id, section_id)

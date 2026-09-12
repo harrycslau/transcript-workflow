@@ -497,6 +497,15 @@ a.match-chip:hover {
   margin-bottom: 0.75rem;
 }
 
+/* Step 6.2: a topic-Section item shows its range + parent Recording
+   title as compact context inside the card/table meta line. */
+.section-context {
+  font-size: 0.75rem;
+  color: var(--color-text-3);
+}
+.section-context a { color: var(--color-accent); text-decoration: none; }
+.section-context a:hover { text-decoration: underline; }
+
 .recording-card-excerpt {
   font-size: 0.8125rem;
   color: var(--color-text-2);
@@ -1154,6 +1163,163 @@ ol.key-points > li::before {
 .modal-close { margin-top: 1rem; align-self: flex-end; }
 
 /* ============================================================
+   STEP 6.1 — TRANSCRIPT-PAGE TRIM & SPLIT EDITOR
+   (compact editor; scissors on inter-segment divider lines)
+   ============================================================ */
+.segmentation-readonly-note { font-size: 0.8125rem; margin: 0 0 1rem; }
+
+/* Compact edit-mode bar (a small bar, never a panel) */
+.edit-mode-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+}
+.edit-mode-bar[hidden] { display: none; }
+.edit-status { font-size: 0.8125rem; color: var(--color-text-2); }
+.edit-help { font-size: 0.75rem; flex-basis: 100%; }
+.edit-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+/* Compact saved-working-view bar with the full-transcript toggle */
+.crop-view-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 0.5rem 0.75rem;
+  margin-bottom: 1rem;
+}
+.crop-view-bar[hidden] { display: none; }
+.crop-view-msg { font-size: 0.8125rem; color: var(--color-text-2); }
+
+/* Cropped rows are hidden (never merely dimmed) in staged and saved views */
+.transcript-segment[hidden] { display: none; }
+
+/* Topic headings: autoescaped server-rendered section titles in the
+   normal working/read-only views (hidden while editing, when the inline
+   topic inputs replace them). */
+.topic-heading {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0.75rem 0 0.25rem;
+  padding: 0.35rem 0.75rem;
+  background: var(--color-surface-2);
+  border-left: 3px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+}
+.topic-heading[hidden] { display: none; }
+.topic-heading-context { border-left-color: var(--color-border-2); }
+.topic-heading-label {
+  font-weight: 600;
+  color: var(--color-text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 0.6875rem;
+  flex-shrink: 0;
+}
+.topic-heading-title { color: var(--color-text); }
+
+/* Scissors controls: one compact button per inter-segment divider line.
+   Visible only while editing; visibility is driven by the hidden attribute. */
+.boundary-scissors {
+  display: block;
+  width: 100%;
+  position: relative;
+  border: 0;
+  border-top: 1px dashed var(--color-border-2);
+  background: none;
+  padding: 0;
+  margin: 2px 0;
+  height: 14px;
+  cursor: pointer;
+  color: var(--color-text-3);
+}
+.boundary-scissors[hidden] { display: none; }
+.boundary-scissors svg {
+  position: absolute;
+  left: 50%;
+  top: -7px;
+  transform: translateX(-50%);
+  background: var(--color-surface);
+  padding: 2px;
+  border: 1px solid var(--color-border-2);
+  border-radius: 50%;
+  box-sizing: content-box;
+}
+.boundary-scissors:hover { border-top-color: var(--color-accent); color: var(--color-accent); }
+.boundary-scissors:hover svg { border-color: var(--color-accent); }
+.boundary-scissors:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.boundary-scissors.is-split { border-top: 2px solid var(--color-warn); color: var(--color-warn); }
+.boundary-scissors.is-split svg { border-color: var(--color-warn); background: var(--color-warn-bg); }
+
+/* Inline topic controls rendered inside the transcript flow after a split */
+.section-topic-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.25rem 0 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.section-topic-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-3);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.topic-input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+/* Boundary action dialog: stacked action buttons inside the modal panel */
+.boundary-action-panel { max-width: 26rem; }
+.boundary-action-summary { font-size: 0.8125rem; color: var(--color-text-2); margin: 0 0 0.5rem; }
+.boundary-action-note { font-size: 0.8125rem; color: var(--color-text-3); margin: 0 0 0.75rem; }
+.boundary-action-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+.boundary-action-buttons .btn-sm { justify-content: flex-start; width: 100%; text-align: left; }
+.boundary-action-buttons .btn-sm[hidden] { display: none; }
+.boundary-action-buttons .btn-sm:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Confirmation page summary (autoescaped values only) */
+.segmentation-confirm-summary {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1rem;
+  font-size: 0.9rem;
+  margin: 1rem 0;
+}
+.segmentation-confirm-summary dt { color: var(--color-text-3); }
+.segmentation-confirm-summary dd { margin: 0; }
+.segmentation-confirm-topics { margin: 0.35rem 0 0; padding-left: 1.25rem; }
+
+/* ============================================================
    RESPONSIVE
    ============================================================ */
 @media (max-width: 40rem) {
@@ -1190,6 +1356,10 @@ ol.key-points > li::before {
   .recording-card { padding: 1rem; }
   .recording-card-header { flex-direction: column; gap: 0.5rem; }
   .recording-card-footer { flex-direction: column; align-items: flex-start; }
+  /* Step 6.1 editor stacks its compact controls on small screens */
+  .edit-actions { width: 100%; }
+  .edit-actions .btn-sm { flex: 1; justify-content: center; }
+  .crop-view-bar { align-items: flex-start; }
   /* The Routing disclosure's no-JS expanded panel takes the full row so
      it never overflows the container on narrow screens. */
   .routing-editor { width: 100%; max-width: none; }

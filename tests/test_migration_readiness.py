@@ -119,6 +119,7 @@ class TestMigrationInspection:
         assert any(p.startswith("workflow.0006_") for p in pending)
         assert any(p.startswith("workflow.0009_") for p in pending)
         assert any(p.startswith("workflow.0010_") for p in pending)
+        assert any(p.startswith("workflow.0012_") for p in pending)
         # Labels are safe identifiers: no paths, spaces, SQL, or content.
         for label in pending:
             assert "/" not in label
@@ -142,6 +143,8 @@ class TestMigrationInspection:
             "workflow.0008_search_index",
             "workflow.0009_embedding_foundation",
             "workflow.0010_tag_definition_origin",
+            "workflow.0011_segmentedversion_remove_section_uniq_section_ordinal_and_more",
+            "workflow.0012_remove_tagassignment_uniq_tag_assignment_and_more",
         ]
 
     def test_unavailable_migration_table_category(self, monkeypatch):

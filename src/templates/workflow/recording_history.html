@@ -126,6 +126,45 @@
   {% endif %}
 </section>
 
+<section class="history-section" aria-labelledby="history-segmented-title">
+  <h2 id="history-segmented-title">Trim &amp; split revisions</h2>
+  {% if segmented_rows %}
+    <div class="table-scroll">
+      <table class="history-table">
+        <caption>Segmented working-layout revisions for this recording</caption>
+        <thead>
+          <tr>
+            <th scope="col">Revision</th>
+            <th scope="col">Saved</th>
+            <th scope="col">State</th>
+            <th scope="col">Transcript</th>
+            <th scope="col">Working range</th>
+            <th scope="col">Topics</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in segmented_rows %}
+            <tr>
+              <td><a href="{% url 'recording-transcript' recording.pk %}?v={{ row.transcript_id }}&amp;layout={{ row.pk }}">#{{ row.revision }}</a></td>
+              <td>{{ row.activated_at|local_time }}</td>
+              <td>
+                {% if row.is_active %}<span class="current-banner-inline">active</span>
+                {% else %}superseded{% if row.superseded_at %} {{ row.superseded_at|local_time }}{% endif %}{% endif %}
+              </td>
+              <td>{% if row.transcript_active %}active{% else %}historical{% endif %}</td>
+              <td>{{ row.range_label }}</td>
+              <td>{{ row.topic_count }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if segmented_truncated %}<p class="truncation-note">Only the most recent {{ history_limit }} trim &amp; split revisions are shown.</p>{% endif %}
+  {% else %}
+    <p class="muted">No trim &amp; split revisions yet.</p>
+  {% endif %}
+</section>
+
 <section class="history-section" aria-labelledby="history-summary-title">
   <h2 id="history-summary-title">Summary versions</h2>
   {% if summaries %}

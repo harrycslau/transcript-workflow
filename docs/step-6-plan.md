@@ -1,14 +1,20 @@
-# Step 6 — Planning document (overall plan accepted; Step 6.0 complete; 6.1 planned)
+# Step 6 — Planning document (overall plan accepted; Step 6.0 complete; Step 6.1 and Step 6.2 delivered; 6.3 next)
 
 > **Status: the overall Step 6 plan has been accepted by the user as the
-> working baseline, and Step 6.0 is COMPLETE.** The approved Step 6.0
+> working baseline, Step 6.0 is COMPLETE, Step 6.1 (segmented
+> versions: logical trim + topic layout/history, structure/history only)
+> is DELIVERED, and Step 6.2 (section-level summaries/tags + derived
+> Library items) is DELIVERED.** The approved Step 6.0
 > decisions D1–D12 and the phase acceptance contracts live in
 > `docs/step-6-decisions.md`; the Step 6 screens in `design/ui-prototype/`
-> prototype those approved decisions, and this document's §8 plans their
-> implementation.
-> Step 6.1 is the next planned phase; §8 is its concrete implementation
-> plan (structure/history only). No production Step 6 functionality is
-> implemented yet.
+> prototype those approved decisions, and this document's §8 is the
+> concrete implementation plan that the delivered 6.1 implements
+> (see the delivery note at the top of §8).
+> Step 6.3 (search/embedding/Ask integration for section content) is the
+> next planned phase and is
+> NOT yet implemented; §9's Phase 6.3 acceptance contract remains the
+> baseline for it (Phase 6.2 is delivered — see the delivery note at the
+> top of §9).
 >
 > Two items remain explicit separate approval gates and are NOT approved:
 > (1) any actual source file deletion/move/trash/quarantine (and its
@@ -57,7 +63,7 @@ implications, testing expectations, and the resolved decision index.
   topic sections (each a contiguous segment range). Splits create sections:
   N splits inside the retained range yield exactly N+1 topic sections; a
   crop-only version has zero. Sections enable section-level summaries and
-  tags in 6.2.
+  tags (delivered in 6.2).
 - **Fixed ordinal-0 section** — the existing whole-recording `Section`
   created once per successful transcript. It is outside segmented versions,
   never edited or versioned, and keeps driving the ordinal-0 defaults.
@@ -73,13 +79,18 @@ deletion under retention requires a separate explicit approval gate.
 
 - `Section` carries `transcript`/`ordinal`/`title`/`start_ms`/`end_ms`;
   ordinal 0 is the whole-recording section, created once per successful
-  transcript. `Section` is currently created by the pipeline only.
+  transcript; topic `Section` rows (ordinal ≥ 1) are created by the
+  6.1 segmentation service (`workflow/services/segmentation.py`).
 - `Summary` and `SummaryVariantState` already scope by `section`
   (`Summary.section`, one active per
   (transcript, section, output_language)); recording-level defaults are
   derived from the active transcript's ordinal-0 section. So section-level
-  summaries have a natural extension point already (6.2).
-- Tags are **recording-level only** today. Section-level tags are new (6.2).
+  summaries had a natural extension point — delivered in 6.2 via
+  `summarize_section_one` (see §9).
+- Tags were **recording-level only** before 6.2. Section-level tags are now
+  delivered: nullable `TagAssignment.section` (migration 0012) makes a
+  section scope with mutually exclusive recording/section uniques a reality
+  (see §9).
 - Search indexes the active transcript's segments (whole transcript) and
   the whole-recording summary. Embedding sync and Ask reuse those
   documents. Any change to the searchable scope flows through
@@ -132,10 +143,10 @@ deletion under retention requires a separate explicit approval gate.
 **In scope (Step 6):**
 
 1. Non-destructive manual **trim** as half of a segmented version
-   (Option A) — Phase 6.1.
-2. **Topic splitting** as an immutable/versioned segmented version — Phase 6.1.
-3. **Section-level summaries** — Phase 6.2.
-4. **Section-level tags** — Phase 6.2.
+   (Option A) — Phase 6.1 (DELIVERED).
+2. **Topic splitting** as an immutable/versioned segmented version — Phase 6.1 (DELIVERED).
+3. **Section-level summaries** — Phase 6.2 (DELIVERED).
+4. **Section-level tags** — Phase 6.2 (DELIVERED).
 5. **Retention cleanup** (Keep-Audio override, missing-file
    reconciliation UI) — Phase 6.4.
 6. **launchd scheduling** — Phase 6.5.
@@ -158,7 +169,8 @@ deletion under retention requires a separate explicit approval gate.
 
 - 6.1 (segmented versions: trim + topic layout/history) is the foundation;
   everything else depends on it.
-- 6.2 (section summaries/tags) depends on 6.1's topic `Section` rows.
+- 6.2 (section summaries/tags) depends on 6.1's topic `Section` rows —
+  DELIVERED (see the delivery note at the top of §9).
 - 6.3 (search/embedding/Ask integration) depends on 6.1's structure and,
   for section-level search, on 6.2's section summaries.
 - 6.4 (retention + Rescan) is largely orthogonal to 6.1–6.3 but shares the
@@ -185,7 +197,29 @@ Outcome (complete):
 
 No production schema, migration, or runtime implementation was part of 6.0.
 
-## 8. Phase 6.1 — Segmented versions: logical trim + topic layout/history (implementation plan)
+## 8. Phase 6.1 — Segmented versions: logical trim + topic layout/history (DELIVERED)
+
+> **Delivery note (2026-09-12):** this phase is implemented in the
+> working tree — see the project-status handoff and the durable Step 6.1
+> invariant bullet in `AGENTS.md`. The sections below remain the approved
+> plan that the implementation follows; where the implementation made the
+> final call on a recommended/working name, the actual choice is noted:
+> the layout model is `SegmentedVersion`; the ONLY writer/validator is
+> `workflow/services/segmentation.py` (as planned); the migration is the
+> single new reversible `workflow.0011_...` (after 0010); the hard
+> defensive topic cap is `MAX_TOPIC_SECTIONS = 200` (no config key); the
+> save route is POST-only `/recordings/<id>/transcript/save/` with the
+> existing two-step confirmation; and the opaque stale fingerprint is
+> `segmentation_fingerprint` (SELECT-only, SHA-256 over the active
+> transcript identity + segment shape + active layout state).
+> **Chosen bounded-pagination/UX details**: editing lives only on the
+> active Transcript page; staged changes are PAGE-LOCAL and must be
+> SAVED BEFORE NAVIGATION — a browser dirty-leave (`beforeunload`)
+> warning fires when leaving with un-saved staged edits, and NO browser
+> draft persistence exists (nothing is stored in sessionStorage or
+> anywhere else); historical views are read-only through
+> `?v=<transcript-id>&layout=<version-id>` (the layout parameter
+> selects an explicit `SegmentedVersion` of the selected transcript).
 
 **Bounded to structure/history only.** 6.1 creates and versions the
 segmented-version structure and shows its history. It does not generate
@@ -317,7 +351,7 @@ topic sections; do not create a parallel topic-section model.
 - Migration is **new, after 0010**, additive + constraint replacement,
   fully reversible; no data migration is needed (existing ordinal-0 rows
   migrate with layout `NULL`, satisfying the fixed-section alternative).
-  No final migration number is claimed.
+  The final migration number is **0011** (see the §8 delivery note).
 - Implementation must also review/update existing ordinal-0 queries
   (default-summary derivation, variant state, chunking, rendering,
   exports, search builders) to include `segmented_version IS NULL` where
@@ -493,7 +527,22 @@ topic sections; do not create a parallel topic-section model.
 
 ## 9. Later phases (approved acceptance contracts)
 
-### Phase 6.2 — Section summaries and section tags
+### Phase 6.2 — Section summaries and section tags (DELIVERED)
+
+> **Delivery note (2026-09-11):** this phase is implemented in the
+> working tree — see the project-status handoff and the durable Step 6.2
+> invariant bullet in `AGENTS.md`. Final implementation calls: section
+> summaries live in `workflow/services/summarize.py:summarize_section_one`
+> (explicit POST-only two-step action under the pipeline lock guarded by
+> the opaque `section_state_fingerprint`, exact canonical segment-range
+> input, and `section_layout_changed` persistence-time revalidation);
+> section tags reuse the exact recording tag semantics through the
+> section-scoped mutations in `workflow/services/tags.py` over the
+> nullable `TagAssignment.section` (migration
+> `workflow.0012_...`, additive and fully reversible); and the Library
+> exposes topic Sections as derived items through the read-only
+> `workflow/query.py` UNION projection (no `LibraryItem` model).
+> Step 6.3 (search/embedding/Ask integration) remains NOT implemented.
 
 - Section summaries scope exactly as the existing
   (transcript, section, output_language) contract; ordinal-0 derivation is
@@ -595,7 +644,22 @@ topic sections; do not create a parallel topic-section model.
 - No migration is implied by this planning document itself.
 - 6.1 arrives as one new migration after 0010 (layout parent + nullable
   `Section` ownership/range fields + conditional uniqueness/CHECKs),
-  reversible, with the standard verification.
+  reversible, with the standard verification. **DELIVERED** as the single
+  new `workflow.0011_...` migration (layout parent `SegmentedVersion` +
+  `Section` `segmented_version`/canonical range fields + the two
+  conditional section-ordinal uniques + the same-row shape CHECK and the
+  layout range/lifecycle/chronology/revision CHECKs); no data migration;
+  the reverse deterministically renumbers topic ordinals before restoring
+  the global `(transcript, ordinal)` unique.
+- 6.2 arrives as one new migration after 0011 (nullable
+  `TagAssignment.section` ownership FK + the two conditional
+  recording/section uniques replacing the recording-only constraints).
+  **DELIVERED** as the single new `workflow.0012_...` migration:
+  additive and fully reversible, no data migration (existing rows stay
+  recording-scoped by construction); the reverse deletes section-only
+  assignment rows before restoring the old global `(recording, tag)`
+  unique, preserving recording assignments. Covered by genuine
+  MigrationExecutor tests including a real reverse attempt.
 - The existing ordinal-0 behavior (E4) and G1 guide the design.
 - Any retention source-deletion feature that touches existing models is a
   separate approval gate and likewise a new migration.
@@ -627,16 +691,29 @@ retention timer, Rescan, scheduling) live there. Summary:
   (D9) — separate explicit approval gate.
 - Installing/enabling/activating any schedule (D10) — separate explicit
   user action.
-- Exact 6.1 table/field names beyond the recommended shape in §8.3.
 
 ## 16. Notes for reviewers
 
 - The overall plan is accepted as the working baseline; Step 6.0 is
   complete and its decisions are approved in
   `docs/step-6-decisions.md`.
-- Step 6.1 is planned (this document §8), bounded to structure/history
-  only; no production code/schema/migration/config is delivered.
+- Step 6.1 (this document §8) is **delivered** in the working tree,
+  bounded to structure/history only; the final table/field names are the
+  delivered `SegmentedVersion` + `Section` layout fields and migration
+  0011 (see the §8 delivery note). No section summaries/tags, no
+  search/embedding index change, and no CLI were part of 6.1.
+- Step 6.2 (this document §9) is **delivered** in the working tree too:
+  section summaries (`summarize_section_one` + the opaque
+  `section_state_fingerprint`), section tags (migration 0012 with
+  mutually exclusive recording/section `TagAssignment` scopes), and the
+  derived Library item projection (no `LibraryItem` model; see the §9
+  delivery note and the project-status Step 6.2 section). The next
+  planned phase is **Step 6.3** (search/embedding/Ask integration for
+  section content), not yet implemented. The work and its tests are in
+  the working tree, uncommitted; no real-database migration is claimed.
 - The Step 6.0 round (this document + `docs/step-6-decisions.md` + the
-  Step 6 screens in `design/ui-prototype/` + the prototype README) is
+  Step 6 screens in `design/ui-prototype/` + the prototype README) was
   documentation/prototype only: no production code, schema, migration,
-  command, config, or real file operations.
+  command, config, or real file operations. The Step 6.1 and Step 6.2
+  deliveries are the subsequent production implementations described by
+  §8 and §9.

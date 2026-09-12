@@ -1,4 +1,4 @@
-# Project status — implementation handoff (v6 Recording Detail / Transcript / History redesign delivered)
+# Project status — implementation handoff (Step 6.2 section-level summaries/tags + derived Library items delivered)
 
 This file reflects the repository through the unified production
 search top bar on top of Step 5D: Step 4, the
@@ -35,23 +35,30 @@ POST-only and never place the query in a URL, and the direct keyword
 GET stays supported and read-only), the **Step 5D Ask with
 Citations** (`workflow/services/ask.py` + the document-level evidence
 surface in `semantic_query.py`, `brain ask QUESTION [--json]`, and the
-`/ask/` GET-form/POST-execution page), and the approved
+`/ask/` GET-form/POST-execution page), the approved
 **v6 Recording Detail / Transcript / History production redesign**
-(see the v6 section below). The `design/ui-prototype/` directory
+(see the v6 section below), the approved **Step 6.1 segmented
+versions** (logical trim + topic layout/history — see the Step 6.1
+section below), and the delivered **Step 6.2 section-level summaries
+and tags + derived Library items** (see the Step 6.2 section below).
+The `design/ui-prototype/` directory
 remains the approved v6 design source (fictional data); the production
 Recording Detail, Transcript and History pages now implement that
 design. The
-working tree is independently full-suite verified: **2238 collected
-and 2238 passed** (only the known `audioop` deprecation warning), with
-`manage.py check` and `makemigrations --check` clean (no migration).
+working tree is independently full-suite verified: **2722 collected
+and 2722 passed** (only the known `audioop` deprecation warning), with
+`manage.py check`, `makemigrations --check` (0012) and
+`git diff --check` clean.
 No real-database
-migration or real embedding/chat network call is claimed. This file is
+migration or user data operation is claimed (the 0011/0012 migrations are
+never applied to a real database by this work). This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
 
-## Handoff audit — 2026-09-10 (updated for the v6 detail/transcript/history redesign)
+## Handoff audit — 2026-09-12 (updated for the Step 6.2 delivery and the Library UI refinement)
 
-Updates the previous audits (the Step 5C state and the Step 5D state)
+Updates the previous audits (the Step 5C state, the Step 5D state and
+the v6 detail/transcript/history redesign state)
 in place to record that (1) the Step 5D Ask-with-Citations flow is now
 implemented in the working tree, (2) the production Library search
 was unified into a single global top-bar query input: a native
@@ -60,12 +67,18 @@ Keyword/Semantic/Hybrid selector whose POST goes to
 canonical bookmarkable GET `/recordings/?q=...` (preserving the active
 filters/view), semantic/hybrid execute and navigate POST-only with the
 query never in a URL, the Library's middle semantic/hybrid section was
-removed, and mobile uses a two-row fixed header, and (3) the approved
+removed, and mobile uses a two-row fixed header, (3) the approved
 **v6 Recording Detail / Transcript / History production redesign** is
-delivered (see the v6 section below). The full suite is
-independently verified at the current state (**2238 passed**). No
-real-database migration or real embedding/chat network call is
-claimed; the work and its tests are in the working tree.
+delivered (see the v6 section below), (4) the approved **Step 6.1
+segmented versions (logical trim + topic layout/history) is delivered
+in the working tree** (see the Step 6.1 section below), and (5) the
+approved **Step 6.2 section-level summaries and tags + derived Library
+items is delivered in the working tree** (see the Step 6.2 section
+below). The full suite is
+independently verified at the current state (**2722 passed**). No
+real-database migration or user data operation is claimed (the 0011/0012
+migrations are never applied to a real database by this work); the work
+and its tests are in the working tree.
 
 **Observed facts**
 
@@ -73,7 +86,9 @@ claimed; the work and its tests are in the working tree.
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
   configuration; implementation complete through the unified search top
   bar and Step 5D plus the **v6 Recording Detail / Transcript /
-  History production redesign** (Step 4
+  History production redesign**, the **Step 6.1 segmented
+  versions**, and the **Step 6.2 section-level summaries/tags +
+  derived Library items** (Step 4
   web UI, 5A.1 Library, 5A.2 index foundation, 5A.3 incremental sync,
   5A.4.1 keyword backend + CLI, 5A.4.2a/b Library keyword web search
   with highlights and jump links, the pre-5B stability patch, the
@@ -84,26 +99,54 @@ claimed; the work and its tests are in the working tree.
   semantic/hybrid search with the unified global top-bar web input
   (keyword POST → bookmarkable GET redirect; semantic/hybrid
   POST-only, query never in a URL), the
-  Step 5D Ask-with-Citations service/CLI/web flow, and the v6
-  document-oriented Recording Detail / Transcript / History redesign).
+  Step 5D Ask-with-Citations service/CLI/web flow, the v6
+  document-oriented Recording Detail / Transcript / History redesign,
+  and Step 6.1: `SegmentedVersion` + topic `Section` rows (migration
+  0011) with `workflow/services/segmentation.py` as the sole
+  writer/validator, the POST-only two-step save under the pipeline
+  lock with the opaque stale fingerprint, the active-Transcript-page
+  scissors editor (page-local staging, save-before-navigation, no
+  browser draft persistence), read-only `?v=`/`&layout=` historical
+  views, the bounded History revision list, and Step 6.2:
+  `summarize_section_one` (explicit active-section multilingual
+  summaries with exact-range input, the opaque
+  `section_state_fingerprint` and `section_layout_changed`
+  persistence-time revalidation), the section-scoped tag mutations
+  + migration 0012 (mutually exclusive recording/section
+  `TagAssignment` scopes), and the derived `LibraryItemCard` Library
+  projection (read-only DB UNION with the lazy parameterized SQL
+  canonical-layout predicate — no `LibraryItem` model).
   The `design/ui-prototype/` directory remains the approved v6 design
   source (fictional data); the production Recording Detail, Transcript
   and History pages now implement that design — see the v6 section
   below.
 - Current verification (independently confirmed, CURRENT state): the
-  full suite passes — **2238 collected and
-  2238 passed** (the unified-top-bar + Step 5D state was 2203 —
-  historical; the v6 detail/transcript/history redesign delta is
-  **35 tests** — the new
-  `tests/test_web_history.py` (10: history section accessibility,
-  routing allowlist/projection, collection bounds with truncation
-  notices, source-display safety, attempt sanitization, transcript
-  version links) plus **25 additions** to
-  `tests/test_web_detail.py` (the status-panel matrix, the
-  exactly-five preview bound, transcript anchors/version/meta,
-  nested key-point `<ol>/<li>` structure, the detail-redesign
-  invariants, and the heading-hierarchy tests across the detail/
-  current-summary/historical-summary routes); the unified-top-bar
+  full suite passes — **2722 collected and
+  2722 passed** (the Step 6.2 delta is **215 tests**: the prior **207**
+  Step 6.2 tests — the eight new
+  Step 6.2 test files — `tests/test_library_items.py` (32),
+  `tests/test_section_summary_service.py` (31),
+  `tests/test_section_tags.py` (30),
+  `tests/test_tag_assignment_migration_0012.py` (7),
+  `tests/test_tag_assignment_models_0012.py` (12),
+  `tests/test_web_section_detail.py` (36),
+  `tests/test_web_section_summarize.py` (39) and
+  `tests/test_web_section_tags.py` (16) = **203 tests** — plus **4
+  additions** across `tests/test_search_index_service.py`,
+  `tests/test_web_detail.py` and `tests/test_web_list.py`, and the 0012
+  leaf in the migration-readiness pending/leaf inventory plus the
+  `TARGET_LEAF` update in `tests/test_search_index_migration.py` — plus
+  **8 UI-refinement tests**: **3 section-confirmation** (the section
+  confirmation exposes a usable Back-to-recording link, recording-level
+  confirmations remain unchanged, and the running-state JavaScript only
+  disables the submit button), **4 normal Library-table** (`TestTableViewDateAndSectionLabels`
+  in `tests/test_web_library.py`: bare-timestamp date column, `Discovered`
+  prefix, section rows dropping the secondary provenance line, card view
+  unchanged) and **1 search-table scoping**
+  (`test_search_table_date_cell_keeps_the_label_prefix` in
+  `tests/test_web_search.py`); the
+  prior documented Step 6.1 state was 2507 — historical; the earlier
+  unified-top-bar + Step 5D
   delta that reached 2203 was
   **12 tests** — the
   `TestUnifiedTopBar` class (10) in `tests/test_web_search_modes.py`,
@@ -121,7 +164,7 @@ claimed; the work and its tests are in the working tree.
   `tests/test_web_security.py` gained `/ask/` in its CSP and
   secret-hygiene sweeps), with the only warning the
   known `audioop` DeprecationWarning (Python 3.12, removal slated for
-  3.13); `manage.py check`, `makemigrations --check` (NO migration) and
+  3.13); `manage.py check`, `makemigrations --check` (0012) and
   `git diff --check` pass.
 - Step 5C verification (historical state, independently confirmed at
   the time): the full suite then passed — **2103 collected and
@@ -145,10 +188,13 @@ claimed; the work and its tests are in the working tree.
 - **The approved v6 Recording Detail / Transcript / History redesign is
   delivered in the working tree** (see the v6 section below);
   **Step 5D — Ask with Citations is delivered** too (see
-  the Step 5D section below); the next planned work is **Step 6** —
-  user-initiated topic splitting, manual **crop/trim** (non-destructive
-  logical trim), section-level summaries/tags, retention cleanup and
-  launchd scheduling. The overall Step 6 plan has been **accepted as the
+  the Step 5D section below), **Step 6.1 (segmented versions:
+  logical trim + topic layout/history, structure/history only) is
+  delivered** in the working tree (see the Step 6.1 section below),
+  and **Step 6.2 (section-level summaries/tags + derived Library
+  items) is delivered** too (see the Step 6.2 section below);
+  the next planned work is **Step 6.3** — search/embedding/Ask
+  integration for section content (not yet implemented). The overall Step 6 plan has been **accepted as the
   working baseline** and **Step 6.0 is complete**: the approved D1–D12
   decisions and phase acceptance contracts are recorded in
   `docs/step-6-decisions.md`, and the Step 6 screens in
@@ -162,14 +208,13 @@ claimed; the work and its tests are in the working tree.
   Transcript working presentation with a "Show full transcript" toggle,
   and revision history lives on the History
   screen; the separate Trim & sections screen is removed, and
-  retention/Rescan UX placement is deferred to 6.4). **Step 6.1
-  (segmented versions: logical trim + topic layout/history, structure/
-  history only) is planned/next and is NOT implemented**; its concrete
-  implementation plan is in `docs/step-6-plan.md` §8. Actual source file
+  retention/Rescan UX placement is deferred to 6.4). The concrete 6.1
+  implementation plan is in `docs/step-6-plan.md` §8; the delivery
+  handoff is the Step 6.1 section below. Actual source file
   deletion/move/trash/quarantine and installing/enabling any schedule
   remain separate explicit approval gates.
 - No claim is made here about the real user database's migration state
-  (`0007`–`0009` application is not reported). Local config values and
+  (`0007`–`0012` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
 
 ## Step 4 v6 — Recording Detail / Transcript / History redesign (delivered in the working tree)
@@ -217,14 +262,230 @@ implements it.
   strictly read-only (SELECT only); all text autoescaped, external CSS
   only, CSP unchanged.
 
-**Verification (independently confirmed, current state)**: full suite
+**Verification (historical v6 delivery state, independently confirmed)**:
+full suite
 **2238 collected and 2238 passed** (the unified-top-bar + Step 5D state
 was 2203 — historical; the v6 delta is 35 tests across
 `tests/test_web_history.py` (new, 10) and `tests/test_web_detail.py`
 (25 additions)), only the known `audioop` warning; `manage.py check`
 and `makemigrations --check` (NO migration) and `git diff --check`
 clean. No real-database migration or real network call is claimed; no
-new commit/HEAD.
+new commit/HEAD. The CURRENT working-tree state is **2722 collected
+and 2722 passed** — see the current audit at the top of this file.
+
+## Step 6.1 — Segmented versions: logical trim + topic layout/history (delivered in the working tree)
+
+**Scope delivered** (durable contract in `AGENTS.md`): the approved
+Step 6.1 structure/history phase — immutable transcript-bound
+`SegmentedVersion` working-layout revisions plus topic `Section` rows,
+the active Transcript page crop/split editor, and the bounded History
+revision list. Step 6.1 itself introduced no section summaries/tags
+(those arrived in Step 6.2), no search/embedding index change (Step
+6.3), and no CLI.
+
+- **Models / migration 0011**
+  (`workflow.models.SegmentedVersion` + nullable
+  `Section.segmented_version` / `start_segment_ordinal` /
+  `end_segment_ordinal_exclusive`; migration
+  `0011_segmentedversion_remove_section_uniq_section_ordinal_and_more`,
+  depends on 0010, additive and fully reversible, no data migration):
+  canonical half-open crop `[start_segment_ordinal,
+  end_segment_ordinal_exclusive)`; zero splits ⇒ zero topic Sections, N
+  splits ⇒ exactly N+1 exhaustive named Sections that partition the
+  retained range; the fixed ordinal-0 whole-recording `Section` stays
+  outside all revisions (`segmented_version IS NULL`, ordinal 0, both
+  canonical fields NULL) and keeps driving the ordinal-0 defaults. One
+  active layout per transcript (partial unique
+  `uniq_active_segmented_version`), unique `(transcript, revision)`, the
+  layout revision/range/lifecycle/chronology CHECKs, the
+  `chk_section_shape_segmentation` fixed-vs-topic same-row CHECK, and
+  the conditional `uniq_section_ordinal_fixed` /
+  `uniq_section_ordinal_topic` uniques replacing the old global
+  `(transcript, ordinal)` unique. Existing ordinal-0 rows migrate as
+  layout `NULL` (no backfill); the reverse deterministically renumbers
+  topic ordinals before restoring the global unique.
+- **Service** `workflow/services/segmentation.py` — the ONLY writer and
+  validator of `SegmentedVersion` and topic `Section` rows: exact
+  bounded input validation (no coercion; bool/blank/oversized/control-
+  character values rejected), sorted-canonicalized split markers, ONE
+  transaction that supersedes the prior active revision and creates the
+  new one, a ZERO-DML no-op for unchanged payloads (including the
+  initial full+zero state), fail-closed `layout_invalid` on malformed
+  stored state, the OPAQUE read-only `segmentation_fingerprint`
+  (SELECTs only), and fixed sanitized `SegmentationError` categories.
+  It never acquires the pipeline lock, schedules no search/embedding
+  sync, logs nothing, and touches no network/files.
+- **Web**: the editor lives ONLY on the active Transcript page ("Edit
+  trim & splits"): pressing Edit reveals scissors on the inter-segment
+  divider lines; staged changes stay page-local and must be saved before
+  navigation (browser dirty-leave warning; no browser draft
+  persistence). Save is a two-step POST (`/recordings/<id>/transcript/
+  save/`, `workflow/views/segmentation.py`) — confirmation then
+  execution via `web_actions.execute_segmentation_save` under the shared
+  pipeline lock + `recover_interruptions`, guarded by the opaque stale
+  fingerprint (stale/duplicate submissions are safe no-ops; lock busy is
+  the friendly 409). The saved crop is the normal working presentation
+  (cropped rows hidden, "Show full transcript" toggle). GET stays
+  strictly read-only; historical transcript versions (`?v=`) and
+  explicit layouts (`&layout=<version-id>`) are read-only through the
+  shared bounded canonical validator (malformed stored state is a
+  controlled 404 / unavailable notice). History owns a bounded revision
+  list (`HISTORY_LIMIT = 100`, limit+1 sentinel).
+- **No-op / purity**: no search or embedding sync is scheduled on save
+  (6.1 changes no indexed content); existing ordinal-0 queries gained
+  `segmented_version IS NULL` defense-in-depth filters
+  (`workflow/query.py`, `services/summarize.py`,
+  `services/variant_view.py`, `services/search_index.py`,
+  `services/ask.py`); GETs stay strictly read-only.
+- **Retranscription**: a new active transcript gets NO segmented version
+  ("Not segmented"); no boundaries/summaries/tags are copied.
+
+**Verification (historical Step 6.1 delivery state, independently
+confirmed)**: full suite
+**2507 collected and 2507 passed** (the Step 6.1 delta is **155 new
+tests** across `tests/test_segmentation_models.py` (19),
+`tests/test_segmentation_service.py` (45),
+`tests/test_web_segmentation.py` (82) and
+`tests/test_segmentation_migration.py` (9), plus the 0011 leaf in
+`tests/test_migration_readiness.py`, the `TARGET_LEAF` update in
+`tests/test_search_index_migration.py`, and the static-asset `?v=4`
+assertions in `tests/test_web_detail.py`/`tests/test_web_security.py`),
+only the known `audioop` warning; `manage.py check`,
+`makemigrations --check` (0011) and `git diff --check` clean. No
+real-database migration or user data operation is claimed; no new
+commit/HEAD — the work and its tests are in the working tree. The
+CURRENT working-tree state is **2722 collected and 2722 passed** — see
+the Step 6.2 section below.
+
+## Step 6.2 — Section-level summaries and tags + derived Library items (delivered in the working tree)
+
+**Scope delivered** (durable contract in `AGENTS.md`): the approved
+Step 6.2 phase — topic `Section` rows of an active split layout are now
+first-class Library items and carry their own multilingual summaries
+and tags. Step 6.3 (search/embedding/Ask integration for section
+content) is NOT implemented: keyword/semantic/hybrid/Ask stay
+whole-recording-only and unchanged. 6.4 (retention/Rescan) and 6.5
+(launchd) remain later approval gates.
+
+- **Derived Library item projection** (`workflow/query.py`): the
+  Library overview unit is a DERIVED item, never a persisted model —
+  there is NO `LibraryItem` model. Any Recording with no active topic
+  Sections (unprocessed, unsplit active transcript, or a crop-only
+  active layout) yields exactly ONE recording-backed item; an active
+  transcript/layout with N canonical topic Sections (N ≥ 2) yields
+  exactly those N section-backed items and REPLACES its recording-backed
+  item in the normal Library; historical layouts are absent and
+  retranscription (no new segmented version) naturally returns to one
+  recording item. The projection is a read-only DB UNION of same-shaped
+  recording/section branches (`library_item_queryset` /
+  `library_item_count`): filters, count, ordering (`apply_item_sort`)
+  and pagination all happen database-side BEFORE hydration — never a
+  Python expansion of all recordings. The "which recordings are
+  replaced / which Sections are valid" state is ONE lazy parameterized
+  read-only SQL canonical-layout predicate (a RawSQL subquery
+  `_canonical_layout_predicate` shared by both branches — exactly two
+  fixed parameters, never a growing `IN (...)` list, never a Python id
+  set) that fail-closes on every canonical rule (ACTIVE version +
+  transcript, contiguous segment ordinals 0..count-1 with a nonempty
+  transcript, range inside `[0, count)`, topic count in
+  2..`MAX_TOPIC_SECTIONS`, cross-parent rejection, section ordinals
+  exactly 1..N with an exhaustive contiguous partition, exact-string
+  bounded nonblank control-free titles). Each page is hydrated by
+  `hydrate_library_items` in bounded batched queries (no N+1) into
+  `LibraryItemCard` adapters (section items carry their section-scoped
+  active tags, default-variant Summary, variant state and language set;
+  the Card template renders section provenance — topic, range,
+  parent recording — while the Table view shows only the section title
+  link (each topic reads like an independent Library item), and both
+  views link to the new section detail page). The
+  search/embedding/Ask stack is UNCHANGED and whole-recording-only:
+  defense-in-depth, `search_index`, `ask` and the metadata-aux tag
+  projection all filter `section__isnull=True` /
+  `segmented_version__isnull=True` (the Library tag chips and the
+  recording metadata aux text never include section-scoped tags).
+- **Section summaries** (`workflow/services/summarize.py:
+  summarize_section_one`): an EXPLICIT per-section action — POST-only
+  two-step confirmation (`/recordings/<id>/sections/<sid>/summarize/`,
+  `views/actions.py:action_section_summarize`) under the shared
+  pipeline lock + `recover_interruptions`, guarded by the OPAQUE bounded
+  `section_state_fingerprint` (SELECT-only, binds active transcript/
+  layout/section identity + language-resolution inputs + a sufficient
+  append-only attempt contract + capped variant/summary state;
+  stale/duplicate submissions are safe no-ops, lock busy is the friendly
+  409). The target must be a TOPIC Section of the ACTIVE transcript's
+  ACTIVE layout (shared `segmentation.require_active_topic_section`);
+  fixed, historical, cross-parent and malformed-layout targets are
+  stable sanitized `SegmentationError` categories, and historical
+  sections are readable (via `?v=`/`&layout=` and the section detail
+  route) but never actionable. Input is ALL and ONLY the Section's
+  canonical segment range `[start, end_exclusive)` — deterministic full
+  stored text, never source audio, exact-count defense-in-depth —
+  chunked by the existing bounded path. Output variants/versioning
+  reuse the EXACT multilingual machinery: one active Summary per
+  (transcript, section, output_language), section-scoped
+  `SummaryVariantState`, generation selectors default/original/en/
+  zh-Hant, exact-scope attempt provenance and interruption recovery.
+  The target section/layout is captured at the start AND revalidated at
+  persistence (`section_layout_changed` failure — never a write to
+  read-only history). A section summary NEVER changes the
+  Recording-level default tuple (`summary_status`,
+  `resummarization_failed`, `last_failed_attempt`), processing status or
+  the whole-recording summary, and schedules NO recording
+  search/embedding sync (not indexed until 6.3). Only the DEFAULT
+  variant materializes section-scoped tag suggestions.
+- **Section tags** (`workflow/services/tags.py` section-scoped mutations
+  + migration 0012): nullable `TagAssignment.section` ownership FK
+  (PROTECT) with MUTUALLY EXCLUSIVE conditional uniques — recording
+  scope (`section IS NULL`, unique `(recording, tag)`; existing rows
+  migrate unchanged) vs section scope (`section IS NOT NULL`, unique
+  `(section, tag)`); `recording` stays a REQUIRED denormalized parent
+  for both scopes, so a recording and its sections hold independent
+  assignments of the same tag. All active section writes are
+  SERVICE-ONLY (`add_manual_tag_section`, `confirm_section_suggestion`,
+  `remove_section_tag`, `apply_section_tag_selection` — the atomic
+  complete-selection Done — and `create_custom_tag_and_assign_section`),
+  sharing the exact validation/retired-opt-in/origin/suppression/
+  custom-collision semantics, running under the local SQLite BUSY/LOCKED
+  retry (outside atomic), taking no pipeline lock and scheduling NO
+  recording search sync (section tags are not indexed until 6.3);
+  historical sections are read-only. Web: the section detail page
+  (`/recordings/<id>/sections/<sid>/`, read-only GET) renders the
+  section's own tags and, for ACTIVE sections only, the tag editor and
+  the per-variant summary action; POST-only endpoints
+  (`section-tag-apply`/`section-tag-confirm`/`section-tag-remove`) stay
+  CSRF-protected with the exact section validation.
+- **Migration 0012** (`0012_remove_tagassignment_uniq_tag_assignment_and_more`,
+  depends on 0011): additive and fully reversible, no data migration
+  (existing rows stay recording-scoped by construction); the reverse
+  deletes section-only assignment rows deterministically BEFORE
+  restoring the old global `(recording, tag)` unique, preserving
+  recording assignments. Covered by genuine MigrationExecutor tests
+  (`tests/test_tag_assignment_migration_0012.py`, forward + reverse).
+
+**Verification (independently confirmed, current state)**: full suite
+**2722 collected and 2722 passed** (the Step 6.1 state was 2507 —
+historical; the Step 6.2 delta is **215 tests**: the prior **207**
+Step 6.2 tests — the eight new Step 6.2
+test files — `tests/test_library_items.py` (32),
+`tests/test_section_summary_service.py` (31),
+`tests/test_section_tags.py` (30),
+`tests/test_tag_assignment_migration_0012.py` (7),
+`tests/test_tag_assignment_models_0012.py` (12),
+`tests/test_web_section_detail.py` (36),
+`tests/test_web_section_summarize.py` (39) and
+`tests/test_web_section_tags.py` (16) = **203 tests** — plus **4
+additions** across `tests/test_search_index_service.py`,
+`tests/test_web_detail.py` and `tests/test_web_list.py`, and the 0012
+leaf in `tests/test_migration_readiness.py` plus the `TARGET_LEAF`
+update in `tests/test_search_index_migration.py` — plus **8
+UI-refinement tests** (3 section-confirmation, 4 normal Library-table,
+1 search-table scoping)), only the known
+`audioop` warning; `manage.py check`, `makemigrations --check` (0012)
+and `git diff --check` clean. The focused Step 6.1/6.2 section set
+(**326 tests** — the seven Step 6.2 section/web test files plus the
+four Step 6.1 segmentation test files) passes. No real-database
+migration or user data operation is claimed; no new commit/HEAD — the
+work and its tests are in the working tree, uncommitted.
 
 ## Step 5D — Ask with Citations (delivered in the working tree)
 
@@ -319,9 +580,11 @@ warning; `manage.py check`, `makemigrations --check` (NO migration) and
 `git diff --check` clean. No real network, no real MacWhisper/oMLX, no
 user data, no real embedding/chat network calls; the real
 `config/config.yaml` untouched; no real-database migration is claimed.
-The CURRENT working-tree state is **2238 collected and 2238 passed** —
+The CURRENT working-tree state is **2722 collected and 2722 passed** —
 see the current audit at the top of this file.
-The next planned work is **Step 6**.
+Step 6.1 (segmented versions) and Step 6.2 (section-level
+summaries/tags + Library items) are delivered — see the Step 6.1 and
+Step 6.2 sections above.
 
 ## Step 5C — Semantic and Hybrid Search (delivered in the working tree)
 
@@ -1962,8 +2225,48 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current (v6 detail/transcript/history redesign tree, independently
-  full-suite verified): the full suite passes — **2238 collected
+- Current (Step 6.2 section summaries/tags + Library items tree,
+  independently full-suite verified): the full suite passes — **2722
+  collected and 2722 passed**
+  (the Step 6.2 delta is **215 tests**: the prior **207** Step 6.2 tests
+  — the eight new Step 6.2 test
+  files — `tests/test_library_items.py` (32),
+  `tests/test_section_summary_service.py` (31),
+  `tests/test_section_tags.py` (30),
+  `tests/test_tag_assignment_migration_0012.py` (7),
+  `tests/test_tag_assignment_models_0012.py` (12),
+  `tests/test_web_section_detail.py` (36),
+  `tests/test_web_section_summarize.py` (39) and
+  `tests/test_web_section_tags.py` (16) = **203 tests** — plus **4
+  additions** across `tests/test_search_index_service.py`,
+  `tests/test_web_detail.py` and `tests/test_web_list.py`, the 0012
+  leaf in `tests/test_migration_readiness.py`, and the `TARGET_LEAF`
+  update in `tests/test_search_index_migration.py` — plus **8
+  UI-refinement tests** (3 section-confirmation, 4 normal
+  Library-table, 1 search-table scoping)),
+  with the only warning the known `audioop` DeprecationWarning (Python
+  3.12, removal slated for 3.13); `manage.py check`,
+  `makemigrations --check` (0012) and `git diff --check` pass. No
+  real-database migration or user data operation is claimed; no new
+  commit/HEAD.
+- Historical (Step 6.1 segmented-versions tree, independently
+  full-suite verified at the time): the full suite then passed —
+  **2507 collected and 2507 passed**
+  (the Step 6.1 delta is **155 new tests** across the four new files
+  `tests/test_segmentation_models.py` (19),
+  `tests/test_segmentation_service.py` (45),
+  `tests/test_web_segmentation.py` (82) and
+  `tests/test_segmentation_migration.py` (9), plus the 0011 leaf in
+  `tests/test_migration_readiness.py`, the `TARGET_LEAF` update in
+  `tests/test_search_index_migration.py`, and the static-asset `?v=4`
+  assertions in `tests/test_web_detail.py`/`tests/test_web_security.py`),
+  with the only warning the known `audioop` DeprecationWarning (Python
+  3.12, removal slated for 3.13); `manage.py check`,
+  `makemigrations --check` (0011) and `git diff --check` pass. No
+  real-database migration or user data operation is claimed; no new
+  commit/HEAD.
+- Historical (v6 detail/transcript/history redesign tree, independently
+  full-suite verified at the time): the full suite then passed — **2238 collected
   and 2238 passed** (the v6 redesign delta is 35 tests: the new
   `tests/test_web_history.py` (10 — history safety, routing
   allowlist/projection, bounds with truncation notices, source
@@ -1990,7 +2293,10 @@ Production Library UI are delivered.
   secret-hygiene sweeps), with the only warning the known
   `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
   `manage.py check`, `makemigrations --check` (NO migration) and
-  `git diff --check` pass. The historical full-suite states are 2235
+  `git diff --check` pass. The historical full-suite states are 2722
+  (Step 6.2 — current state after the UI refinement; the initial Step
+  6.2 delivery was 2714), 2507
+  (Step 6.1), 2235
   (v6 corrections round — intermediate before the heading-hierarchy
   tests), 2203
   (unified top bar + Step 5D), 2191
@@ -2118,7 +2424,8 @@ Production Library UI are delivered.
   (incremental embedding synchronization), Step 5C
   (semantic/hybrid search) and Step 5D (Ask with Citations) are all
   delivered** (see the sections at the top of this file). **Step 5 is
-  complete; Step 6 is next.**
+  complete; Step 6.0, Step 6.1 and Step 6.2 are delivered; Step 6.3 is
+  next.**
 - **Step 5B — Local Embeddings Foundation**: **5B.1 delivered** — the
   bounded local /embeddings client
   (`workflow/services/embedding_client.py`) plus the embedding config
@@ -2153,8 +2460,14 @@ Production Library UI are delivered.
   summaries/tags, retention cleanup (only after successful processing
   + retention delay; Keep-Audio override), missing-file reconciliation
   UI, launchd scheduling. **The overall Step 6 plan is accepted as the
-  working baseline and Step 6.0 is complete; Step 6.1 is planned/next and
-  NOT implemented.** The approved decisions D1–D12 and the phase
+  working baseline, Step 6.0 is complete, Step 6.1 (segmented
+  versions: logical trim + topic layout/history, structure/history only)
+  is DELIVERED in the working tree** (see the Step 6.1 section at the
+  top of this file), **and Step 6.2 (section-level summaries/tags +
+  derived Library items) is DELIVERED too** (see the Step 6.2 section
+  at the top of this file); the next planned phase is **Step 6.3**
+  (search/embedding/Ask integration for section content), not yet
+  implemented. The approved decisions D1–D12 and the phase
   acceptance contracts are in `docs/step-6-decisions.md`, including the
   final approved feedback refinement (edit toggle reveals scissors only;
   scissors open a small action dialog — Split here / Crop from here /

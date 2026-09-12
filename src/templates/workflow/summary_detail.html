@@ -8,7 +8,17 @@
   <a href="{% url 'recording-history' recording.pk %}">History</a>
 </p>
 
-{% if is_current %}
+{% if is_section_summary %}
+  <p class="historical-banner">
+    This summary belongs to topic section
+    {% if section_detail_url %}<a href="{{ section_detail_url }}">“{{ summary.section.title }}”</a>
+    {% else %}“{{ summary.section.title }}”{% endif %}
+    (segment range
+    <code>{{ summary.section.start_segment_ordinal }}–{{ summary.section.end_segment_ordinal_exclusive }}</code>)
+    of transcript version <code>{{ summary.transcript_id }}</code> — section summaries are
+    section-scoped and never the recording's whole summary.
+  </p>
+{% elif is_current %}
   <p class="current-banner">This summary IS the current summary of the recording.</p>
 {% else %}
   <p class="historical-banner">

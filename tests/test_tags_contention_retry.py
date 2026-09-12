@@ -388,13 +388,21 @@ class TestPolicyApplied:
         ATOMIC-wrapped function, which in turn wraps the raw function.
         ``create_custom_tag_and_assign`` is wrapped like the other three
         unlocked web tag mutations. The bulk ``apply_tag_selection``
-        (Done) is wrapped the same way: retry OUTSIDE one atomic block."""
+        (Done) is wrapped the same way: retry OUTSIDE one atomic block.
+        The Step 6.2 SECTION-scoped mutations carry the identical
+        one-retry-outside-one-atomic shape (they never nest a decorated
+        public function inside another decorated transaction)."""
         for name in (
             "add_manual_tag",
             "confirm_suggestion",
             "remove_tag",
             "create_custom_tag_and_assign",
             "apply_tag_selection",
+            "add_manual_tag_section",
+            "confirm_section_suggestion",
+            "remove_section_tag",
+            "apply_section_tag_selection",
+            "create_custom_tag_and_assign_section",
         ):
             func = getattr(tags_service, name)
             assert getattr(func, "__wrapped__", None) is not None

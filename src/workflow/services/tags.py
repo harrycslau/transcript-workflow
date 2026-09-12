@@ -19,7 +19,21 @@ Synchronization is an upsert by normalized ``name_key``:
 
 Custom tags (``definition_origin=custom``) are global reusable
 definitions created from the web UI via
-:func:`create_custom_tag_and_assign`.
+:func:`create_custom_tag_and_assign` (recording scope) or
+:func:`create_custom_tag_and_assign_section` (section scope).
+
+Step 6.2 adds section-scoped equivalents of every web tag mutation
+(:func:`add_manual_tag_section`, :func:`confirm_section_suggestion`,
+:func:`remove_section_tag`, :func:`apply_section_tag_selection`,
+:func:`create_custom_tag_and_assign_section`). A section target must be
+a TOPIC Section of the recording's ACTIVE transcript and ACTIVE
+SegmentedVersion (shared canonical validation); historical sections are
+read-only. Section-scoped operations share the exact input validation,
+retired opt-in, origin transitions, suppression, no-op/zero-DML
+semantics, custom-tag collision behavior, and the local SQLite
+BUSY/LOCKED retry, but NEVER schedule a recording search sync — section
+tags are not indexed until Step 6.3 — and never acquire the pipeline
+lock.
 
 ``sync_tags`` mutates the database and therefore runs ONLY inside
 locked mutating commands (``brain summarize``, ``brain tags --sync``);
@@ -36,7 +50,9 @@ from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 
 from brainlib.config import AppConfig, TagSpec, tag_name_key
-from workflow.models import Tag, TagAssignment, TagDeactivatedBy, TagOrigin
+from workflow.models import Recording, Tag, TagAssignment, TagDeactivatedBy, TagOrigin
+from workflow.services import segmentation as segmentation_service
+from workflow.services.segmentation import SegmentationError
 from workflow.services.search_sync import schedule_recording_sync
 
 # ---------------------------------------------------------------------------
@@ -206,18 +222,71 @@ def _lock_recording(recording_pk: str) -> None:
     depend on it: writers serialize anyway and the
     unique(recording, tag) constraint plus idempotent re-select handle
     any residual race. The redundant partial active-unique constraint is
-    never relied upon.
+    never relied upon. Section-scoped writers call this BEFORE their
+    authoritative active-section validation so the serialization
+    boundary precedes every validation read.
     """
-    from workflow.models import Recording
-
     Recording.objects.select_for_update().get(pk=recording_pk)
 
 
-def _manual_assignment_for(recording, tag: Tag) -> tuple[TagAssignment, bool, bool, bool]:
+def _section_parent_recording(section) -> Recording:
+    """Cheap parent-recording derivation for the serialization boundary.
+
+    READ-ONLY and deliberately NOT the authoritative validation: it only
+    discovers WHICH recording serializes writers for this section. The
+    authoritative active-section validation runs AFTER the recording
+    lock, inside the same top-level transaction — a concurrent layout
+    change either lands before the lock (seen by the post-lock
+    validation) or conflicts with the write and is re-validated on the
+    fresh retry.
+    """
+    from workflow.models import Section
+
+    if section is None or type(section) is not Section:
+        raise TagOperationError(
+            "section_not_available", "This section is not available for tag editing."
+        )
+    return section.transcript.recording
+
+
+def _require_topic_section(section) -> dict:
+    """Validate a Section as a live topic target; return the canonical
+    layout dict.
+
+    Requires a TOPIC Section of the recording's ACTIVE transcript and
+    ACTIVE SegmentedVersion via the shared segmentation canonical
+    validator (fixed/historical/cross-parent/malformed-layout targets
+    raise ``SegmentationError``). The validation re-fetches the Section
+    and its version from the database (never the caller's cached FK
+    state), so a layout that became historical after the caller captured
+    the object is rejected — no write is ever attempted against a
+    historical section. The failure is translated to the stable
+    sanitized ``TagOperationError`` category ``section_not_available``.
+    Callers must have established the recording serialization boundary
+    (``_lock_recording``) before invoking this.
+    """
+    from workflow.models import Section
+
+    if section is None or type(section) is not Section:
+        raise TagOperationError(
+            "section_not_available", "This section is not available for tag editing."
+        )
+    try:
+        return segmentation_service.require_active_topic_section(section)
+    except SegmentationError:
+        raise TagOperationError(
+            "section_not_available", "This section is not available for tag editing."
+        ) from None
+
+
+def _manual_assignment_for(recording, tag: Tag, *, section=None) -> tuple[TagAssignment, bool, bool, bool]:
     """Create/restore the user-owned manual assignment for ``tag``.
 
-    Shared by every web tag mutation so the ownership/suppression
-    semantics exist in exactly one place:
+    Shared by every web tag mutation (recording and section scopes) so
+    the ownership/suppression semantics exist in exactly one place.
+    ``section=None`` scopes to the whole-recording rows
+    (``section IS NULL``); a non-None ``section`` scopes to that
+    Section's rows. The caller has already validated the section target.
 
     - no assignment          -> create active ``manual``;
     - inactive (suppressed or model-deactivated) -> reactivate as
@@ -232,22 +301,28 @@ def _manual_assignment_for(recording, tag: Tag) -> tuple[TagAssignment, bool, bo
 
     Returns ``(assignment, created, promoted, reactivated)`` so callers
     can give precise feedback.
+
+    The caller establishes the recording serialization boundary
+    (``_lock_recording``) before invoking this helper.
     """
-    _lock_recording(recording.pk)
+    scope = {"recording": recording, "section": section} if section is not None else {
+        "recording": recording, "section__isnull": True
+    }
+    defaults = {
+        "origin": TagOrigin.MANUAL,
+        "is_active": True,
+        "source_summary": None,
+    }
     try:
         assignment, created = TagAssignment.objects.get_or_create(
-            recording=recording,
             tag=tag,
-            defaults={
-                "origin": TagOrigin.MANUAL,
-                "is_active": True,
-                "source_summary": None,
-            },
+            defaults=defaults,
+            **scope,
         )
     except IntegrityError:
-        # Known conflict: unique(recording, tag). Re-select and treat
+        # Known conflict: the scope/tag unique. Re-select and treat
         # as idempotent.
-        assignment = TagAssignment.objects.get(recording=recording, tag=tag)
+        assignment = TagAssignment.objects.get(tag=tag, **scope)
         created = False
     promoted = False
     reactivated = False
@@ -301,6 +376,7 @@ def add_manual_tag(recording, tag: Tag, *, include_retired: bool = False) -> dic
             "This tag is retired and no longer configured. Tick 'include retired tags' "
             "if you deliberately want to restore it.",
         )
+    _lock_recording(recording.pk)
     assignment, created, promoted, reactivated = _manual_assignment_for(recording, tag)
     # Step 5A.3: effective tag names are indexed aux text (metadata doc).
     schedule_recording_sync([recording.pk])
@@ -322,7 +398,9 @@ def confirm_suggestion(recording, tag: Tag) -> dict:
     reference is preserved. Idempotent.
     """
     _lock_recording(recording.pk)
-    assignment = TagAssignment.objects.filter(recording=recording, tag=tag).first()
+    assignment = TagAssignment.objects.filter(
+        recording=recording, tag=tag, section__isnull=True
+    ).first()
     if assignment is None or not assignment.is_active:
         raise TagOperationError(
             "no_active_assignment",
@@ -365,7 +443,9 @@ def remove_tag(recording, tag: Tag) -> dict:
     preserved. Idempotent for already-inactive rows.
     """
     _lock_recording(recording.pk)
-    assignment = TagAssignment.objects.filter(recording=recording, tag=tag).first()
+    assignment = TagAssignment.objects.filter(
+        recording=recording, tag=tag, section__isnull=True
+    ).first()
     removed = _remove_assignment_for(assignment)
     if removed:
         # Step 5A.3: deactivation drops the tag name from the metadata
@@ -465,7 +545,42 @@ def apply_tag_selection(
     *,
     new_tag_name: str = "",
 ) -> dict:
-    """Apply the COMPLETE desired active tag selection atomically (Done).
+    """Apply the COMPLETE desired active RECORDING-scoped tag selection
+    atomically (Done). See :func:`_apply_tag_selection_impl` for the
+    full contract; this is the recording-scope public wrapper (one retry
+    outside exactly one atomic block)."""
+    return _apply_tag_selection_impl(
+        recording, selected_available_ids, selected_retired_ids,
+        new_tag_name=new_tag_name,
+    )
+
+
+def _apply_tag_selection_impl(
+    recording,
+    selected_available_ids,
+    selected_retired_ids,
+    *,
+    new_tag_name: str = "",
+    section=None,
+) -> dict:
+    """Apply the COMPLETE desired active tag selection atomically.
+
+    ONE undecorated shared implementation for both the recording scope
+    (``section=None`` — the Step 4 modal rows ``section IS NULL``) and a
+    Section scope (``section`` given). It is called ONLY from public
+    functions that place exactly ONE ``_retry_on_sqlite_contention``
+    outside exactly ONE ``transaction.atomic``, so every retry attempt
+    runs in a fresh top-level transaction.
+
+    For a section scope the parent Recording is derived from the Section
+    (never trusted from a caller), the recording serialization boundary
+    is established FIRST (``_lock_recording``), the authoritative
+    active-section validation runs AFTER that boundary, and only then
+    are the rows read and written (``section=section``). A concurrent
+    layout change therefore either lands before the lock (seen by the
+    post-lock validation) or conflicts with the write and is re-validated
+    on the fresh retry. Section-scoped changes never schedule a
+    recording search sync (section tags are not indexed until Step 6.3).
 
     ``selected_available_ids`` / ``selected_retired_ids`` are the desired
     active set: available IDs must reference ``is_configured=True``
@@ -511,8 +626,17 @@ def apply_tag_selection(
         raise TagOperationError(
             "tag_selection_too_large", _TAG_SELECTION_TOO_LARGE_MESSAGE
         )
-    # Serialize writers per recording and re-read the row inside the txn.
-    _lock_recording(recording.pk)
+    if section is not None:
+        # Section scope: derive the parent recording for the serialization
+        # boundary, lock it FIRST, then run the authoritative active-
+        # section validation (post-lock, inside this top-level
+        # transaction), then read/write section-scoped rows only.
+        recording = _section_parent_recording(section)
+        _lock_recording(recording.pk)
+        _require_topic_section(section)
+    else:
+        # Serialize writers per recording and re-read the row inside the txn.
+        _lock_recording(recording.pk)
 
     # Category-checked tag existence (one bounded IN query).
     all_ids = available_ids + retired_ids
@@ -581,13 +705,21 @@ def apply_tag_selection(
 
     desired_active = set(available_ids) | set(retired_ids)
 
-    # Authoritative per-recording re-read of every assignment row (the
-    # lock above serialized writers; the unique(recording, tag) constraint
-    # plus this single read keep the loop deterministic).
-    current = {
-        assignment.tag_id: assignment
-        for assignment in TagAssignment.objects.filter(recording=recording)
-    }
+    # Authoritative per-scope re-read of every assignment row (the lock
+    # above serialized writers; the scope/tag unique constraint plus this
+    # single read keep the loop deterministic).
+    if section is not None:
+        current = {
+            assignment.tag_id: assignment
+            for assignment in TagAssignment.objects.filter(section=section)
+        }
+    else:
+        current = {
+            assignment.tag_id: assignment
+            for assignment in TagAssignment.objects.filter(
+                recording=recording, section__isnull=True
+            )
+        }
 
     changed = False
     counts = {"created": 0, "reactivated": 0, "removed": 0, "unchanged": 0}
@@ -625,6 +757,7 @@ def apply_tag_selection(
         TagAssignment.objects.create(
             recording=recording,
             tag=tags_by_pk[tag_id],
+            section=section,
             origin=TagOrigin.MANUAL,
             source_summary=None,
             is_active=True,
@@ -633,9 +766,11 @@ def apply_tag_selection(
         changed = True
         counts["created"] += 1
 
-    if changed:
-        # Step 5A.3: effective tag membership changed (add/reactivate/
-        # remove/new custom) — exactly ONE recording sync inside the txn.
+    if changed and section is None:
+        # Step 5A.3: effective recording-scoped tag membership changed
+        # (add/reactivate/remove/new custom) — exactly ONE recording sync
+        # inside the txn. Section-scoped changes are not indexed until
+        # Step 6.3 and schedule nothing.
         schedule_recording_sync([recording.pk])
 
     return {
@@ -696,6 +831,38 @@ def _validate_custom_tag_name(raw_name) -> tuple[str, str]:
     return name, key
 
 
+def _create_custom_tag(raw_name: str) -> tuple[Tag, bool]:
+    """Create ONE global reusable custom Tag from an exact-validated name.
+
+    Shared by the recording-scoped and section-scoped create-and-assign
+    entry points (and the bulk selection's inner savepoint uses the same
+    rules inline). Validation runs before any write; the insert lives in
+    an inner atomic savepoint so a concurrent ``name_key`` collision
+    raises the stable ``duplicate_tag`` ``TagOperationError`` (never a
+    leaked ``IntegrityError``, never a silently assigned definition the
+    user did not create). Returns ``(tag, created)``.
+    """
+    name, key = _validate_custom_tag_name(raw_name)
+    try:
+        with transaction.atomic():
+            tag = Tag.objects.create(
+                name=name, name_key=key, description="",
+                is_configured=True, definition_origin=Tag.DefinitionOrigin.CUSTOM,
+            )
+            created_tag = True
+    except IntegrityError:
+        # A concurrent writer created this normalized key first. The
+        # definition now exists globally, so a second "create" must be
+        # told so — never silently assigned, never a leaked IntegrityError.
+        existing = Tag.objects.filter(name_key=key).first()
+        display = existing.name if existing is not None else name
+        raise TagOperationError(
+            "duplicate_tag",
+            f"A tag named '{display}' already exists.",
+        ) from None
+    return tag, created_tag
+
+
 @_retry_on_sqlite_contention
 @transaction.atomic
 def create_custom_tag_and_assign(recording, raw_name: str) -> dict:
@@ -716,26 +883,185 @@ def create_custom_tag_and_assign(recording, raw_name: str) -> dict:
     assigning a definition the user did not create). No pipeline lock —
     this is a web tag mutation like the others.
     """
-    name, key = _validate_custom_tag_name(raw_name)
-    try:
-        with transaction.atomic():
-            tag = Tag.objects.create(
-                name=name, name_key=key, description="",
-                is_configured=True, definition_origin=Tag.DefinitionOrigin.CUSTOM,
-            )
-            created_tag = True
-    except IntegrityError:
-        # A concurrent writer created this normalized key first. The
-        # definition now exists globally, so a second "create" must be
-        # told so — never silently assigned, never a leaked IntegrityError.
-        existing = Tag.objects.filter(name_key=key).first()
-        display = existing.name if existing is not None else name
-        raise TagOperationError(
-            "duplicate_tag",
-            f"A tag named '{display}' already exists.",
-        ) from None
+    tag, created_tag = _create_custom_tag(raw_name)
+    _lock_recording(recording.pk)
     assignment, created, promoted, reactivated = _manual_assignment_for(recording, tag)
     schedule_recording_sync([recording.pk])
+    return {
+        "tag": tag,
+        "created_tag": created_tag,
+        "assignment": assignment,
+        "assignment_created": created,
+        "promoted": promoted,
+        "reactivated": reactivated,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Section-scoped tag editing (Step 6.2 backend foundation)
+# ---------------------------------------------------------------------------
+#
+# Section-scoped equivalents of every web tag mutation, for the later
+# Library/web phase. They share the exact input validation, retired
+# opt-in, origin transitions, suppression, no-op/zero-DML semantics,
+# custom-tag collision/promotion behavior, and the local SQLite
+# BUSY/LOCKED retry of the recording operations; they take no pipeline
+# lock and NEVER schedule a recording search sync (section tags are not
+# indexed until Step 6.3). A section target must be a TOPIC Section of
+# the recording's ACTIVE transcript and ACTIVE SegmentedVersion —
+# historical sections are read-only and rejected with the stable
+# ``section_not_available`` category before any write.
+
+
+@_retry_on_sqlite_contention
+@transaction.atomic
+def add_manual_tag_section(section, tag: Tag, *, include_retired: bool = False) -> dict:
+    """Assign ``tag`` to ``section`` as a user-owned manual assignment.
+
+    Identical ownership semantics to :func:`add_manual_tag` (create /
+    promote / reactivate / no-op), scoped to the Section's assignment
+    rows only. The section must be a live topic target of the ACTIVE
+    layout (historical sections are read-only). No recording search sync
+    is scheduled. Retired tags require the explicit ``include_retired``
+    opt-in.
+
+    Ordering inside the ONE top-level transaction: the parent recording
+    is derived first, the recording serialization boundary
+    (``_lock_recording``) is established BEFORE the authoritative
+    active-section validation, and only then are rows written — so a
+    concurrent layout change either lands before the lock or conflicts
+    with the write and is re-validated on the fresh retry.
+    """
+    if not tag.is_configured and not include_retired:
+        raise TagOperationError(
+            "retired_tag",
+            "This tag is retired and no longer configured. Tick 'include retired tags' "
+            "if you deliberately want to restore it.",
+        )
+    recording = _section_parent_recording(section)
+    _lock_recording(recording.pk)
+    _require_topic_section(section)
+    assignment, created, promoted, reactivated = _manual_assignment_for(
+        recording, tag, section=section
+    )
+    return {
+        "assignment": assignment,
+        "created": created,
+        "promoted": promoted,
+        "reactivated": reactivated,
+    }
+
+
+@_retry_on_sqlite_contention
+@transaction.atomic
+def confirm_section_suggestion(section, tag: Tag) -> dict:
+    """Confirm a currently suggested section-scoped tag.
+
+    Identical semantics to :func:`confirm_suggestion`, scoped to the
+    Section's assignment rows: origin becomes ``confirmed`` (user-owned,
+    survives re-summarization), the originating Summary reference is
+    preserved and must belong to the SAME section (never cross-scope).
+    The section must be a live topic target of the ACTIVE layout; the
+    recording serialization boundary precedes the authoritative
+    validation inside the one top-level transaction.
+    """
+    recording = _section_parent_recording(section)
+    _lock_recording(recording.pk)
+    _require_topic_section(section)
+    assignment = TagAssignment.objects.filter(section=section, tag=tag).first()
+    if assignment is None or not assignment.is_active:
+        raise TagOperationError(
+            "no_active_assignment",
+            "Only an active (suggested or manual) tag can be confirmed.",
+        )
+    if (
+        assignment.source_summary_id is not None
+        and assignment.source_summary is not None
+        and assignment.source_summary.section_id != section.pk
+    ):
+        raise TagOperationError(
+            "invalid_section_provenance",
+            "This tag suggestion does not belong to the section.",
+        )
+    already_confirmed = assignment.origin == TagOrigin.CONFIRMED
+    if not already_confirmed:
+        assignment.origin = TagOrigin.CONFIRMED
+        assignment.save()
+    return {"assignment": assignment, "already_confirmed": already_confirmed}
+
+
+@_retry_on_sqlite_contention
+@transaction.atomic
+def remove_section_tag(section, tag: Tag) -> dict:
+    """Deactivate the section-scoped effective assignment as an explicit
+    user removal (suppression).
+
+    Identical semantics to :func:`remove_tag`, scoped to the Section's
+    assignment rows: ``deactivated_by="user"`` — future model
+    suggestions stay recorded on their summary versions but never
+    reactivate the row; all SummaryTagSuggestion history is preserved.
+    No recording search sync. The section must be a live topic target of
+    the ACTIVE layout; the recording serialization boundary precedes the
+    authoritative validation inside the one top-level transaction.
+    """
+    recording = _section_parent_recording(section)
+    _lock_recording(recording.pk)
+    _require_topic_section(section)
+    assignment = TagAssignment.objects.filter(section=section, tag=tag).first()
+    removed = _remove_assignment_for(assignment)
+    return {"removed": removed, "assignment": assignment}
+
+
+@_retry_on_sqlite_contention
+@transaction.atomic
+def apply_section_tag_selection(
+    section,
+    selected_available_ids,
+    selected_retired_ids,
+    *,
+    new_tag_name: str = "",
+) -> dict:
+    """Apply the COMPLETE desired active tag selection to ONE Section.
+
+    Calls the ONE undecorated shared implementation
+    :func:`_apply_tag_selection_impl` with this Section — NOT the
+    decorated recording wrapper — so this function holds exactly ONE
+    ``_retry_on_sqlite_contention`` outside exactly ONE
+    ``transaction.atomic`` (every retry runs in a fresh top-level
+    transaction). The impl derives the recording, locks it BEFORE the
+    authoritative active-section validation, and schedules no recording
+    search sync for section-scoped changes.
+    """
+    return _apply_tag_selection_impl(
+        None,
+        selected_available_ids,
+        selected_retired_ids,
+        new_tag_name=new_tag_name,
+        section=section,
+    )
+
+
+@_retry_on_sqlite_contention
+@transaction.atomic
+def create_custom_tag_and_assign_section(section, raw_name: str) -> dict:
+    """Create a global reusable custom Tag and assign it to ``section``.
+
+    The definition is global and config-compatible (identical custom
+    validation/creation/collision rules to
+    :func:`create_custom_tag_and_assign`); only the ASSIGNMENT is
+    section-scoped. No recording search sync is scheduled — section tags
+    are not indexed until Step 6.3. The section must be a live topic
+    target of the ACTIVE layout; the recording serialization boundary
+    precedes the authoritative validation inside the one top-level
+    transaction.
+    """
+    recording = _section_parent_recording(section)
+    _lock_recording(recording.pk)
+    _require_topic_section(section)
+    tag, created_tag = _create_custom_tag(raw_name)
+    assignment, created, promoted, reactivated = _manual_assignment_for(
+        recording, tag, section=section
+    )
     return {
         "tag": tag,
         "created_tag": created_tag,

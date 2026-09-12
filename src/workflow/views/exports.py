@@ -18,7 +18,7 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_GET
 
-from workflow.models import Recording, Summary, Transcript
+from workflow.models import Recording, Section, Summary, Transcript
 from workflow.services.rendering import render_markdown, render_text, summary_to_dict
 
 
@@ -107,6 +107,73 @@ def summary_export(request, recording_id):
     ext = "md" if fmt == "markdown" else "txt"
     ctype = "text/markdown" if fmt == "markdown" else "text/plain"
     return _response(content, ctype, f"brain-summary-{sha}.{ext}")
+
+
+@require_GET
+def section_summary_export(request, recording_id, section_id):
+    """Step 6.2 section summary export (markdown/text/json).
+
+    Parent-scoped (the Section must belong to ``recording_id``); only
+    TOPIC Sections with a canonical stored layout are exportable
+    (cross-parent, fixed, or malformed-layout sections are a controlled
+    404). Exports the CURRENT selected variant only — the request's
+    validated language selector (default/en/zh-Hant/original or a
+    concrete existing language); unknown/unresolved targets are friendly
+    404s, never a silent fallback. Filenames derive from the recording's
+    SHA-256 prefix and the format only (header injection impossible).
+    Strictly read-only: no writes, no filesystem, no network.
+    """
+    recording = get_object_or_404(Recording, pk=recording_id)
+    fmt = (request.GET.get("format") or "markdown").strip().lower()
+    if fmt not in ("markdown", "text", "json"):
+        return HttpResponseBadRequest("format must be markdown, text or json")
+    section = get_object_or_404(
+        Section.objects.select_related("transcript", "segmented_version"),
+        pk=section_id,
+        transcript__recording=recording,
+    )
+    if section.segmented_version_id is None:
+        raise Http404("Section not available")
+    from workflow.services.segmentation import (
+        SegmentationError,
+        canonical_layout_for_transcript,
+    )
+
+    try:
+        canonical_layout_for_transcript(section.segmented_version, section.transcript)
+    except SegmentationError:
+        raise Http404("Section not available") from None
+
+    from workflow.services.variant_view import build_variant_view
+
+    language = (request.GET.get("language") or "default").strip()
+    variant = build_variant_view(recording, language, section=section)
+    if variant.error:
+        raise Http404(f"No summary variant '{language}' exists for this section.")
+    if not variant.resolved:
+        raise Http404(
+            "The summary in the original language is not available yet: "
+            "the source language has not been determined. Generate it "
+            "from the section page."
+        )
+    summary = variant.summary
+    if summary is None:
+        raise Http404(
+            f"No summary in '{variant.resolved}' exists for this section yet."
+        )
+
+    sha = recording.sha256[:12]
+    if fmt == "json":
+        payload = summary_to_dict(summary)
+        payload["is_active_in_scope"] = summary.is_active
+        payload["section_id"] = section.pk
+        content = json.dumps(payload, ensure_ascii=False, indent=2)
+        return _response(content, "application/json", f"brain-section-summary-{sha}.json")
+
+    content = render_markdown(summary) if fmt == "markdown" else render_text(summary)
+    ext = "md" if fmt == "markdown" else "txt"
+    ctype = "text/markdown" if fmt == "markdown" else "text/plain"
+    return _response(content, ctype, f"brain-section-summary-{sha}.{ext}")
 
 
 @require_GET

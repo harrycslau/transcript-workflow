@@ -208,6 +208,47 @@ class TestTagFilters:
         response = client.get("/recordings/?tag=family")
         assert str(recording.pk) in response.content.decode()
 
+    def test_section_scoped_tags_never_match_recording_filters(self, client):
+        """Defense-in-depth: the recording Library/search tag filters are
+        recording-scope only — a Step 6.2 section-scoped assignment never
+        matches any/all tag filters (until item projection arrives)."""
+        from django.utils import timezone as dj_timezone
+
+        from workflow.models import Section, SegmentedVersion
+
+        tag = make_tag("Family")
+        recording, transcript, _s = _make_recording(1)
+        version = SegmentedVersion.objects.create(
+            transcript=transcript, revision=1, start_segment_ordinal=0,
+            end_segment_ordinal_exclusive=1, is_active=True,
+            activated_at=dj_timezone.now(),
+        )
+        topic = Section.objects.create(
+            transcript=transcript, segmented_version=version, ordinal=1,
+            title="Topic", start_segment_ordinal=0, end_segment_ordinal_exclusive=1,
+        )
+        # Section-scoped ONLY (no recording-scoped assignment).
+        TagAssignment.objects.create(
+            recording=recording, section=topic, tag=tag, origin="manual",
+            is_active=True,
+        )
+        # 'any' match: the section-scoped assignment must NOT surface the
+        # recording.
+        response = client.get("/recordings/?tag=Family&tag_match=any")
+        content = response.content.decode()
+        assert str(recording.pk) not in content
+        # 'all' match: same.
+        response = client.get("/recordings/?tag=Family")
+        assert str(recording.pk) not in response.content.decode()
+
+    def test_recording_scoped_tag_still_matches_filters(self, client):
+        """The recording-scoped tag filter behavior is unchanged."""
+        tag = make_tag("Family")
+        recording, _t, _s = _make_recording(1)
+        make_tag_assignment(recording, tag, origin="manual")
+        response = client.get("/recordings/?tag=Family")
+        assert str(recording.pk) in response.content.decode()
+
     def test_invalid_tag_match_is_friendly(self, client):
         response = client.get("/recordings/?tag=Family&tag_match=sometimes")
         assert response.status_code == 200

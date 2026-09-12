@@ -381,6 +381,83 @@ class TestMonthHeadings:
 
 
 # ---------------------------------------------------------------------------
+# Normal Library TABLE view: date prefixes + section provenance (UI scoping)
+# ---------------------------------------------------------------------------
+
+
+class TestTableViewDateAndSectionLabels:
+    """NORMAL Library TABLE view only: the date column shows the bare
+    timestamp when ``recorded_at`` exists (no 'Recorded' prefix) and
+    'Discovered <timestamp>' otherwise; section-backed rows drop the
+    secondary provenance line and keep only the topic title link. The
+    card view is unchanged and keeps the section provenance line."""
+
+    def test_table_date_shows_bare_timestamp_when_recorded_at_exists(self, client):
+        rec, _t, _s = _make_recording(1, recorded_at=_local(datetime(2026, 1, 2, 10, 0)))
+        content = client.get("/recordings/?view=table").content.decode()
+        # No 'Recorded' prefix — only the formatted timestamp.
+        assert "Recorded 2026-01-02 10:00" not in content
+        assert ">2026-01-02 10:00<" in content
+
+    def test_table_date_shows_discovered_prefix_when_recorded_at_missing(self, client):
+        rec, _t, _s = _make_recording(2, recorded_at=None)
+        Recording.objects.filter(pk=rec.pk).update(
+            discovered_at=_local(datetime(2026, 1, 5, 8, 0))
+        )
+        content = client.get("/recordings/?view=table").content.decode()
+        # Effective time is discovery time → 'Discovered <timestamp>'.
+        assert "Discovered 2026-01-05 08:00" in content
+        assert "Recorded 2026-01-05" not in content
+
+    def test_table_section_rows_drop_provenance_line(self, client):
+        from workflow.models import Section
+        from workflow.services.segmentation import save_segmented_version
+
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d", "e"], sha="tbl-sec-1"
+        )
+        result = save_segmented_version(
+            rec.pk, transcript.pk, 0, 5, [2], ["First topic", "Second topic"]
+        )
+        sections = list(
+            Section.objects.filter(segmented_version_id=result.version_id).order_by("ordinal")
+        )
+        content = client.get("/recordings/?view=table").content.decode()
+        # Each topic renders as its own independent item: only the topic
+        # title link to the section detail page.
+        assert f'href="/recordings/{rec.pk}/sections/{sections[0].pk}/"' in content
+        assert f'href="/recordings/{rec.pk}/sections/{sections[1].pk}/"' in content
+        assert "First topic" in content and "Second topic" in content
+        # The secondary provenance line ('Topic · segments ... · in
+        # <parent>') is gone from the table.
+        assert '<div class="section-context">' not in content
+        assert "Topic ·" not in content
+        assert "· in <a" not in content
+
+    def test_card_view_keeps_section_provenance(self, client):
+        """Card view is explicitly NOT part of this change: section rows
+        there keep the full provenance line."""
+        from workflow.models import Section
+        from workflow.services.segmentation import save_segmented_version
+
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d", "e"], sha="tbl-sec-2"
+        )
+        result = save_segmented_version(
+            rec.pk, transcript.pk, 0, 5, [2], ["First topic", "Second topic"]
+        )
+        sections = list(
+            Section.objects.filter(segmented_version_id=result.version_id).order_by("ordinal")
+        )
+        content = client.get("/recordings/").content.decode()  # default cards view
+        assert f'href="/recordings/{rec.pk}/sections/{sections[0].pk}/"' in content
+        assert (
+            f'<span class="section-context">Topic · segments 0–1 · in '
+            f'<a href="/recordings/{rec.pk}/">' in content
+        )
+
+
+# ---------------------------------------------------------------------------
 # Locked controls + legacy params + search placeholder
 # ---------------------------------------------------------------------------
 

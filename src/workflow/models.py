@@ -194,6 +194,7 @@ class Recording(models.Model):
             transcript__recording=self,
             transcript__is_active=True,
             section__ordinal=0,
+            section__segmented_version__isnull=True,
             is_active=True,
         )
         if output_language is not None:
@@ -360,13 +361,115 @@ class TranscriptSegment(models.Model):
         return f"TranscriptSegment({self.ordinal})"
 
 
+class SegmentedVersion(models.Model):
+    """One immutable transcript-bound working layout revision (Step 6.1).
+
+    Stores a non-destructive logical trim/working range
+    ``[start_segment_ordinal, end_segment_ordinal_exclusive)`` plus zero
+    or more topic ``Section`` rows that exactly partition that range
+    (a crop-only version has zero topic sections). Saving creates a NEW
+    active revision and supersedes the prior active one; prior revisions
+    stay readable history. Retranscription creates no segmented version.
+
+    ``workflow.services.segmentation`` is the ONLY writer; the rows are
+    otherwise immutable history.
+    """
+
+    id = models.CharField(primary_key=True, max_length=36, default=_uuid, editable=False)
+    transcript = models.ForeignKey(
+        Transcript, on_delete=models.CASCADE, related_name="segmented_versions"
+    )
+    revision = models.PositiveIntegerField()
+    start_segment_ordinal = models.PositiveIntegerField()
+    end_segment_ordinal_exclusive = models.PositiveIntegerField()
+    is_active = models.BooleanField(default=False)
+    activated_at = models.DateTimeField(null=True, blank=True)
+    superseded_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        # Newest revision first: the natural history order.
+        ordering = ["transcript", "-revision"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["transcript", "revision"], name="uniq_segmented_version_revision"
+            ),
+            models.CheckConstraint(
+                condition=Q(revision__gte=1),
+                name="chk_segmented_version_revision_positive",
+            ),
+            models.UniqueConstraint(
+                fields=["transcript"], condition=Q(is_active=True),
+                name="uniq_active_segmented_version",
+            ),
+            # Canonical working range: start >= 0, nonempty half-open.
+            models.CheckConstraint(
+                condition=(
+                    Q(start_segment_ordinal__gte=0)
+                    & Q(end_segment_ordinal_exclusive__gt=F("start_segment_ordinal"))
+                ),
+                name="chk_segmented_version_range",
+            ),
+            # Lifecycle shape (doubles as the state allowlist): an active
+            # row is activated with no supersede; a non-active row is a
+            # superseded history row (activated + superseded).
+            models.CheckConstraint(
+                condition=(
+                    Q(is_active=True, activated_at__isnull=False, superseded_at__isnull=True)
+                    | Q(
+                        is_active=False,
+                        activated_at__isnull=False,
+                        superseded_at__isnull=False,
+                    )
+                ),
+                name="chk_segmented_version_lifecycle_shape",
+            ),
+            # Chronology: supersede never precedes activation.
+            models.CheckConstraint(
+                condition=(
+                    ~Q(superseded_at__isnull=False)
+                    | Q(activated_at__lte=F("superseded_at"))
+                ),
+                name="chk_segmented_version_activated_before_superseded",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"SegmentedVersion({self.transcript_id}, rev {self.revision}, active={self.is_active})"
+
+
 class Section(models.Model):
-    """Logical part of a transcript. Step 2 creates one whole-recording
-    Section per successful transcript; topic splitting arrives in Step 6."""
+    """Logical part of a transcript.
+
+    Step 2 creates one whole-recording Section per successful transcript;
+    Step 6.1 adds topic splitting as segmented versions. Exactly two
+    mutually exclusive shapes exist (DB-enforced by
+    ``chk_section_shape_segmentation``):
+
+    - **Fixed section** (``segmented_version`` NULL): the whole-recording
+      ordinal-0 Section, created once per successful transcript, never
+      part of a segmented version. Both canonical segment-ordinal fields
+      are NULL; ``start_ms``/``end_ms`` carry display timestamps.
+    - **Topic section** (``segmented_version`` non-NULL): ordinal >= 1
+      inside exactly one ``SegmentedVersion``, carrying canonical
+      half-open segment ranges (``start_segment_ordinal`` /
+      ``end_segment_ordinal_exclusive``). ``start_ms``/``end_ms`` are
+      display metadata only (NULL for topic sections; display timestamps
+      are derived from segment data).
+    """
 
     transcript = models.ForeignKey(Transcript, on_delete=models.CASCADE, related_name="sections")
     ordinal = models.PositiveIntegerField(default=0)
     title = models.CharField(max_length=255, blank=True, default="")
+    segmented_version = models.ForeignKey(
+        "workflow.SegmentedVersion",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="sections",
+    )
+    start_segment_ordinal = models.PositiveIntegerField(null=True, blank=True)
+    end_segment_ordinal_exclusive = models.PositiveIntegerField(null=True, blank=True)
     start_ms = models.BigIntegerField(null=True, blank=True)
     end_ms = models.BigIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
@@ -374,7 +477,39 @@ class Section(models.Model):
     class Meta:
         ordering = ["transcript", "ordinal"]
         constraints = [
-            models.UniqueConstraint(fields=["transcript", "ordinal"], name="uniq_section_ordinal"),
+            # Fixed (whole-recording) sections: ordinal 0 unique per
+            # transcript. Topic sections: ordinal unique per segmented
+            # version; ordinals repeat across layout revisions.
+            models.UniqueConstraint(
+                fields=["transcript", "ordinal"],
+                condition=Q(segmented_version__isnull=True),
+                name="uniq_section_ordinal_fixed",
+            ),
+            models.UniqueConstraint(
+                fields=["segmented_version", "ordinal"],
+                condition=Q(segmented_version__isnull=False),
+                name="uniq_section_ordinal_topic",
+            ),
+            # Shape: exactly one of the two alternatives, so a row can
+            # never be half-fixed/half-topic.
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        segmented_version__isnull=True,
+                        ordinal=0,
+                        start_segment_ordinal__isnull=True,
+                        end_segment_ordinal_exclusive__isnull=True,
+                    )
+                    | Q(
+                        segmented_version__isnull=False,
+                        ordinal__gte=1,
+                        start_segment_ordinal__isnull=False,
+                        end_segment_ordinal_exclusive__isnull=False,
+                        end_segment_ordinal_exclusive__gt=F("start_segment_ordinal"),
+                    )
+                ),
+                name="chk_section_shape_segmentation",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -588,15 +723,35 @@ class SummaryTagSuggestion(models.Model):
 
 
 class TagAssignment(models.Model):
-    """Effective tag on a recording, with origin and provenance.
+    """Effective tag on one scope (recording or section), with origin
+    and provenance.
 
-    One row per (recording, tag); ``is_active`` marks the effective
-    assignment. Model regeneration replaces only ``suggested`` rows;
-    ``manual`` rows are never modified by re-summarization.
+    ``section`` NULL = the whole-recording scope (one row per
+    ``(recording, tag)`` regardless of active state); ``section``
+    non-NULL = that topic Section's scope (one row per ``(section, tag)``
+    regardless of active state). ``recording`` stays a REQUIRED
+    denormalized parent for both scopes. The conditional uniques replace
+    the old recording-only uniqueness; a recording and its sections can
+    hold independent assignments of the same tag. Cross-table invariants
+    (the section belongs to the assignment's recording; ``source_summary``
+    belongs to the same section/recording) are enforced by the services
+    (``workflow.services.tags``, ``workflow.services.summarize``), never
+    by SQLite CHECKs.
+
+    ``is_active`` marks the effective assignment; regeneration replaces
+    only ``suggested`` rows; ``manual``/``confirmed`` rows are never
+    modified by re-summarization.
     """
 
     recording = models.ForeignKey(Recording, on_delete=models.PROTECT, related_name="tag_assignments")
     tag = models.ForeignKey(Tag, on_delete=models.PROTECT, related_name="assignments")
+    section = models.ForeignKey(
+        "workflow.Section",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="tag_assignments",
+    )
     origin = models.CharField(max_length=16, choices=TagOrigin.choices)
     source_summary = models.ForeignKey(
         Summary, on_delete=models.SET_NULL, null=True, blank=True, related_name="assignments"
@@ -614,14 +769,19 @@ class TagAssignment(models.Model):
     class Meta:
         ordering = ["recording", "tag__name"]
         constraints = [
-            models.UniqueConstraint(fields=["recording", "tag"], name="uniq_tag_assignment"),
-            # Redundant beside uniq_tag_assignment (one row per pair);
-            # kept for schema stability, never relied upon for race
-            # handling (which uses transactions + the row uniqueness).
+            # One assignment row per scope/tag regardless of active state:
+            # recording scope is unique on (recording, tag), a section
+            # scope on (section, tag). Race handling uses transactions
+            # plus these row uniques.
             models.UniqueConstraint(
                 fields=["recording", "tag"],
-                condition=Q(is_active=True),
-                name="uniq_active_tag_assignment",
+                condition=Q(section__isnull=True),
+                name="uniq_tag_assignment_recording",
+            ),
+            models.UniqueConstraint(
+                fields=["section", "tag"],
+                condition=Q(section__isnull=False),
+                name="uniq_tag_assignment_section",
             ),
             models.CheckConstraint(
                 check=Q(is_active=True, deactivated_by="")

@@ -715,6 +715,41 @@ class TestLibraryMetadataParity:
         assert "/secret" not in doc.body_text and "/" not in doc.body_text
         assert doc.aux_text == "Work"
 
+    def test_section_scoped_tags_do_not_enter_metadata_aux_text(self):
+        """Defense-in-depth: the search index stays whole-recording only.
+        Section-scoped (Step 6.2) assignments never contribute to the
+        recording metadata document's indexed aux text."""
+        from django.utils import timezone as dj_timezone
+
+        from workflow.models import Section, SegmentedVersion, TagAssignment
+
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a one", "b two", "c three"], sha="p-sectags"
+        )
+        version = SegmentedVersion.objects.create(
+            transcript=transcript, revision=1, start_segment_ordinal=0,
+            end_segment_ordinal_exclusive=3, is_active=True,
+            activated_at=dj_timezone.now(),
+        )
+        topic = Section.objects.create(
+            transcript=transcript, segmented_version=version, ordinal=1,
+            title="Topic", start_segment_ordinal=0, end_segment_ordinal_exclusive=3,
+        )
+        rec_tag = make_tag("RecScope")
+        sec_tag = make_tag("SecScope")
+        make_tag_assignment(rec, rec_tag, origin="manual")
+        TagAssignment.objects.create(
+            recording=rec, section=topic, tag=sec_tag,
+            origin="manual", is_active=True,
+        )
+        si.rebuild_index()
+        doc = SearchDocument.objects.get(document_key=f"recording:{rec.pk}")
+        assert doc.aux_text == "RecScope"
+        assert "SecScope" not in doc.aux_text
+        # The section-scoped assignment row itself exists (it is a valid
+        # Step 6.2 row) but is simply not indexed until Step 6.3.
+        assert TagAssignment.objects.filter(section=topic, tag=sec_tag).count() == 1
+
 
 # ---------------------------------------------------------------------------
 # Query bounds: batch-bounded, never row-proportional

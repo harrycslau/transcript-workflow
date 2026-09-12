@@ -11,6 +11,7 @@ from django.core.paginator import Paginator
 from django.db.models import Count
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.views.decorators.http import require_POST
 
 from workflow.models import (
@@ -18,6 +19,8 @@ from workflow.models import (
     AudioStatus,
     ProcessingStatus,
     Recording,
+    Section,
+    SegmentedVersion,
     Summary,
     SummaryState,
     Transcript,
@@ -25,10 +28,8 @@ from workflow.models import (
 from workflow.query import (
     ListFilters,
     RecordingCard,
-    apply_filters,
     list_filters,
     recording_detail_queryset,
-    recording_list_queryset,
 )
 from workflow.views.helpers import get_config
 from workflow.services.web_actions import attempt_summary_for_display
@@ -156,12 +157,38 @@ def recording_list(request):
         )
     else:
         filters_qs = filters.as_querystring()
-        queryset = recording_list_queryset()
+        # Step 6.2 Library item projection: the normal overview unit is a
+        # derived Library item (recording-backed or active-topic-section-
+        # backed). Filters/pagination/order all happen database-side over
+        # the UNION before hydration; search results are untouched.
+        from workflow.query import (
+            apply_item_sort,
+            hydrate_library_items,
+            library_item_count,
+            library_item_queryset,
+        )
+
+        # The Library projection's active-topic-layout state is a LAZY
+        # parameterized DB-side subquery embedded in both UNION branches —
+        # no Python-side expansion, no per-render prepass, exact
+        # database-side count/order/pagination.
         if filters.valid:
-            queryset = apply_filters(queryset, filters, config.timezone)
+            queryset = library_item_queryset(filters, config.timezone)
+            queryset = apply_item_sort(queryset, filters.sort)
+        else:
+            queryset = library_item_queryset(ListFilters(), config.timezone)
+            queryset = apply_item_sort(queryset, "newest")
         paginator = Paginator(queryset, config.web.recordings_per_page)
+        # The presentation projection carries subqueries irrelevant to a
+        # COUNT; use the dedicated minimal count query (same branches,
+        # same filters — DB-side, never a Python expansion).
+        paginator.count = (
+            library_item_count(filters, config.timezone)
+            if filters.valid
+            else library_item_count(ListFilters(), config.timezone)
+        )
         page = paginator.get_page(request.GET.get("page"))
-        cards = [RecordingCard(recording) for recording in page.object_list]
+        cards = hydrate_library_items(page.object_list)
 
         base_qs = filters_qs + (f"&view={view}" if filters_qs else f"view={view}")
         context = {
@@ -594,10 +621,34 @@ def summary_detail(request, recording_id, summary_id):
         pk=summary_id,
         recording_id=recording.pk,
     )
+    # A section summary belongs to a topic Section (Step 6.2); the
+    # historical Summary detail route stays usable and identifies the
+    # owning Section accurately (with a canonical parent check).
+    is_section_summary = summary.section_id is not None and summary.section.segmented_version_id is not None
+    section_detail_url = None
+    if is_section_summary:
+        from workflow.services.segmentation import (
+            SegmentationError,
+            canonical_layout_for_transcript,
+        )
+
+        try:
+            canonical_layout_for_transcript(
+                summary.section.segmented_version, summary.section.transcript
+            )
+            section_detail_url = reverse(
+                "section-detail", args=[recording.pk, summary.section.pk]
+            )
+        except SegmentationError:
+            # Malformed/cross-parent stored layout: no readable section
+            # detail link, but the summary itself stays readable.
+            section_detail_url = None
     context = {
         "card": card,
         "recording": recording,
         "summary": summary,
+        "is_section_summary": is_section_summary,
+        "section_detail_url": section_detail_url,
         # Currency is derived, never inferred from is_active: an
         # old-transcript summary may still be active in its own scope.
         "is_current": (
@@ -605,6 +656,7 @@ def summary_detail(request, recording_id, summary_id):
             and summary.transcript.is_active
             and summary.section_id is not None
             and summary.section.ordinal == 0
+            and summary.section.segmented_version_id is None
             and summary.transcript.recording_id == recording.pk
         ),
         "actions": _action_availability(config, recording),
@@ -628,9 +680,144 @@ def recording_transcript(request, recording_id):
         transcript = transcripts_qs.filter(is_active=True).first()
         if transcript is None:
             raise Http404("No active transcript for this recording")
+
+    # Read-only layout selector (Step 6.1): any explicit ?layout= must
+    # belong to the SELECTED transcript (parent-scoped; mismatch/unknown =>
+    # 404) and is ALWAYS read-only, even when it is the currently active
+    # layout. The default (no layout) shows the current ACTIVE layout of
+    # the selected transcript; only the active transcript + implicit
+    # current layout is editable. Selected layouts are read through the
+    # shared bounded canonical validator (fail-closed: malformed stored
+    # state is a controlled 404 for explicit layouts / an unavailable
+    # notice for the implicit active one — never a raw error).
+    from workflow.services.segmentation import (
+        SegmentationError,
+        canonical_layout_for_transcript,
+    )
+
+    layout_param = request.GET.get("layout")
+    explicit_layout = None
+    if layout_param:
+        explicit_layout = get_object_or_404(
+            SegmentedVersion, pk=layout_param, transcript=transcript
+        )
+    active_layout = (
+        SegmentedVersion.objects.filter(transcript=transcript, is_active=True).first()
+    )
+    layout = explicit_layout if explicit_layout is not None else active_layout
+
+    layout_error = False
+    layout_unavailable_note = ""
+    canonical = None
+    if layout is not None:
+        try:
+            canonical = canonical_layout_for_transcript(layout, transcript)
+        except SegmentationError:
+            if explicit_layout is not None:
+                raise Http404("Trim & split revision not available for this transcript") from None
+            layout_error = True
+            layout = None
+
     paginator = Paginator(transcript.segments.order_by("ordinal"), config.web.transcript_segments_per_page)
     page = paginator.get_page(request.GET.get("page"))
     model_id = transcript.attempt.model_id if transcript.attempt_id is not None else ""
+
+    editable = transcript.is_active and explicit_layout is None and not layout_error
+
+    # Working range of the selected layout (full transcript when none).
+    working_start = 0
+    working_end = paginator.count
+    if canonical is not None:
+        working_start = canonical["start"]
+        working_end = canonical["end_exclusive"]
+    page_has_working_rows = any(
+        working_start <= segment.ordinal < working_end for segment in page.object_list
+    )
+    has_crop = working_start > 0 or working_end < paginator.count
+
+    # Bounded presentation: autoescaped topic headings at section starts,
+    # plus ONE context heading when the section containing the first
+    # visible working row started on an earlier page. Zero splits => zero
+    # headings. Rendered for BOTH the working view and read-only layout
+    # views (historical transcript / explicit layout).
+    sections = canonical["sections"] if canonical is not None else ()
+    page_ordinals = [segment.ordinal for segment in page.object_list]
+    first_visible_index = None
+    for index, segment in enumerate(page.object_list):
+        if working_start <= segment.ordinal < working_end:
+            first_visible_index = index
+            break
+    context_section = None
+    if first_visible_index is not None and sections:
+        first_ordinal = page.object_list[first_visible_index].ordinal
+        for sec in sections:
+            if sec["start"] <= first_ordinal < sec["end"]:
+                if sec["start"] not in page_ordinals:
+                    context_section = sec
+                break
+    transcript_items = []
+    for index, segment in enumerate(page.object_list):
+        if context_section is not None and index == first_visible_index:
+            transcript_items.append({"kind": "context_heading", "section": context_section})
+        for sec in sections:
+            if sec["start"] == segment.ordinal:
+                transcript_items.append({"kind": "heading", "section": sec})
+                break
+        transcript_items.append({"kind": "segment", "segment": segment})
+    if layout_error:
+        layout_unavailable_note = (
+            "The stored trim & split revision is invalid and cannot be shown. "
+            "The full transcript is displayed instead."
+        )
+
+    # Complete staged layout metadata ONLY (range/splits/titles, bounded to
+    # 200 topics) is client-side and submitted; transcript text never is.
+    editor_state = None
+    fingerprint = ""
+    if editable:
+        from workflow.services.segmentation import segmentation_fingerprint
+
+        fingerprint = segmentation_fingerprint(recording.pk, transcript)
+        if canonical is not None:
+            splits = list(canonical["splits"])
+            titles = list(canonical["titles"])
+        else:
+            splits = []
+            titles = []
+        editor_state = {
+            "segment_count": paginator.count,
+            "start": working_start,
+            "end": working_end,
+            "splits": splits,
+            "titles": titles,
+        }
+
+    crop_view_message = ""
+    if has_crop:
+        hidden_count = working_start + (paginator.count - working_end)
+        noun = "line" if hidden_count == 1 else "lines"
+        if page_has_working_rows:
+            crop_view_message = (
+                f"Saved working view — {hidden_count} {noun} hidden. "
+                "The full transcript remains available."
+            )
+        else:
+            crop_view_message = (
+                f"Saved working view — {hidden_count} {noun} hidden and none on this page. "
+                "The full transcript remains available."
+            )
+            if editable:
+                crop_view_message += " Use Edit trim & splits → Clear crop to restore the whole transcript."
+
+    # Pagination stays over the FULL transcript (old anchors/search/Ask
+    # links stay stable); historical/layout context is preserved.
+    pagination_parts = []
+    if not transcript.is_active:
+        pagination_parts.append(f"v={transcript.pk}")
+    if explicit_layout is not None:
+        pagination_parts.append(f"layout={explicit_layout.pk}")
+    pagination_base_qs = "&".join(pagination_parts)
+
     context = {
         "card": card,
         "recording": recording,
@@ -646,8 +833,186 @@ def recording_transcript(request, recording_id):
         # active transcript uses the plain export URL). ``&`` is
         # autoescaped in the template, decoded by browsers/JS.
         "version_query": f"&version={transcript.pk}" if not transcript.is_active else "",
+        # Step 6.1 editor / working-view context.
+        "editable": editable,
+        "explicit_layout": explicit_layout,
+        "layout": layout,
+        "layout_error": layout_error,
+        "layout_unavailable_note": layout_unavailable_note,
+        "working_start": working_start,
+        "working_end": working_end,
+        "page_has_working_rows": page_has_working_rows,
+        "has_crop": has_crop,
+        "crop_view_message": crop_view_message,
+        "transcript_items": transcript_items,
+        "editor_state": editor_state,
+        "fingerprint": fingerprint,
+        "pagination_base_qs": pagination_base_qs,
     }
     return render(request, "workflow/recording_transcript.html", context)
+
+
+def section_detail(request, recording_id, section_id):
+    """Step 6.2 topic-section detail (read route).
+
+    Parent-scoped: the Section must belong to ``recording_id``; a
+    mismatch/unknown pk is a controlled 404. Only TOPIC Sections are
+    readable here (the whole-recording fixed Section belongs to the
+    recording detail page); a cross-parent, non-topic, or malformed-
+    layout Section is a controlled 404.
+
+    - an ACTIVE topic Section (of the ACTIVE transcript's ACTIVE layout)
+      is editable/actionable: section-scoped tags editor, per-variant
+      summary action, opaque action fingerprint;
+    - a HISTORICAL topic Section (superseded layout, or a layout of a
+      historical transcript) is readable ONLY when parent ownership and
+      the canonical layout hold — never actionable.
+
+    GET is strictly read-only: SELECTs only, no network, subprocess,
+    detection, or writes. The H1 is the topic title; parent Recording
+    title/source/date/status is context/provenance; the bounded
+    transcript preview comes from ONLY the Section's canonical segment
+    range.
+    """
+    config, recording, card = _detail_base(request, recording_id)
+    section = get_object_or_404(
+        Section.objects.select_related("transcript", "segmented_version"),
+        pk=section_id,
+        transcript__recording=recording,
+    )
+    if section.segmented_version_id is None:
+        raise Http404("Section not available")
+
+    from workflow.services.segmentation import (
+        SegmentationError,
+        canonical_layout_for_transcript,
+        range_label,
+    )
+
+    try:
+        canonical = canonical_layout_for_transcript(
+            section.segmented_version, section.transcript
+        )
+    except SegmentationError:
+        raise Http404("Section not available") from None
+    if not any(sec["ordinal"] == section.ordinal for sec in canonical["sections"]):
+        raise Http404("Section not available")
+
+    active_transcript = recording.transcripts.filter(is_active=True).first()
+    is_active_section = (
+        active_transcript is not None
+        and section.transcript_id == active_transcript.pk
+        and section.segmented_version.is_active
+    )
+
+    # Read-only variant view-model for the Section scope: default/
+    # original/en/zh-Hant generation selectors plus existing concrete
+    # read variants; unknown concrete languages are a friendly 404.
+    from workflow.services.variant_view import build_variant_view
+
+    requested_language = request.GET.get("language", "default")
+    variant = build_variant_view(recording, requested_language, section=section)
+    if variant.error:
+        raise Http404(
+            f"No summary variant '{requested_language}' exists for this section."
+        )
+
+    # Bounded transcript preview from ONLY the Section's canonical range.
+    preview_segments = list(
+        section.transcript.segments.filter(
+            ordinal__gte=section.start_segment_ordinal,
+            ordinal__lt=section.end_segment_ordinal_exclusive,
+        ).order_by("ordinal")[:DETAIL_PREVIEW_SEGMENTS]
+    )
+    segment_count = section.end_segment_ordinal_exclusive - section.start_segment_ordinal
+
+    # Transcript jump link: the active-transcript page at the page
+    # containing the Section's first segment, anchored to that segment.
+    # An ACTIVE section keeps the plain current link; a HISTORICAL
+    # section (historical transcript and/or superseded layout) preserves
+    # its own revision via ?v=...&layout=... so the jump opens EXACTLY
+    # the section's transcript + layout, never the current one.
+    transcript_jump_page = section.start_segment_ordinal // config.web.transcript_segments_per_page + 1
+    jump_parts = [f"page={transcript_jump_page}"]
+    if not section.transcript.is_active:
+        jump_parts.append(f"v={section.transcript_id}")
+    if not section.segmented_version.is_active:
+        jump_parts.append(f"layout={section.segmented_version_id}")
+    transcript_jump_url = (
+        f"{reverse('recording-transcript', args=[recording.pk])}"
+        f"?{'&'.join(jump_parts)}#segment-{section.start_segment_ordinal}"
+    )
+
+    from workflow.models import Tag, TagAssignment, TagOrigin
+
+    active_section_tags = list(
+        TagAssignment.objects.filter(section=section, is_active=True)
+        .select_related("tag")
+        .order_by("tag__name")
+    )
+    # The global configured/retired tag choices only feed the ACTIVE
+    # section's tag editor. A HISTORICAL section renders ONLY its assigned
+    # tags read-only (the template never opens the editor), so the global
+    # Tag queries are skipped entirely for historical pages.
+    if is_active_section:
+        tag_choices = Tag.objects.filter(is_configured=True).order_by("name")
+        retired_tag_choices = Tag.objects.filter(is_configured=False).order_by("name")
+        active_by_tag = {assignment.tag_id: assignment for assignment in active_section_tags}
+
+        def _tag_options(tags):
+            return [
+                {
+                    "tag": tag,
+                    "assigned": tag.pk in active_by_tag,
+                    "suggested": (
+                        active_by_tag[tag.pk].origin == TagOrigin.SUGGESTED
+                        if tag.pk in active_by_tag
+                        else False
+                    ),
+                }
+                for tag in tags
+            ]
+
+        tag_options = _tag_options(tag_choices)
+        retired_tag_options = _tag_options(retired_tag_choices)
+    else:
+        tag_options = []
+        retired_tag_options = []
+
+    section_actions = {}
+    if is_active_section:
+        from workflow.services.web_actions import section_state_fingerprint
+
+        section_actions["fingerprint"] = section_state_fingerprint(recording, section)
+
+    # Read-only parent routing decision (context/provenance only).
+    routing_decision = recording.routing_decisions.filter(is_active=True).first()
+
+    context = {
+        "card": card,
+        "recording": recording,
+        "section": section,
+        "canonical": canonical,
+        "is_active_section": is_active_section,
+        "range_label": range_label(
+            section.start_segment_ordinal, section.end_segment_ordinal_exclusive
+        ),
+        "transcript_jump_url": transcript_jump_url,
+        "preview_segments": preview_segments,
+        "segment_count": segment_count,
+        "variant": variant,
+        "current_summary": variant.summary,
+        "default_summary": variant.default_summary,
+        "section_actions": section_actions,
+        "tag_options": tag_options,
+        "retired_tag_options": retired_tag_options,
+        "active_section_tags": active_section_tags,
+        "routing_decision": routing_decision,
+        "default_output_language": variant.default_language,
+        "selected_language": variant.requested,
+        "parent_status": _status_panel(recording, routing_decision),
+    }
+    return render(request, "workflow/section_detail.html", context)
 
 
 def recording_history(request, recording_id):
@@ -682,6 +1047,37 @@ def recording_history(request, recording_id):
 
     routing_rows, routing_truncated = _routing_rows_for_display(recording, HISTORY_LIMIT)
 
+    # Step 6.1: segmented working-layout revisions, newest first, bounded
+    # with the same limit+1 sentinel. Topic counts come from ONE annotation
+    # (no N+1); titles are NEVER dumped into History. Rows carry the
+    # parent-scoped read-only link (?v= + &layout=).
+    segmented = list(
+        SegmentedVersion.objects.filter(transcript__recording=recording)
+        .select_related("transcript")
+        .annotate(topic_count=Count("sections"))
+        .order_by("-activated_at", "-created_at", "-revision")[: HISTORY_LIMIT + 1]
+    )
+    segmented_truncated = len(segmented) > HISTORY_LIMIT
+    segmented = segmented[:HISTORY_LIMIT]
+    from workflow.services.segmentation import range_label
+
+    segmented_rows = [
+        {
+            "pk": version.pk,
+            "revision": version.revision,
+            "activated_at": version.activated_at,
+            "is_active": version.is_active,
+            "superseded_at": version.superseded_at,
+            "range_label": range_label(
+                version.start_segment_ordinal, version.end_segment_ordinal_exclusive
+            ),
+            "topic_count": version.topic_count,
+            "transcript_id": version.transcript_id,
+            "transcript_active": version.transcript.is_active,
+        }
+        for version in segmented
+    ]
+
     context = {
         "card": card,
         "recording": recording,
@@ -693,6 +1089,8 @@ def recording_history(request, recording_id):
         "attempts_truncated": attempts_truncated,
         "routing_rows": routing_rows,
         "routing_truncated": routing_truncated,
+        "segmented_rows": segmented_rows,
+        "segmented_truncated": segmented_truncated,
         "history_limit": HISTORY_LIMIT,
     }
     return render(request, "workflow/recording_history.html", context)

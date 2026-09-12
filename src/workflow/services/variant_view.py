@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from django.db.models import Q
+
 from workflow.models import (
     ProcessingStatus,
     Recording,
@@ -135,64 +137,122 @@ def _action_selector_for(selector: str, original_output: str) -> str | None:
     return None
 
 
-def existing_variant_languages(recording: Recording, transcript: Transcript) -> list[str]:
-    """Concrete output languages that already exist for the active
-    transcript (active summaries in scope ∪ variant states)."""
+def existing_variant_languages(
+    recording: Recording, transcript: Transcript, *, section=None
+) -> list[str]:
+    """Concrete output languages that already exist for a scope.
+
+    ``section`` None = the whole-recording scope (the active transcript's
+    ordinal-0 fixed section — existing behavior); a ``section`` given =
+    that topic Section's scope (Step 6.2). ``transcript`` is the scope's
+    transcript (the caller decides: the ACTIVE transcript for the
+    whole-recording scope, the Section's OWN transcript — historical or
+    active — for a section scope). Bounded SELECTs only.
+    """
+    if section is None:
+        section_q = Q(section__ordinal=0, section__segmented_version__isnull=True)
+    else:
+        section_q = Q(section=section)
     languages = set(
-        Summary.objects.filter(
-            transcript=transcript,
-            section__ordinal=0,
-            is_active=True,
-        )
+        Summary.objects.filter(transcript=transcript, is_active=True)
+        .filter(section_q)
         .exclude(output_language="")
         .values_list("output_language", flat=True)
     )
     languages.update(
         SummaryVariantState.objects.filter(transcript=transcript)
+        .filter(section_q)
         .exclude(output_language="")
         .values_list("output_language", flat=True)
     )
     return sorted(languages)
 
 
-def valid_read_selectors(recording: Recording) -> set[str]:
+def valid_read_selectors(recording: Recording, *, section=None) -> set[str]:
     """Selectors a GET may request: the four standard ones plus every
-    concrete language that already exists for the active transcript."""
+    concrete language that already exists for the scope's transcript
+    (whole-recording by default, one topic Section when given — the
+    Section's OWN transcript, so historical canonical sections expose
+    their own concrete variants). A cross-parent section yields just the
+    four standard selectors (the ownership check happens in the caller;
+    this stays bounded and read-only)."""
     selectors = set(GENERATION_SELECTORS)
-    transcript = recording.transcripts.filter(is_active=True).first()
+    if section is not None:
+        if section.transcript.recording_id != recording.pk:
+            return selectors
+        transcript = section.transcript
+    else:
+        transcript = recording.transcripts.filter(is_active=True).first()
     if transcript is not None:
-        selectors.update(existing_variant_languages(recording, transcript))
+        selectors.update(existing_variant_languages(recording, transcript, section=section))
     return selectors
 
 
-def build_variant_view(recording: Recording, requested: str | None) -> VariantView:
+def build_variant_view(
+    recording: Recording, requested: str | None, *, section=None
+) -> VariantView:
     """Resolve ``requested`` against current database state (read-only).
 
-    Bounded queries: the active transcript, its ordinal-0 section, the
+    ``section`` None = the whole-recording scope (the active transcript's
+    ordinal-0 fixed Section — existing behavior); a ``section`` given =
+    that topic Section's scope (Step 6.2), where summary variants and
+    action modes are section-scoped AND the transcript is the Section's
+    OWN transcript: historical canonical section pages/exports resolve
+    their own summaries, variant states, source language and language
+    resolution against that historical transcript — never the recording's
+    currently ACTIVE transcript. Whole-recording behavior remains
+    active-transcript only. The caller validates the Section target
+    before calling (parent ownership + canonical layout); a cross-parent
+    Section fails closed here as a friendly error (never an uncaught
+    exception, never a silent fallback).
+
+    Bounded queries: the scope transcript, the scoped Section, the
     routing decision, the in-scope active summaries, and the variant
     states are each fetched once and reused for every derived value.
     """
     requested = (requested or "").strip() or "default"
     view = VariantView(requested=requested)
 
-    transcript = recording.transcripts.filter(is_active=True).first()
-    if transcript is None:
-        return view
+    if section is not None:
+        # Section scope: language resolution, summaries, variant states
+        # and the source language all belong to the Section's OWN
+        # transcript. Ownership is enforced at the boundary (the caller
+        # 404s earlier; this is defense-in-depth, friendly failure).
+        if section.transcript.recording_id != recording.pk:
+            view.error = "section_not_available"
+            return view
+        transcript = section.transcript
+        scoped_section = section
+        # A historical section is read-only: never present an action
+        # mode/action selector for a page that renders no action form.
+        section_actionable = bool(
+            transcript.is_active
+            and section.segmented_version is not None
+            and section.segmented_version.is_active
+        )
+    else:
+        transcript = recording.transcripts.filter(is_active=True).first()
+        if transcript is None:
+            return view
+        scoped_section = transcript.sections.filter(
+            ordinal=0, segmented_version__isnull=True
+        ).first()
+        # Whole-recording scope: never gated by section actionability.
+        section_actionable = None
     view.has_transcript = True
-    section = transcript.sections.filter(ordinal=0).first()
     view.default_language = resolve_default_language(transcript)
 
     summaries_by_lang: dict[str, Summary] = {}
     states: dict[str, SummaryVariantState] = {}
-    if section is not None:
+    if scoped_section is not None:
         for summary in Summary.objects.filter(
-            transcript=transcript, section=section, is_active=True
+            transcript=transcript, section=scoped_section, is_active=True
         ):
             summaries_by_lang.setdefault(summary.output_language, summary)
         states = {
             vs.output_language: vs
             for vs in SummaryVariantState.objects.filter(
-                transcript=transcript, section=section
+                transcript=transcript, section=scoped_section
             )
         }
 
@@ -241,6 +301,12 @@ def build_variant_view(recording: Recording, requested: str | None) -> VariantVi
         if option.resolved and option.resolved in states:
             option.status = states[option.resolved].status
             option.regeneration_failed = states[option.resolved].regeneration_failed
+    if section_actionable is False:
+        # Read-only (historical) section scope: NO generation action
+        # selector is exposed on any tab option — a historical page
+        # offers no action at all.
+        for option in options:
+            option.action_selector = None
     view.options = options
 
     # Resolve the requested selector.
@@ -254,18 +320,29 @@ def build_variant_view(recording: Recording, requested: str | None) -> VariantVi
 
     view.resolved = resolved
     view.action_selector = _action_selector_for(requested, original_output)
+    if section_actionable is False:
+        # Read-only scope: the view itself never carries a generation
+        # action selector either.
+        view.action_selector = None
     if requested == "original" and not resolved:
         view.unresolved_original = True
         # Generation is still possible (it will run bounded detection),
-        # but there is nothing to display yet.
-        if recording.processing_status == ProcessingStatus.TRANSCRIBED:
+        # but there is nothing to display yet. Only an explicitly
+        # non-actionable scope (a historical section) is denied the
+        # action; the whole-recording scope (None) is never gated.
+        if (
+            recording.processing_status == ProcessingStatus.TRANSCRIBED
+            and section_actionable is not False
+        ):
             view.action_mode = "first"
         return view
 
     view.summary = summaries_by_lang.get(resolved)
     view.variant_state = states.get(resolved)
     view.action_mode = _mode_for_language(
-        recording, section, resolved, summaries_by_lang, states, view.default_language
+        recording, scoped_section, resolved, summaries_by_lang, states,
+        view.default_language, section_scope=section is not None,
+        section_actionable=section_actionable,
     )
     return view
 
@@ -277,16 +354,29 @@ def _mode_for_language(
     summaries_by_lang: dict[str, Summary],
     states: dict[str, SummaryVariantState],
     default_language: str,
+    *,
+    section_scope: bool = False,
+    section_actionable: bool | None = None,
 ) -> str | None:
     """Per-language action mode, derived locally (no extra queries).
 
     Mirrors ``web_actions.summarize_mode(output_language=...)``: the
     variant state is authoritative when it exists; the recording-level
-    tuple is the fallback for the currently derived default language.
+    tuple is the fallback for the currently derived default language —
+    ONLY in the whole-recording scope (a Section's default variant is
+    section-scoped and never touches the Recording tuple, so the
+    recording fallback never applies there).
+
+    ``section_actionable`` is the *section-scope* gate: an explicit
+    False (a historical/read-only Section) yields None — a read-only
+    page never presents an action; None (whole-recording scope) is
+    never gated here.
     """
     from workflow.models import ProcessingStatus as _PS
 
     if recording.processing_status != _PS.TRANSCRIBED or section is None:
+        return None
+    if section_actionable is False:
         return None
     vs = states.get(resolved)
     if vs is not None:
@@ -297,6 +387,10 @@ def _mode_for_language(
         return "first"
     if summaries_by_lang.get(resolved) is not None:
         return "regenerate"
-    if resolved == default_language and recording.summary_status == SummaryState.FAILED:
+    if (
+        not section_scope
+        and resolved == default_language
+        and recording.summary_status == SummaryState.FAILED
+    ):
         return "retry_summary"
     return "first"

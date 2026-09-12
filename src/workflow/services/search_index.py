@@ -336,6 +336,7 @@ def _expected_documents_for_rows(
             is_active=True,
             transcript__is_active=True,
             section__ordinal=0,
+            section__segmented_version__isnull=True,
         )
         .order_by("recording_id", "ordinal")
     ):
@@ -348,7 +349,10 @@ def _expected_documents_for_rows(
     tags_by_rec: dict[str, list[TagAssignment]] = {}
     assignments = (
         TagAssignment.objects.using(using)
-        .filter(recording__in=rec_ids, is_active=True)
+        # Defense-in-depth: the search index stays whole-recording only
+        # (Step 6.2 section tags are not indexed until Step 6.3), so only
+        # recording-scoped assignments contribute the metadata aux text.
+        .filter(recording__in=rec_ids, is_active=True, section__isnull=True)
         .select_related("tag")
     )
     for assignment in assignments:
@@ -938,6 +942,7 @@ def _expected_registry_page_is_canonical(using: str, rows: list[SearchDocument])
                 is_active=True,
                 transcript__is_active=True,
                 section__ordinal=0,
+                section__segmented_version__isnull=True,
             )
             .values_list("pk", "recording_id", "transcript_id", "output_language")
         ):

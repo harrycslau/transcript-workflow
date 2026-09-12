@@ -23,9 +23,10 @@ from django.db.migrations.executor import MigrationExecutor
 TARGET_0007 = ("workflow", "0007_summary_multilingual")
 TARGET_0008 = ("workflow", "0008_search_index")
 # The CURRENT schema leaf: runtime services below reference the current
-# Tag model (definition_origin etc.), so any runtime call on the isolated
+# models (Tag definition_origin, Section segmented_version, section-
+# scoped TagAssignments, etc.), so any runtime call on the isolated
 # database must run against the full current schema.
-TARGET_LEAF = ("workflow", "0010_tag_definition_origin")
+TARGET_LEAF = ("workflow", "0012_remove_tagassignment_uniq_tag_assignment_and_more")
 
 ALIAS = "mig0008"
 

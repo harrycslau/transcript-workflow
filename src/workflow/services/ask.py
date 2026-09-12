@@ -382,6 +382,7 @@ def _validate_live_evidence(
                 is_active=True,
                 transcript__is_active=True,
                 section__ordinal=0,
+                section__segmented_version__isnull=True,
             )
             .values_list("pk", "recording_id", "transcript_id", "output_language")
         ):

@@ -64,6 +64,8 @@ from workflow.models import (
 from workflow.services import chunking
 from workflow.services import languages
 from workflow.services import llm as llm_service
+from workflow.services import segmentation as segmentation_service
+from workflow.services.segmentation import SegmentationError
 from workflow.services import tags as tags_service
 from workflow.services import variant_state as variant_state_service
 from workflow.services.chunking import ChunkPlan, InputTooLarge, build_chunks, check_chunk_limits
@@ -966,6 +968,23 @@ def persist_summary(
       active summaries of THIS transcript with the same output_language
       are deactivated atomically before the new one activates. Summaries
       of older transcripts or different output_languages are untouched.
+
+    The tag scope and post-commit sync are DERIVED from the Section
+    shape (never caller switches):
+
+    - a FIXED whole-recording section (``segmented_version IS NULL`` and
+      ordinal 0): default-variant suggestions materialize as
+      recording-scoped ``TagAssignment`` rows and exactly one recording
+      search sync is scheduled (existing whole-recording behavior);
+    - a TOPIC section (``segmented_version`` non-NULL): the section is
+      RE-VALIDATED inside this transaction, immediately after the
+      Recording row is locked/reloaded and before any Summary/tag write
+      (``segmentation.require_active_topic_section`` — a layout that
+      became historical is rejected with its stable sanitized
+      category). Default-variant suggestions materialize as SECTION-
+      scoped ``TagAssignment`` rows and NO recording search sync is
+      scheduled (section content is not indexed until Step 6.3);
+    - any other shape is rejected (``SummaryRelationError``).
     """
     if section.transcript_id != transcript.pk:
         raise SummaryRelationError("section does not belong to the summary's transcript")
@@ -975,6 +994,24 @@ def persist_summary(
     now = timezone.now()
     with transaction.atomic():
         rec = Recording.objects.select_for_update().get(pk=recording.pk)
+        # Derive the scope from the Section shape and re-validate a topic
+        # section RIGHT HERE — after the recording is locked/reloaded and
+        # immediately before the Summary/tag writes.
+        if section.segmented_version_id is not None:
+            # Topic section: must still be a live topic target of the
+            # ACTIVE layout. The validation re-fetches authoritative DB
+            # state (never the caller's cached FK state), so a layout
+            # superseded during generation aborts persistence with no
+            # Summary/tag write.
+            segmentation_service.require_active_topic_section(section)
+            tags_scope: Section | None = section
+            schedule_sync = False
+        elif section.ordinal == 0:
+            tags_scope = None
+            schedule_sync = True
+        else:
+            raise SummaryRelationError("summary section shape is invalid")
+
         # Deactivate only same output_language active summaries
         Summary.objects.filter(
             transcript=transcript, section=section,
@@ -1013,9 +1050,14 @@ def persist_summary(
             limits_used=limits_used,
             generation_mode=generation_mode,
         )
-        # Materialize tags only for the default language variant
+        # Materialize tags only for the default language variant: into
+        # the recording scope for whole-recording summaries, into the
+        # section scope for topic-section summaries.
         if is_default:
-            _materialize_tags(rec, summary, payload["suggested"])
+            _materialize_tags(
+                rec, summary, payload["suggested"],
+                section=tags_scope,
+            )
 
         # Derive the variant state (and, when this variant is the
         # currently derived default, the Recording tuple) from the
@@ -1035,12 +1077,23 @@ def persist_summary(
         attempt.save()
         # Step 5A.3: the new variant (+ materialized default-variant tags
         # and possible title/default-language changes) syncs after commit.
-        schedule_recording_sync([rec.pk])
+        # Topic-section summaries are not indexed until Step 6.3 and
+        # never schedule a recording sync here.
+        if schedule_sync:
+            schedule_recording_sync([rec.pk])
     return summary
 
 
-def _materialize_tags(recording: Recording, summary: Summary, tags: list[Tag]) -> None:
+def _materialize_tags(
+    recording: Recording, summary: Summary, tags: list[Tag], *, section: Section | None = None
+) -> None:
     """Record per-version suggestions; materialize effective assignments.
+
+    ``section=None`` is the whole-recording scope (``section IS NULL``
+    rows only); a non-None ``section`` scopes every read/write to that
+    Section's assignment rows. Scope never crosses: a section summary
+    only ever creates/updates ``TagAssignment`` rows whose ``section``
+    is the summary's own Section.
 
     Only ``suggested``-origin assignments are refreshed: ones the new
     version no longer suggests are deactivated (``deactivated_by=
@@ -1056,9 +1109,11 @@ def _materialize_tags(recording: Recording, summary: Summary, tags: list[Tag]) -
     """
     now = timezone.now()
     new_keys = {tag.name_key for tag in tags}
-    for assignment in TagAssignment.objects.filter(
-        recording=recording, is_active=True, origin=TagOrigin.SUGGESTED
-    ):
+    if section is not None:
+        scope_qs = TagAssignment.objects.filter(recording=recording, section=section)
+    else:
+        scope_qs = TagAssignment.objects.filter(recording=recording, section__isnull=True)
+    for assignment in scope_qs.filter(is_active=True, origin=TagOrigin.SUGGESTED):
         if assignment.tag.name_key not in new_keys:
             assignment.is_active = False
             assignment.deactivated_at = now
@@ -1066,11 +1121,12 @@ def _materialize_tags(recording: Recording, summary: Summary, tags: list[Tag]) -
             assignment.save()
     for tag in tags:
         SummaryTagSuggestion.objects.get_or_create(summary=summary, tag=tag)
-        assignment = TagAssignment.objects.filter(recording=recording, tag=tag).first()
+        assignment = scope_qs.filter(tag=tag).first()
         if assignment is None:
             TagAssignment.objects.create(
                 recording=recording,
                 tag=tag,
+                section=section,
                 origin=TagOrigin.SUGGESTED,
                 source_summary=summary,
                 is_active=True,
@@ -1134,7 +1190,7 @@ def summarize_one(
         return _skip(recording, "no_active_transcript")
     if not config.llm.model.strip():
         raise ConfigError("no summarization model configured (llm.model is blank)")
-    section = transcript.sections.filter(ordinal=0).first()
+    section = transcript.sections.filter(ordinal=0, segmented_version__isnull=True).first()
     if section is None:
         raise ConfigError("active transcript has no whole-recording section")
 
@@ -1361,6 +1417,330 @@ def summarize_pending(config: AppConfig) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Section summaries (Step 6.2 backend foundation)
+# ---------------------------------------------------------------------------
+#
+# ``summarize_section_one`` is the smallest explicit public section-
+# targeted summary service. It reuses the ENTIRE existing machinery —
+# selector validation, language resolution/detection, chunking, the
+# map/reduce flow, payload validation, durable attempts, persistence,
+# versioning, and the centralized variant-state reconciler — with three
+# scoping differences from the whole-recording service:
+#
+# - the summary input is ALL and ONLY the ACTIVE layout's topic
+#   Section's canonical segment range (never source audio, never
+#   ``text_normalized``);
+# - default-variant suggestions materialize as SECTION-scoped
+#   ``TagAssignment`` rows and no recording search/embedding sync is
+#   scheduled (section content is not indexed until Step 6.3);
+# - section summaries NEVER change the Recording-level default tuple
+#   (``summary_status``, ``resummarization_failed``,
+#   ``last_failed_attempt``), processing status, or whole summary: the
+#   reconciler only touches Recording-level fields for the ordinal-0
+#   default variant, and topic sections are ordinal >= 1 by DB CHECK.
+#
+# The section must be a TOPIC Section of the recording's ACTIVE
+# transcript and ACTIVE SegmentedVersion (shared canonical validation in
+# ``segmentation.require_active_topic_section``); fixed, historical,
+# cross-parent, and malformed-layout targets are rejected with the same
+# stable sanitized ``SegmentationError`` categories. Attempts carry the
+# exact same complete (transcript_id, section_id, resolved) provenance
+# so interruption recovery remains exact-scope with no inference.
+
+
+def _skip_section(section: Section, reason: str) -> dict:
+    return {
+        "recording_id": section.transcript.recording_id,
+        "section_id": section.pk,
+        "result": "skipped",
+        "reason": reason,
+    }
+
+
+def _failed_section(
+    section: Section, error_code: str, *, kept_current: bool
+) -> dict:
+    return {
+        "recording_id": section.transcript.recording_id,
+        "section_id": section.pk,
+        "result": "failed",
+        "error_code": error_code,
+        "kept_current_summary": kept_current,
+    }
+
+
+def summarize_section_one(
+    config: AppConfig,
+    section: Section,
+    *,
+    target_language: str = "default",
+    regenerate: bool = False,
+    generation_mode: str = GenerationMode.MANUAL,
+    transport=None,
+    llm_call=None,
+) -> dict:
+    """Generate/regenerate a summary for ONE topic Section (Step 6.2).
+
+    Must be called under the caller's pipeline lock (the service does
+    NOT acquire the lock itself — no nested/self locking); the web
+    orchestration will enforce it, exactly like :func:`summarize_one`.
+
+    ``section`` must be a topic Section of the recording's ACTIVE
+    transcript and ACTIVE ``SegmentedVersion`` (validated through the
+    shared segmentation canonical validator; fixed/historical/cross-
+    parent/malformed-layout sections raise the stable sanitized
+    ``SegmentationError`` categories). ``target_language`` uses the same
+    generation selectors and resolution/detection rules as
+    :func:`summarize_one`; the transcript-level source language is
+    shared across sections while output variants are section-specific.
+
+    The summary input is built from ALL and ONLY ``TranscriptSegment``
+    rows whose ordinals lie in the section's canonical half-open range
+    ``[start_segment_ordinal, end_segment_ordinal_exclusive)`` —
+    deterministic full stored text, never source audio, never
+    ``text_normalized``. Long input takes the existing deterministic
+    bounded chunk/reduce path.
+
+    The target section/layout is captured at the start AND revalidated
+    at persistence (after the LLM calls): if the layout became
+    historical during generation, NO Summary or tag is persisted — the
+    durable exact-scope attempt is finished with the stable sanitized
+    ``section_layout_changed`` failure, only that section's
+    ``SummaryVariantState`` is reconciled, and any old current section
+    Summary is preserved. ``persist_summary`` re-validates inside its
+    own transaction as the final guard for the tiny window before the
+    write.
+
+    The returned dict carries ``section_id`` alongside the stable
+    ``result``/``error_code`` categories of the whole-recording service.
+    The Recording-level summary tuple, processing status and the whole
+    summary are NEVER changed; no recording search/embedding sync is
+    scheduled for the section summary itself.
+    """
+    if target_language not in languages.GENERATION_SELECTORS:
+        raise ConfigError(
+            f"unsupported generation target: {target_language!r} "
+            f"(allowed: {', '.join(languages.GENERATION_SELECTORS)})"
+        )
+    if not config.summarization.enabled:
+        return _skip_section(section, "summarization_disabled")
+    if not config.llm.model.strip():
+        raise ConfigError("no summarization model configured (llm.model is blank)")
+
+    # Shared canonical validation: topic section of the ACTIVE layout of
+    # the recording's ACTIVE transcript (raises SegmentationError for
+    # fixed/historical/cross-parent/malformed-layout targets).
+    segmentation_service.require_active_topic_section(section)
+    transcript = section.transcript
+    recording = transcript.recording
+
+    # Resolve target_language to output_language
+    output_language = resolve_output_language(transcript, target_language)
+
+    # Handle "original" when source language is unknown (same bounded
+    # detection rules and durable-attempt semantics as summarize_one;
+    # the attempt provenance carries this exact section).
+    if target_language == "original" and not output_language:
+        detection = _detect_source_language_with_attempt(
+            config, recording, transcript, section,
+            transport=transport, llm_call=llm_call,
+        )
+        if not detection.language:
+            # Surface the durable attempt's actual stable category. No
+            # section variant state is created until a concrete output
+            # language exists.
+            return _failed_section(
+                section, detection.error_code or "source_language_unknown",
+                kept_current=False,
+            )
+        detected = detection.language
+        # Persist detection on the TRANSCRIPT (source language is
+        # transcript-level, shared by every section). This is a
+        # whole-recording write that changes the derived default output
+        # language (metadata title chain), so the existing exact
+        # detection behavior syncs it once.
+        now = timezone.now()
+        transcript.language_observed = detected
+        transcript.language_observed_verified_by = "llm_detection"
+        transcript.language_observed_verified_at = now
+        transcript.save(update_fields=[
+            "language_observed", "language_observed_verified_by",
+            "language_observed_verified_at",
+        ])
+        schedule_recording_sync([recording.pk])
+        # Re-resolve now that source is known
+        output_language = resolve_output_language(transcript, target_language)
+        if not output_language:
+            return _failed_section(section, "source_language_unknown", kept_current=False)
+
+    # Determine if this is the default variant
+    default_language = resolve_default_language(transcript)
+    is_default = output_language == default_language
+
+    # Check if variant already exists (unless regenerating)
+    existing_active = Summary.objects.filter(
+        transcript=transcript, section=section,
+        output_language=output_language, is_active=True,
+    ).first()
+    if existing_active is not None and not regenerate:
+        return _skip_section(section, "variant_current")
+
+    # Synchronize configured tags inside the locked mutating path
+    tags_service.sync_tags(config)
+
+    # Build language provenance for context_json (exact section scope)
+    language_provenance = {
+        "requested": target_language,
+        "resolved": output_language,
+        "source": transcript.language_observed or "",
+        "is_default": is_default,
+        "source_method": transcript.language_observed_verified_by or "",
+        "transcript_id": transcript.pk,
+        "section_id": section.pk,
+    }
+
+    attempt = ProcessingAttempt.objects.create(
+        recording=recording,
+        stage=AttemptStage.SUMMARIZATION,
+        ordinal=next_ordinal(recording, AttemptStage.SUMMARIZATION),
+        model_id=config.llm.model,
+        cli_args_json={
+            "kind": "omlx_section_summarization",
+            "base_url": config.llm.base_url,
+            "model": config.llm.model,
+            "prompt_version": PROMPT_IMPLEMENTATION_VERSION,
+            "generation_mode": generation_mode,
+            "regenerate": regenerate,
+        },
+        context_json={"language": language_provenance},
+    )
+
+    s = config.summarization
+    # Exact contiguous membership: ALL and ONLY the section's canonical
+    # segment range. The layout validator already proved the transcript's
+    # ordinals are 0..count-1 and the range lies inside it; the count
+    # equality check is the defense-in-depth guarantee that the range is
+    # exactly represented (never partial, never a silent fallback).
+    start = section.start_segment_ordinal
+    end = section.end_segment_ordinal_exclusive
+    segments = list(
+        transcript.segments.filter(ordinal__gte=start, ordinal__lt=end)
+        .order_by("ordinal")
+        .values_list("text", flat=True)
+    )
+    if len(segments) != end - start:
+        _finish_attempt_failure(
+            attempt, recording, AttemptOutcome.INVALID_OUTPUT, "section_segments_invalid",
+            "section segment range is not exactly represented by transcript segments",
+            output_language=output_language,
+            transcript=transcript, section=section,
+        )
+        return _failed_section(section, "section_segments_invalid", kept_current=False)
+
+    plan = build_chunks(
+        segments,
+        chunk_characters=s.chunk_characters,
+        overlap_characters=s.chunk_overlap_characters,
+    )
+    attempt.cli_args_json = {
+        **attempt.cli_args_json,
+        "input_characters": plan.input_characters,
+        "chunk_count": len(plan.chunks),
+        "limits": _limits_used(config),
+    }
+    attempt.save(update_fields=["cli_args_json"])
+
+    source_language = transcript.language_observed or ""
+
+    # Check if target variant has an active summary (for kept_current reporting)
+    target_has_active = Summary.objects.filter(
+        transcript=transcript, section=section,
+        output_language=output_language, is_active=True,
+    ).exists()
+
+    try:
+        check_chunk_limits(
+            plan, max_total_characters=s.max_total_characters, max_chunk_count=s.max_chunk_count
+        )
+        tags = list(Tag.objects.filter(is_configured=True).order_by("name"))
+        fingerprint = config_fingerprint(config, tags, output_language=output_language)
+        payload, chunk_count = _generate_summary(
+            config, plan, tags,
+            output_language=output_language,
+            source_language=source_language,
+            transport=transport, llm_call=llm_call,
+        )
+    except InputTooLarge as exc:
+        _finish_attempt_failure(
+            attempt, recording, AttemptOutcome.INPUT_TOO_LARGE, "input_too_large",
+            str(exc), output_language=output_language,
+            transcript=transcript, section=section,
+        )
+        return _failed_section(section, "input_too_large", kept_current=target_has_active)
+    except llm_service.LLMError as exc:
+        message = type(exc).__name__
+        if isinstance(exc, llm_service.LLMHTTPError):
+            message = f"HTTP {exc.status_code}"
+        _finish_attempt_failure(
+            attempt, recording, _outcome_for(exc), exc.code, message,
+            output_language=output_language,
+            transcript=transcript, section=section,
+        )
+        return _failed_section(section, exc.code, kept_current=target_has_active)
+
+    # Persistence-time revalidation: the LLM calls may have taken a long
+    # time, so the captured target section/layout is checked AGAIN before
+    # any write. If it became historical, NEVER persist a Summary/tag for
+    # it: finish the durable exact-scope attempt with the stable
+    # sanitized ``section_layout_changed`` failure and reconcile ONLY
+    # this section's VariantState (an old current Summary is preserved —
+    # the reconciler derives current+regeneration_failed or failed from
+    # the database). ``persist_summary`` re-validates the topic section
+    # inside its own transaction as the final guard for the tiny window
+    # between this check and the write; a race there surfaces the same
+    # stable outcome.
+    try:
+        segmentation_service.require_active_topic_section(section)
+        summary = persist_summary(
+            recording=recording,
+            transcript=transcript,
+            section=section,
+            attempt=attempt,
+            payload=payload,
+            output_language=output_language,
+            is_default=is_default,
+            model_id=config.llm.model,
+            base_url=config.llm.base_url,
+            prompt_version=PROMPT_IMPLEMENTATION_VERSION,
+            fingerprint=fingerprint,
+            chunk_count=chunk_count,
+            input_characters=plan.input_characters,
+            limits_used=_limits_used(config),
+            generation_mode=generation_mode,
+        )
+    except SegmentationError:
+        _finish_attempt_failure(
+            attempt, recording, AttemptOutcome.INVALID_OUTPUT, "section_layout_changed",
+            "the section layout changed during generation",
+            output_language=output_language,
+            transcript=transcript, section=section,
+        )
+        return _failed_section(section, "section_layout_changed", kept_current=target_has_active)
+
+    return {
+        "recording_id": recording.pk,
+        "section_id": section.pk,
+        "result": "summarized",
+        "summary_id": summary.pk,
+        "regeneration": existing_active is not None,
+        "output_language": output_language,
+        "chunk_count": chunk_count,
+        "input_characters": plan.input_characters,
+        "tags": [tag.name for tag in payload["suggested"]],
+    }
+
+
+# ---------------------------------------------------------------------------
 # Language correction service
 #
 # Language family normalization lives in workflow.services.languages
@@ -1408,7 +1788,7 @@ def set_transcript_language(
         if transcript is None:
             raise ConfigError(f"no active transcript for recording {rec.pk}")
 
-        section = transcript.sections.filter(ordinal=0).first()
+        section = transcript.sections.filter(ordinal=0, segmented_version__isnull=True).first()
         if section is None:
             raise ConfigError(f"active transcript has no ordinal-0 section")
 
@@ -1548,6 +1928,7 @@ __all__ = [
     "InputTooLarge",
     "SummaryRelationError",
     "summarize_one",
+    "summarize_section_one",
     "summarize_pending",
     "persist_summary",
     "validate_final_payload",

@@ -21,6 +21,9 @@
     <button type="button" class="copy-button btn-sm" data-copy-url="{% url 'transcript-export' recording.pk %}?format=text{{ version_query }}">Copy plain text</button>
     <a class="btn-sm" href="{% url 'transcript-export' recording.pk %}?format=text{{ version_query }}">Plain text</a>
     <a class="btn-sm" href="{% url 'transcript-export' recording.pk %}?format=timestamped{{ version_query }}">Timestamped text</a>
+    {% if editable %}
+      <button type="button" class="btn-sm btn-primary" id="transcript-edit-toggle" aria-expanded="false" aria-controls="edit-mode-bar">Edit trim &amp; splits</button>
+    {% endif %}
   </div>
 </div>
 
@@ -32,17 +35,81 @@
   </p>
 {% endif %}
 
-<div class="transcript">
-  {% for segment in page_obj.object_list %}
-    <p class="transcript-segment" id="segment-{{ segment.ordinal }}">
-      {% if segment.start_ms %}<span class="timestamp muted">{{ segment.start_ms|mmss }}</span>{% endif %}
-      {% if segment.speaker %}<span class="speaker">{{ segment.speaker }}:</span>{% endif %}
-      <span class="segment-text">{{ segment.text }}</span>
-    </p>
+{% if not editable %}
+  <p class="segmentation-readonly-note muted">
+    {% if explicit_layout %}This is a saved trim &amp; split revision (<code>#{{ layout.revision }}</code>) — read only.{% else %}Trim &amp; split editing is only available on the active transcript.{% endif %}
+  </p>
+{% endif %}
+
+{% if layout_error %}
+  <p class="segmentation-readonly-note muted">{{ layout_unavailable_note }}</p>
+{% endif %}
+
+{% if editable %}
+<div class="edit-mode-bar" id="edit-mode-bar" hidden>
+  <span class="edit-status" id="edit-status" role="status" aria-live="polite">No changes yet.</span>
+  <span class="edit-help muted">Editing applies to the visible segments on this page — navigating away discards unsaved edits. The full transcript and source audio are never modified.</span>
+  <div class="edit-actions">
+    <button type="button" class="btn-sm" id="edit-clear-crop" disabled>Clear crop</button>
+    <button type="button" class="btn-sm" id="edit-reset" disabled>Reset</button>
+    <button type="button" class="btn-sm btn-primary" id="edit-save" disabled>Save revision</button>
+  </div>
+  <form method="post" action="{% url 'action-segmentation-save' recording.pk %}" id="segmentation-save-form" class="segmentation-save-form" hidden>
+    {% csrf_token %}
+    <input type="hidden" name="fingerprint" id="segmentation-fingerprint-input" value="{{ fingerprint }}">
+    <input type="hidden" name="transcript_id" value="{{ transcript.pk }}">
+    <input type="hidden" name="start" id="segmentation-start-input">
+    <input type="hidden" name="end_exclusive" id="segmentation-end-input">
+  </form>
+  {{ editor_state|json_script:"segmentation-editor-state" }}
+</div>
+{% endif %}
+
+<div class="crop-view-bar" id="crop-view-bar"{% if not has_crop %} hidden{% endif %}>
+  <span class="crop-view-msg" id="crop-view-msg">{{ crop_view_message }}</span>
+  <button type="button" class="btn btn-sm" id="crop-view-toggle">Show full transcript</button>
+</div>
+
+<div class="transcript" id="transcript-doc">
+  {% for item in transcript_items %}
+    {% if item.kind == "heading" %}
+      <div class="topic-heading" data-section-start="{{ item.section.start }}" data-section-ordinal="{{ item.section.ordinal }}">
+        <span class="topic-heading-label">Topic</span>
+        <span class="topic-heading-title">{{ item.section.title }}</span>
+      </div>
+    {% elif item.kind == "context_heading" %}
+      <div class="topic-heading topic-heading-context" data-section-start="{{ item.section.start }}" data-section-ordinal="{{ item.section.ordinal }}">
+        <span class="topic-heading-label">Topic</span>
+        <span class="topic-heading-title">{{ item.section.title }}</span>
+      </div>
+    {% else %}
+      <p class="transcript-segment" id="segment-{{ item.segment.ordinal }}" data-ordinal="{{ item.segment.ordinal }}"{% if item.segment.ordinal < working_start or item.segment.ordinal >= working_end %} hidden{% endif %}>
+        {% if item.segment.start_ms %}<span class="timestamp muted">{{ item.segment.start_ms|mmss }}</span>{% endif %}
+        {% if item.segment.speaker %}<span class="speaker">{{ item.segment.speaker }}:</span>{% endif %}
+        <span class="segment-text">{{ item.segment.text }}</span>
+      </p>
+    {% endif %}
   {% empty %}
     <p class="empty-state">This transcript has no segments.</p>
   {% endfor %}
 </div>
 
-{% include "workflow/_pagination.html" with page=page_obj %}
+{% if editable %}
+<div class="modal-overlay" id="boundary-action-dialog" hidden>
+  <div class="modal-panel boundary-action-panel" role="dialog" aria-modal="true" aria-labelledby="boundary-action-title">
+    <h3 class="modal-title" id="boundary-action-title"></h3>
+    <p class="boundary-action-summary" id="boundary-action-summary"></p>
+    <p class="boundary-action-note" id="boundary-action-note"></p>
+    <div class="boundary-action-buttons">
+      <button type="button" class="btn-sm" id="boundary-split">Split here</button>
+      <button type="button" class="btn-sm" id="boundary-crop-from">Crop from here</button>
+      <button type="button" class="btn-sm" id="boundary-crop-to">Crop to here</button>
+      <button type="button" class="btn-sm" id="boundary-remove-split" hidden>Remove split</button>
+      <button type="button" class="btn-sm" id="boundary-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% include "workflow/_pagination.html" with page=page_obj base_qs=pagination_base_qs %}
 {% endblock %}

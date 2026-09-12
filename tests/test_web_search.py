@@ -1295,6 +1295,17 @@ class TestParityAndAccessibility:
         assert 'data-label="Title"' in content
         assert 'data-label="Match"' in content
 
+    def test_search_table_date_cell_keeps_the_label_prefix(self, client):
+        """The normal-Library date-column change is scoped to the NORMAL
+        Library table only: search-result table rows keep the historical
+        'Recorded <timestamp>' / 'Discovered <timestamp>' label."""
+        rec = _seed(
+            ["budget review"], "par-label", recorded_at=datetime(2026, 1, 2, 10, 0, tzinfo=TZ)
+        )
+        si.rebuild_index()
+        content = _page(client, "/recordings/?q=budget&view=table")
+        assert f"Recorded 2026-01-02 10:00" in content
+
     def test_ok_result_page_uses_one_status_region_and_no_live_rows(self, client):
         _healthy_corpus(("a11y-1", "budget review"))
         content = _page(client, "/recordings/?q=budget")

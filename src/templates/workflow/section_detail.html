@@ -1,0 +1,226 @@
+{% extends "base.html" %}
+{% load workflow_extras %}
+{% block title %}{{ section.title }} — Brain{% endblock %}
+{% block content %}
+<p class="breadcrumb muted">
+  <a href="{% url 'recordings' %}">&larr; Library</a> ·
+  <a href="{% url 'recording-detail' recording.pk %}">{{ card.title }}</a>
+</p>
+
+<div class="detail-header">
+  <h1 class="detail-title">{{ section.title }}</h1>
+  <div class="detail-meta">
+    <span class="meta-item">{{ range_label }}</span>
+    <span class="meta-item">{{ card.effective_at_label }} {{ card.effective_at|local_time }}</span>
+    <span class="meta-item"><span class="status status-{{ recording.processing_status }}">{{ recording.processing_status }}</span></span>
+  </div>
+  <div class="detail-links">
+    <a class="detail-link" href="{{ transcript_jump_url }}" aria-label="Open this section in the transcript">Section in transcript</a>
+    <a class="detail-link" href="{% url 'recording-transcript' recording.pk %}" aria-label="Open the full transcript">Full transcript</a>
+    <a class="detail-link" href="{% url 'recording-history' recording.pk %}" aria-label="Open the processing history">History</a>
+  </div>
+</div>
+
+{% if not is_active_section %}
+  <div class="message message-warn" role="status">
+    This is a historical section (read-only). It belongs to a superseded
+    trim &amp; split revision{% if not section.transcript.is_active %} and a
+    superseded transcript version{% endif %} — it can be read but not edited.
+  </div>
+{% endif %}
+
+<div class="status-panel status-panel-{{ parent_status.level }}" role="status">
+  <span class="status-panel-label">Recording status</span>
+  <span class="status-panel-main">{{ parent_status.label }} — {{ parent_status.detail }}</span>
+  <span class="muted"> (inherited from the parent recording)</span>
+</div>
+
+{% if active_section_tags or is_active_section %}
+<section class="detail-tags" aria-label="Tags">
+  {% if active_section_tags %}
+    <ul class="tag-chips" aria-label="Active tags">
+      {% for assignment in active_section_tags %}
+        <li class="tag-chip tag-{{ assignment.origin }}"
+            {% if assignment.origin == 'suggested' %}aria-label="{{ assignment.tag.name }} (suggested)"{% endif %}>
+          {{ assignment.tag.name }}{% if assignment.origin == 'suggested' %} <span class="tag-chip-suggested">(suggested)</span>{% endif %}
+          {% if is_active_section %}
+            {% if assignment.origin == 'suggested' %}
+              <form method="post" action="{% url 'section-tag-confirm' recording.pk section.pk assignment.tag.pk %}" class="inline-form">
+                {% csrf_token %}
+                <button type="submit" class="link-button" aria-label="Confirm {{ assignment.tag.name }}">Confirm</button>
+              </form>
+            {% endif %}
+            <form method="post" action="{% url 'section-tag-remove' recording.pk section.pk assignment.tag.pk %}" class="inline-form">
+              {% csrf_token %}
+              <button type="submit" class="link-button danger" aria-label="Remove {{ assignment.tag.name }}">Remove</button>
+            </form>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% elif is_active_section %}
+    <p class="muted">No active tags.</p>
+  {% endif %}
+
+  {% if is_active_section %}
+    <details class="enhanced-details tag-editor" id="tag-editor">
+      <summary>+ Add tag</summary>
+      <div class="tag-editor-body">
+        <label class="visually-hidden" for="tag-filter-input">Filter tags</label>
+        <input type="search" id="tag-filter-input" class="tag-filter-input" placeholder="Filter tags" autocomplete="off" data-modal-focus>
+        <form method="post" action="{% url 'section-tag-apply' recording.pk section.pk %}" class="tag-selection-form">
+          {% csrf_token %}
+          <fieldset class="tag-selection-fieldset">
+            <legend class="visually-hidden">Tag selection</legend>
+            <div class="tag-option-list" aria-label="Existing tags">
+              {% for option in tag_options %}
+                <label class="tag-option" data-tag-name="{{ option.tag.name }}">
+                  <input type="checkbox" name="selected_tags" value="{{ option.tag.pk }}"{% if option.assigned %} checked{% endif %}>
+                  <span class="tag-option-label">{{ option.tag.name }}{% if option.suggested %} <span class="tag-option-suggested">(suggested)</span>{% endif %}</span>
+                </label>
+              {% endfor %}
+            </div>
+            <details class="retired-tags">
+              <summary>Retired tags</summary>
+              <div class="tag-option-list">
+                {% for option in retired_tag_options %}
+                  <label class="tag-option" data-tag-name="{{ option.tag.name }}">
+                    <input type="checkbox" name="selected_retired_tags" value="{{ option.tag.pk }}"{% if option.assigned %} checked{% endif %}>
+                    <span class="tag-option-label">{{ option.tag.name }}{% if option.suggested %} <span class="tag-option-suggested">(suggested)</span>{% endif %}</span>
+                  </label>
+                {% endfor %}
+              </div>
+            </details>
+          </fieldset>
+          <div class="tag-create-inline">
+            <label for="id_new_tag_name">New tag name</label>
+            <input type="text" id="id_new_tag_name" name="new_tag_name" maxlength="64" autocomplete="off" placeholder="New tag name">
+          </div>
+          <div class="tag-selection-actions">
+            <button type="submit" class="tag-done-button" data-modal-commit>Done</button>
+          </div>
+        </form>
+      </div>
+    </details>
+  {% endif %}
+</section>
+{% endif %}
+
+<section class="summary-section" aria-labelledby="summary-title">
+  <div class="overview-block-head">
+    <h2 class="overview-block-title" id="summary-title">Summary</h2>
+    <div class="summary-actions">
+      {% if variant.summary %}
+        <button type="button" class="copy-button btn-sm" data-copy-url="{% url 'section-summary-export' recording.pk section.pk %}?format=markdown{{ variant.export_query }}">Copy Markdown</button>
+        <a class="btn-sm" href="{% url 'section-summary-export' recording.pk section.pk %}?format=markdown{{ variant.export_query }}">Markdown</a>
+        <a class="btn-sm" href="{% url 'section-summary-export' recording.pk section.pk %}?format=text{{ variant.export_query }}">Plain text</a>
+      {% endif %}
+      {% url 'action-section-summarize' recording.pk section.pk as variant_action_url %}
+      {% if is_active_section %}
+        {% include "workflow/_variant_action.html" with action_url=variant_action_url actions=None section_actions=section_actions %}
+      {% endif %}
+    </div>
+  </div>
+
+  {% url 'section-detail' recording.pk section.pk as variant_tab_base %}
+  {% include "workflow/_variant_tabs.html" with tab_base=variant_tab_base %}
+
+  {% if variant.unresolved_original %}
+    <p class="empty-state">
+      The summary in the original language has not been generated yet and the
+      transcript's source language is not known.
+      {% if is_active_section %}
+        Use the Generate action: the source language will be detected locally
+        first, then the summary is written in the original language.
+      {% else %}
+        This historical section is read-only, so this language cannot be generated.
+      {% endif %}
+    </p>
+  {% elif variant.summary %}
+    <p class="variant-note muted">
+      Language: {{ variant.summary.output_language }}{% if variant.summary.output_language == variant.default_language %} (default){% endif %}
+      · Source language: {{ variant.summary.language|default:"unknown" }}
+      {% if variant.variant_state.regeneration_failed %}<span class="warn-text">(regeneration failed — this summary stays active)</span>{% endif %}
+    </p>
+    {% include "workflow/_summary_body.html" with summary=variant.summary embedded=True %}
+    <details class="technical-details">
+      <summary>Summary provenance</summary>
+      <dl class="provenance-grid">
+        <dt>Summary version</dt><dd>#{{ variant.summary.ordinal }}</dd>
+        <dt>Section</dt><dd>{{ section.title }} ({{ range_label }})</dd>
+        <dt>Output language</dt><dd>{{ variant.summary.output_language }}</dd>
+        <dt>Source language</dt><dd>{{ variant.summary.language|default:"unknown" }}</dd>
+        <dt>Model</dt><dd>{{ variant.summary.model_id|default:"unknown" }}</dd>
+        <dt>Prompt / parser</dt><dd>v{{ variant.summary.prompt_version }} / v{{ variant.summary.parser_version }}</dd>
+        <dt>Generation</dt><dd>{{ variant.summary.generation_mode }}</dd>
+        <dt>Chunks</dt><dd>{{ variant.summary.chunk_count }} ({{ variant.summary.input_characters }} characters input{% if variant.summary.input_truncated %}, truncated{% else %}, not truncated{% endif %})</dd>
+        <dt>Created</dt><dd>{{ variant.summary.created_at|local_time }}</dd>
+        <dt>JSON export</dt><dd><a href="{% url 'section-summary-export' recording.pk section.pk %}?format=json{{ variant.export_query }}">Download JSON</a></dd>
+      </dl>
+    </details>
+  {% else %}
+    <p class="empty-state">
+      {% if variant.variant_state and variant.variant_state.status == 'failed' %}
+        The last attempt to generate this language variant failed. Retry it explicitly below.
+      {% elif variant.action_mode == 'retry_summary' %}
+        The last summarization attempt failed. Retry it explicitly below.
+      {% elif variant.requested == 'default' and not variant.has_transcript %}
+        No active transcript to summarize.
+      {% elif not variant.action_selector %}
+        No summary in this language, and no approved generation target
+        produces it. It remains readable and exportable.
+      {% else %}
+        No summary in this language yet — generate it below.
+      {% endif %}
+    </p>
+  {% endif %}
+</section>
+
+<section class="overview-block" aria-labelledby="section-preview-title">
+  <div class="overview-block-head">
+    <h2 class="overview-block-title" id="section-preview-title">Transcript preview</h2>
+  </div>
+  {% if preview_segments %}
+    <div class="transcript" lang="{{ section.transcript.language_observed|default:'' }}">
+      {% for segment in preview_segments %}
+        <p class="transcript-segment" id="segment-{{ segment.ordinal }}">
+          {% if segment.start_ms %}<span class="timestamp muted">{{ segment.start_ms|mmss }}</span>{% endif %}
+          {% if segment.speaker %}<span class="speaker">{{ segment.speaker }}:</span>{% endif %}
+          <span class="segment-text">{{ segment.text }}</span>
+        </p>
+      {% endfor %}
+    </div>
+    <p class="overview-open">
+      <a href="{{ transcript_jump_url }}">Open in transcript — {{ segment_count }} segment{{ segment_count|pluralize }}</a>
+    </p>
+  {% else %}
+    <p class="empty-state">No transcript segments in this section's range.</p>
+  {% endif %}
+</section>
+
+<details class="technical-details">
+  <summary>Technical details</summary>
+  <dl class="provenance-grid">
+    <dt>Recording ID</dt><dd><code>{{ recording.pk }}</code></dd>
+    <dt>SHA-256</dt><dd><code title="{{ recording.sha256 }}">{{ recording.sha256|sha_short }}</code></dd>
+    <dt>Parent recording</dt><dd><a href="{% url 'recording-detail' recording.pk %}">{{ card.title }}</a></dd>
+    <dt>Source file</dt><dd>{{ card.display_source.original_filename|default:"(no source)" }}</dd>
+    <dt>Section ID</dt><dd><code>{{ section.pk }}</code></dd>
+    <dt>Ordinal</dt><dd>{{ section.ordinal }}</dd>
+    <dt>Range</dt><dd>{{ range_label }} (<code>{{ section.start_segment_ordinal }}&ndash;{{ section.end_segment_ordinal_exclusive }}</code>)</dd>
+    <dt>Layout revision</dt><dd>#{{ section.segmented_version.revision }}{% if not is_active_section %} <span class="muted">(historical)</span>{% endif %}</dd>
+    <dt>Transcript version</dt><dd><code>{{ section.transcript_id }}</code>{% if not section.transcript.is_active %} <span class="muted">(historical)</span>{% endif %}</dd>
+    <dt>Source language</dt><dd>{{ section.transcript.language_observed|default:"unknown" }}</dd>
+    <dt>Recorded</dt><dd>{{ card.effective_at_label }} {{ card.effective_at|local_time }}</dd>
+    <dt>Audio</dt><dd>{% if recording.audio_status == 'missing' %}<span class="warn-text">{{ recording.audio_status }}</span>{% else %}{{ recording.audio_status }}{% endif %}</dd>
+    {% if routing_decision %}
+      <dt>Routing</dt>
+      <dd>
+        {{ routing_decision.profile_name }} ({{ routing_decision.method }}) — model {{ routing_decision.model_id }}{% if routing_decision.routing_verified %} · verified{% else %} · <span class="warn-text">unverified</span>{% endif %}
+      </dd>
+    {% else %}
+      <dt>Routing</dt><dd class="muted">no decision yet</dd>
+    {% endif %}
+  </dl>
+</details>
+{% endblock %}

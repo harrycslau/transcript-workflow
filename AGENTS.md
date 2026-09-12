@@ -35,9 +35,10 @@ Non-negotiable principles:
     search_sync, search_query, search_web, semantic_query,
     search_fusion, library_metadata,
     variant_state, variant_view, web_actions, languages, langresolve,
-    llm, tempcleanup, review), a `views/` package
+    llm, tempcleanup, review, segmentation), a `views/` package
     (`recordings.py`, `actions.py`, `exports.py`, `review.py`,
-    `tags.py`, plus package-entry `home`/`health`/error views),
+    `tags.py`, `segmentation.py`, plus package-entry `home`/`health`/
+    error views),
     `query.py` (Library list/annotations), `forms.py`, `middleware.py`,
     `context_processors.py`, `sqlite_unicode.py`, `templatetags/`,
     `migrations/`, and the Step-4/5A web templates under
@@ -372,7 +373,7 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- Migrations `0001`–`0010` define the current schema (0007 is the
+- Migrations `0001`–`0012` define the current schema (0007 is the
   multilingual-summary migration: `Summary.output_language`,
   `SummaryVariantState`, transcript language-verification fields;
   intentionally irreversible — repair it in place, never add an 0008
@@ -389,7 +390,26 @@ Non-negotiable principles:
   `Tag.definition_origin` (`config`/`custom`, default `config`; existing
   rows migrate as config) plus the `chk_tag_definition_origin_allowlist`
   DB CHECK — additive and fully reversible, no data migration or
-  `RunPython`). Add NEW migrations, never
+  `RunPython`; 0011 is the approved Step-6.1 segmented-version
+  migration: the new immutable `SegmentedVersion` layout parent plus
+  nullable `Section` `segmented_version` ownership FK and canonical
+  half-open range fields, with the global `(transcript, ordinal)` section
+  unique replaced by the conditional `uniq_section_ordinal_fixed` /
+  `uniq_section_ordinal_topic` constraints and the
+  `chk_section_shape_segmentation` fixed-vs-topic same-row CHECK, plus
+  the layout revision/active/lifecycle/chronology/range CHECKs — additive
+  and fully reversible (no data migration; reverse deterministically
+  renumbers topic ordinals before restoring the global unique); 0012 is
+  the approved Step-6.2 section-tag migration: the nullable
+  `TagAssignment.section` ownership FK (PROTECT) plus the conditional
+  `uniq_tag_assignment_recording` (`section IS NULL`, unique
+  `(recording, tag)`) / `uniq_tag_assignment_section` (`section IS NOT
+  NULL`, unique `(section, tag)`) uniques replacing the old
+  recording-only constraints — additive and fully reversible, no data
+  migration (existing rows stay recording-scoped; the reverse deletes
+  section-only assignment rows before restoring the old global
+  `(recording, tag)` unique, preserving recording assignments)). Add NEW
+  migrations, never
   edit existing/applied ones. Enforce invariants with DB constraints
   (partial uniques, check constraints), not just application logic.
   Run `makemigrations --check` in verification. 0007's data migration
@@ -837,7 +857,9 @@ Non-negotiable principles:
   bullet below)** incremental embedding synchronization. **Step 5C
   semantic/hybrid retrieval is now delivered too** (see the Step 5C
   bullet below) and **Step 5D Ask with Citations is delivered too**
-  (see the Step 5D bullet below); the next planned work is **Step 6**.
+  (see the Step 5D bullet below); **Step 6.0, Step 6.1 and Step 6.2 are
+  delivered** (see the Step 6 bullets below) and the next planned work is
+  **Step 6.3**.
 - **Step 5B.4 — Incremental embedding synchronization (delivered)**:
   `workflow/services/embedding_sync.py` is the ONLY incremental
   `EmbeddingDocument` writer; `embedding_index.py` keeps the explicit
@@ -1081,8 +1103,148 @@ Non-negotiable principles:
   selects). History owns the revision list, not Transcript. The
   retention/Keep Audio/Rescan **screen** is removed from the
   prototype (6.4 UX placement deferred; its approved policies are retained).
-  **Step 6.1 is planned/next (structure/history only) and is not
-  implemented.** Actual source file deletion/move/trash/quarantine and
-  installing/enabling any schedule remain separate explicit approval gates.
+  **Step 6.1 (segmented versions: logical trim + topic layout/history)
+  and Step 6.2 (section-level summaries/tags + derived Library items) are
+  delivered** — see the dedicated invariant bullets below; the next planned
+  phase is **Step 6.3** (search/embedding/Ask integration for section
+  content), not yet
+  implemented. Actual source file deletion/move/trash/quarantine (6.4) and
+  installing/enabling any schedule (6.5) remain separate explicit approval
+  gates.
+- **Step 6.1 — Segmented versions (delivered)**: `SegmentedVersion` rows
+  are IMMUTABLE transcript-bound working-layout revisions holding a
+  canonical half-open crop `[start_segment_ordinal,
+  end_segment_ordinal_exclusive)` plus **zero or more** topic `Section`
+  rows — zero splits ⇒ zero topic Sections; N splits ⇒ exactly N+1
+  exhaustive named topic Sections that partition the retained range.
+  The fixed ordinal-0 whole-recording `Section` stays OUTSIDE all
+  revisions (never edited/versioned) and keeps driving the ordinal-0
+  defaults (default summary/search/embeddings/Ask).
+  `workflow/services/segmentation.py` is the ONLY writer/validator of
+  `SegmentedVersion` and topic `Section` rows: exact bounded input
+  validation (no coercion), sorted-canonicalized split markers, one
+  transaction that supersedes the prior active revision and creates the
+  new one, ZERO-DML no-op for unchanged payloads, fail-closed
+  `layout_invalid` on malformed stored state, an OPAQUE read-only
+  `segmentation_fingerprint` (SELECTs only), and fixed sanitized
+  `SegmentationError` categories; it never acquires the pipeline lock,
+  schedules no search/embedding sync, logs nothing, and touches no
+  network/files. At most ONE active layout per transcript (partial
+  unique); `(transcript, revision)` unique; a new active transcript gets
+  NO layout ("Not segmented") — retranscription copies no
+  boundaries/summaries/tags. Editing lives ONLY on the active Transcript
+  page ("Edit trim & splits"): pressing Edit reveals small scissors on
+  the inter-segment divider lines, staged changes stay PAGE-LOCAL and
+  must be SAVED BEFORE NAVIGATION (browser dirty-leave warning; NO
+  browser draft persistence); the saved crop is the normal working
+  presentation (cropped rows hidden, "Show full transcript" toggle). Save
+  is a two-step POST (confirmation then execution) under the pipeline
+  lock + `recover_interruptions` guarded by the opaque stale fingerprint
+  (stale/duplicate submissions are safe no-ops; lock busy is the friendly
+  409). GET stays strictly read-only; historical transcript versions and
+  explicit layouts are read-only via `?v=<transcript>&layout=<version>`;
+  History owns a bounded revision list (`HISTORY_LIMIT`). No
+  search/embedding sync is scheduled on save (6.1 changes no indexed
+  content); section summaries/tags arrived separately in Step 6.2 (see
+  the Step 6.2 bullet below). Migration
+  0011 (reversible, no data migration) adds `SegmentedVersion` plus
+  nullable `Section` ownership/range fields and replaces the global
+  `(transcript, ordinal)` unique with the two conditional section-shape
+  constraints (fixed vs topic) and the layout range/revision/
+  lifecycle/chronology CHECKs; existing ordinal-0 queries gained
+  `segmented_version IS NULL` defense-in-depth filters.
+- **Step 6.2 — Section-level summaries and tags + derived Library items
+  (delivered)**: topic `Section` rows of an active split layout are now
+  first-class Library items and carry their own multilingual summaries
+  and tags. Step 6.3 (search/embedding/Ask integration for section
+  content) is the next planned phase and is NOT implemented — keyword/
+  semantic/hybrid/Ask stay whole-recording-only and unchanged. 6.4
+  (retention/Keep-Audio/Rescan) and 6.5 (launchd) remain later approval
+  gates. Migration 0012 is additive and fully reversible; NO
+  real-database migration is claimed and the work stays uncommitted in
+  the working tree.
+  - **Derived Library item projection** (`workflow/query.py`): the
+    Library overview unit is a DERIVED item, never a persisted model —
+    there is NO `LibraryItem` model. Any Recording with no active topic
+    Sections (unprocessed, unsplit active transcript, or a crop-only
+    active layout) yields exactly ONE recording-backed item; an active
+    transcript/layout with N canonical topic Sections (N ≥ 2) yields
+    exactly those N section-backed items and REPLACES its recording-
+    backed item in the normal Library; historical layouts are absent and
+    retranscription (no new segmented version) naturally returns to one
+    recording item. The projection is a read-only DB UNION of
+    same-shaped recording/section branches (`library_item_queryset`):
+    filters, count, ordering and pagination all happen database-side
+    BEFORE hydration — never a Python expansion of all recordings. The
+    "which recordings are replaced / which Sections are valid" state is
+    ONE lazy parameterized read-only SQL canonical-layout predicate
+    (a RawSQL subquery shared by both branches — exactly two fixed
+    parameters, never a growing `IN (...)` list, never a Python id set)
+    that fail-closes on every canonical rule (ACTIVE version +
+    transcript, contiguous segment ordinals 0..count-1 with a nonempty
+    transcript, range inside `[0, count)`, topic count in
+    2..`MAX_TOPIC_SECTIONS`, cross-parent rejection, section ordinals
+    exactly 1..N with an exhaustive contiguous partition, exact-string
+    bounded nonblank control-free titles). Each page is hydrated by
+    `hydrate_library_items` in bounded batched queries (no N+1) into
+    `LibraryItemCard` adapters (section items carry their section-scoped
+    active tags, default-variant Summary, variant state and language
+    set). Search/embeddings/Ask are UNCHANGED and whole-recording-only
+    until 6.3 — defense-in-depth: `search_index`, `ask` and the
+    metadata-aux tag projection all filter `section__isnull=True` /
+    `segmented_version__isnull=True`.
+  - **Section summaries** (`workflow/services/summarize.py:
+    summarize_section_one`): an EXPLICIT per-section action (POST-only
+    two-step confirmation under the shared pipeline lock +
+    `recover_interruptions`, guarded by the OPAQUE bounded
+    `section_state_fingerprint` — SELECT-only; stale/duplicate
+    submissions are safe no-ops, lock busy is the friendly 409). The
+    target must be a TOPIC Section of the ACTIVE transcript's ACTIVE
+    layout (shared `segmentation.require_active_topic_section`); fixed,
+    historical, cross-parent and malformed-layout targets are stable
+    sanitized `SegmentationError` categories, and historical sections
+    are readable but never actionable. Input is ALL and ONLY the
+    Section's canonical segment range `[start, end_exclusive)` —
+    deterministic full stored text, never source audio, exact-count
+    defense-in-depth — chunked by the existing bounded path. Output
+    variants/versioning reuse the EXACT multilingual machinery: one
+    active Summary per (transcript, section, output_language),
+    section-scoped `SummaryVariantState`, generation selectors
+    default/original/en/zh-Hant, exact-scope attempt provenance and
+    interruption recovery. The target section/layout is captured at the
+    start AND revalidated at persistence (`section_layout_changed`
+    failure — never a write to read-only history). A section summary
+    NEVER changes the Recording-level default tuple (`summary_status`,
+    `resummarization_failed`, `last_failed_attempt`), processing status
+    or the whole-recording summary, and schedules NO recording
+    search/embedding sync (not indexed until 6.3).
+  - **Section tags** (`workflow/services/tags.py` section-scoped
+    mutations + migration 0012): nullable `TagAssignment.section`
+    ownership FK (PROTECT) with MUTUALLY EXCLUSIVE conditional uniques —
+    recording scope (`section IS NULL`, unique `(recording, tag)`;
+    existing rows migrate unchanged) vs section scope (`section IS NOT
+    NULL`, unique `(section, tag)`); `recording` stays a REQUIRED
+    denormalized parent for both scopes, so a recording and its sections
+    hold independent assignments of the same tag. All active section
+    writes are SERVICE-ONLY (`add_manual_tag_section`,
+    `confirm_section_suggestion`, `remove_section_tag`,
+    `apply_section_tag_selection` — the atomic complete-selection Done —
+    and `create_custom_tag_and_assign_section`), sharing the exact
+    validation/retired-opt-in/origin/suppression/custom-collision
+    semantics, running under the local SQLite BUSY/LOCKED retry (outside
+    atomic), taking no pipeline lock and scheduling NO recording search
+    sync (section tags are not indexed until 6.3); historical sections
+    are read-only. Only the DEFAULT variant's section summary
+    materializes section-scoped suggestions.
+  - **Verification (independently confirmed, current state)**: full
+    suite **2722 passed** (the Step 6.1 state was 2507 — historical;
+    the Step 6.2 delta is **215 tests**: the prior 207 Step 6.2 tests
+    plus **8 UI-refinement tests** — 3 section-confirmation, 4 normal
+    Library-table, 1 search-table scoping), only the known `audioop`
+    warning; `manage.py check`,
+    `makemigrations --check` (0012) and `git diff --check` clean; the
+    focused Step 6.1/6.2 section set is **326 passed**. No
+    real-database migration is claimed; the work and its tests are in
+    the working tree, uncommitted.
 - Do not implement features from a later step, and do not claim
   accuracy or completion without executable verification.

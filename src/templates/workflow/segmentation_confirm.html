@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Confirm trim &amp; splits — Brain{% endblock %}
+{% block content %}
+<h1>Save this trim &amp; split revision?</h1>
+
+<p class="confirm-note">
+  One immutable revision holding the working range and its topic sections will be
+  saved. The prior revision stays readable in History; the full transcript and
+  source audio are never modified, and the whole-recording summary/search/Ask
+  defaults stay unchanged.
+</p>
+
+<dl class="segmentation-confirm-summary">
+  <dt>Working range</dt><dd>{{ summary.range_label }} (of {{ summary.segment_count }} segments)</dd>
+  {% if summary.cropped_above %}<dt>Hidden above</dt><dd>{{ summary.cropped_above }} segment{{ summary.cropped_above|pluralize }}</dd>{% endif %}
+  {% if summary.cropped_below %}<dt>Hidden below</dt><dd>{{ summary.cropped_below }} segment{{ summary.cropped_below|pluralize }}</dd>{% endif %}
+  <dt>Topic sections</dt>
+  <dd>
+    {% if summary.topics %}
+      {{ summary.split_count }} split{{ summary.split_count|pluralize }}, {{ summary.topics|length }} named section{{ summary.topics|length|pluralize }}:
+      <ol class="segmentation-confirm-topics">
+        {% for title in summary.topics %}<li>{{ title }}</li>{% endfor %}
+      </ol>
+    {% else %}
+      None (crop only).
+    {% endif %}
+  </dd>
+</dl>
+
+<form method="post" action="" class="confirm-form segmentation-confirm-form">
+  {% csrf_token %}
+  {% for name, value in hidden.items %}
+    <input type="hidden" name="{{ name }}" value="{{ value }}">
+  {% endfor %}
+  {% for split in payload.splits %}<input type="hidden" name="split" value="{{ split }}">{% endfor %}
+  {% for title in payload.titles %}<input type="hidden" name="title" value="{{ title }}">{% endfor %}
+  <input type="hidden" name="confirmed" value="1">
+  <p class="confirm-buttons">
+    <button type="submit" class="confirm-button">Yes, save revision</button>
+    <a href="{% url 'recording-transcript' recording.pk %}">Cancel</a>
+  </p>
+</form>
+{% endblock %}

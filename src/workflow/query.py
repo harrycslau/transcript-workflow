@@ -30,13 +30,17 @@ from django.db.models import (
     CharField,
     Count,
     DateTimeField,
+    Exists,
+    F,
+    IntegerField,
     OuterRef,
     Prefetch,
     Q,
     Subquery,
     Value,
 )
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Coalesce, Concat
+from django.db.models.expressions import Func, RawSQL
 from django.db.models.query import QuerySet
 from django.utils import timezone as dj_tz
 
@@ -47,8 +51,10 @@ from workflow.models import (
     Recording,
     RoutingDecision,
     AudioSource,
+    Section,
     Summary,
     SummaryState,
+    SummaryVariantState,
     Tag,
     TagAssignment,
     Transcript,
@@ -58,7 +64,11 @@ from workflow.services.library_metadata import (
     TITLE_PLACEHOLDER,
     display_title_from_recording,
 )
-from workflow.sqlite_unicode import ensure_registered, folded_title_expression
+from workflow.services.segmentation import (
+    MAX_TOPIC_SECTIONS,
+    MAX_TOPIC_TITLE_LENGTH,
+)
+from workflow.sqlite_unicode import COLLATION_NAME, ensure_registered, folded_title_expression
 
 MAX_TAG_FILTERS = 10
 
@@ -76,7 +86,10 @@ def current_summary_prefetch(to_attr: str = "current_summary_rows") -> Prefetch:
     return Prefetch(
         "summaries",
         queryset=Summary.objects.filter(
-            is_active=True, transcript__is_active=True, section__ordinal=0
+            is_active=True,
+            transcript__is_active=True,
+            section__ordinal=0,
+            section__segmented_version__isnull=True,
         )
         # Multilingual: several variants can be active in scope. The
         # list card shows a DETERMINISTIC row (lowest ordinal); the
@@ -125,6 +138,7 @@ def _summary_title_subquery(*, default_language: bool) -> Subquery:
         transcript__recording=OuterRef("pk"),
         transcript__is_active=True,
         section__ordinal=0,
+        section__segmented_version__isnull=True,
         is_active=True,
     )
     if default_language:
@@ -162,7 +176,7 @@ def _display_title_expression() -> Coalesce:
     )
 
 
-def recording_list_queryset() -> QuerySet:
+def recording_list_queryset(*, include_title: bool = True) -> QuerySet:
     """Base list queryset: effective ordering + the full prefetch contract.
 
     The contract: callers render rows exclusively through
@@ -170,19 +184,30 @@ def recording_list_queryset() -> QuerySet:
     (``current_summary_rows``, ``active_tag_assignments``,
     ``active_routing_decisions``, ``presentation_sources``). No
     per-row queries are allowed in the loop.
+
+    ``include_title=False`` (Library item hydration) drops ONLY the
+    ``display_title`` annotation: ``RecordingCard.title`` then falls back
+    to the pure Python reference implementation over the prefetched
+    ``to_attr`` lists, so no summary-title subqueries are needed.
     """
+    qs = Recording.objects.annotate(
+        effective_at=effective_at_annotation(),
+        default_output_language=_default_output_language_subquery(),
+    )
+    if include_title:
+        qs = qs.annotate(display_title=_display_title_expression())
     return (
-        Recording.objects.annotate(
-            effective_at=effective_at_annotation(),
-            default_output_language=_default_output_language_subquery(),
-        )
-        .annotate(display_title=_display_title_expression())
-        .select_related("last_failed_attempt")
+        qs.select_related("last_failed_attempt")
         .prefetch_related(
             current_summary_prefetch(),
             Prefetch(
                 "tag_assignments",
-                queryset=TagAssignment.objects.filter(is_active=True).select_related("tag"),
+                # Defense-in-depth: only recording-scoped assignments feed
+                # the Library tag chips (section tags are a Step 6.2
+                # per-section concern, not a recording-level one).
+                queryset=TagAssignment.objects.filter(
+                    is_active=True, section__isnull=True
+                ).select_related("tag"),
                 to_attr="active_tag_assignments",
             ),
             Prefetch(
@@ -282,18 +307,7 @@ class RecordingCard:
     @property
     def month_label(self) -> str:
         """Local "Month YYYY" group label for chronological sorts."""
-        dt = self.effective_at
-        if dt is None:
-            return ""
-        from brain import settings as django_settings
-
-        tz_name = getattr(django_settings.BRAIN_CONFIG_OBJ, "timezone", "UTC")
-        try:
-            tz = ZoneInfo(tz_name)
-        except Exception:
-            tz = ZoneInfo("UTC")
-        local = dt.astimezone(tz) if dj_tz.is_aware(dt) else dt
-        return local.strftime("%B %Y")
+        return month_label_for(self.effective_at)
 
     @property
     def overview_excerpt(self) -> str:
@@ -347,6 +361,781 @@ class RecordingCard:
             or r.audio_status == AudioStatus.MISSING
             or (r.processing_status == ProcessingStatus.TRANSCRIBED and decision is not None and not decision.routing_verified)
         )
+
+
+# ---------------------------------------------------------------------------
+# Library item projection (Step 6.2)
+#
+# The Library overview unit is a DERIVED Library item, not necessarily a
+# Recording:
+#
+# - any Recording with NO active topic Sections (unprocessed/no
+#   transcript, unsplit active transcript, or a crop-only active layout
+#   with zero Sections) yields exactly ONE recording-backed item;
+# - an active transcript/layout with N canonical topic Sections (valid
+#   N >= 2) yields exactly those N section-backed items and REPLACES its
+#   recording-backed item in the normal Library overview;
+# - historical layouts are absent; retranscription (no new segmented
+#   version) naturally returns to one recording-backed item.
+#
+# There is deliberately NO persisted LibraryItem model: the projection is
+# a read-only DB UNION of same-shaped recording-backed and active-topic
+# branches (``library_item_queryset``), so count/pagination/order all
+# happen BEFORE hydration and no Python code ever expands all recordings.
+# Each page is then hydrated by ``hydrate_library_items`` in bounded
+# batched queries (no N+1) into :class:`LibraryItemCard` adapters.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Canonical active-topic-layout state — LAZY database-side, never a Python
+# expansion.
+#
+# The "which recordings are replaced by their topic Sections" and "which
+# Section pks are valid topic items" questions are answered by ONE shared
+# parameterized read-only SQL predicate over aliases ``v``
+# (``workflow_segmentedversion``) and ``t`` (``workflow_transcript``,
+# ``t.id = v.transcript_id``). Both UNION branches embed the predicate as a
+# RawSQL subquery, so:
+#
+# - the number of active layouts/sections NEVER materializes in Python and
+#   NEVER grows SQL parameters (the subquery carries exactly two fixed
+#   parameters: MAX_TOPIC_SECTIONS and MAX_TOPIC_TITLE_LENGTH);
+# - count/order/pagination stay exact database-side (the branches are the
+#   same UNION; only the hidden/valid set has become a SQL predicate);
+# - every canonical fail-closed rule is expressed in SQL: ACTIVE
+#   version + ACTIVE transcript; transcript segment ordinals contiguous
+#   0..count-1 with a nonempty transcript; the version range inside
+#   ``[0, count)``; topic Section count in ``2..MAX_TOPIC_SECTIONS``;
+#   cross-parent Sections rejected; section ordinals exactly ``1..N``
+#   (no gaps, via the per-section lower-ordinal count); every range
+#   nonempty and the sections an exhaustive contiguous partition of
+#   ``[v.start, v.end)``; and every title a nonblank (the FULL Python
+#   3.12 ``str.strip()`` whitespace set, not just ASCII space),
+#   length-bounded, control-free exact string.
+#
+# ``_HIDDEN_RECORDINGS_SQL`` selects the parent Recording pks (the
+# recording branch excludes them); ``_VALID_SECTIONS_SQL`` selects the
+# valid topic Section pks (the Section branch filters on them). Both reuse
+# the SAME predicate text and parameter list.
+# ---------------------------------------------------------------------------
+
+
+# Python 3.12 ``str.strip()`` whitespace codepoints, EXCLUDING the C0
+# controls (0x00-0x1F) and DEL (0x7F), which are rejected separately by
+# the control-char check below. SQLite's one-argument ``TRIM`` removes
+# only ASCII space, so the blank-title check passes the FULL Python
+# whitespace set to the two-argument form to stay exactly in parity with
+# ``str.strip()`` (e.g. an all-ideographic-space title must fail closed).
+_STRIP_WS_CODEPOINTS = (
+    0x20, 0x85, 0xA0, 0x1680,
+    *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+)
+
+
+def _strip_ws_expr() -> str:
+    """A fixed SQL expression concatenating every ``str.strip()``
+    whitespace codepoint via ``CHAR()`` — the two-arg TRIM trim set."""
+    return " || ".join(f"CHAR({cp})" for cp in _STRIP_WS_CODEPOINTS)
+
+
+def _canonical_layout_predicate() -> tuple[str, list]:
+    """The shared validated-layout SQL predicate and its fixed parameters.
+
+    Valid for aliases ``v`` = ``workflow_segmentedversion`` and ``t`` =
+    ``workflow_transcript`` with ``t.id = v.transcript_id``. Mirrors
+    ``workflow.services.segmentation.canonical_layout_from_rows``
+    fail-closed semantics (see the module comment above). Read-only and
+    parameterized: the only bound values are ``MAX_TOPIC_SECTIONS`` and
+    ``MAX_TOPIC_TITLE_LENGTH``.
+    """
+    params = [MAX_TOPIC_SECTIONS, MAX_TOPIC_TITLE_LENGTH]
+    return (
+        f"""
+        v.is_active = 1
+        AND t.is_active = 1
+        AND (
+            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        ) > 0
+        AND (
+            SELECT MIN(ts.ordinal) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        ) = 0
+        AND (
+            SELECT MAX(ts.ordinal) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        ) + 1 = (
+            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        )
+        AND v.start_segment_ordinal >= 0
+        AND v.end_segment_ordinal_exclusive > v.start_segment_ordinal
+        AND v.end_segment_ordinal_exclusive <= (
+            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        )
+        AND (
+            SELECT COUNT(*) FROM workflow_section s WHERE s.segmented_version_id = v.id
+        ) BETWEEN 2 AND %s
+        AND NOT EXISTS (
+            SELECT 1 FROM workflow_section bad
+            WHERE bad.segmented_version_id = v.id
+            AND (
+                bad.transcript_id != v.transcript_id
+                OR bad.ordinal < 1
+                OR bad.start_segment_ordinal IS NULL
+                OR bad.end_segment_ordinal_exclusive IS NULL
+                OR bad.end_segment_ordinal_exclusive <= bad.start_segment_ordinal
+                OR TRIM(bad.title, {_strip_ws_expr()}) = ''
+                OR LENGTH(bad.title) > %s
+                OR INSTR(bad.title, CHAR(0)) > 0
+                OR bad.title GLOB '*[' || CHAR(1) || '-' || CHAR(31) || CHAR(127) || ']*'
+                OR (
+                    SELECT COUNT(*) FROM workflow_section lo
+                    WHERE lo.segmented_version_id = v.id AND lo.ordinal < bad.ordinal
+                ) != bad.ordinal - 1
+                OR bad.start_segment_ordinal != COALESCE(
+                    (
+                        SELECT MAX(hi.end_segment_ordinal_exclusive) FROM workflow_section hi
+                        WHERE hi.segmented_version_id = v.id AND hi.ordinal < bad.ordinal
+                    ),
+                    v.start_segment_ordinal
+                )
+            )
+        )
+        AND (
+            SELECT MAX(s.end_segment_ordinal_exclusive) FROM workflow_section s
+            WHERE s.segmented_version_id = v.id
+        ) = v.end_segment_ordinal_exclusive
+        """,
+        params,
+    )
+
+
+_CANONICAL_PREDICATE_SQL, _CANONICAL_PREDICATE_PARAMS = _canonical_layout_predicate()
+
+# Recording pks replaced by their valid topic Sections in the Library
+# overview (the recording branch excludes these).
+_HIDDEN_RECORDINGS_SQL = (
+    "SELECT t.recording_id FROM workflow_segmentedversion v "
+    "JOIN workflow_transcript t ON t.id = v.transcript_id "
+    "WHERE " + _CANONICAL_PREDICATE_SQL
+)
+
+# Section pks that are canonical topic items of an ACTIVE layout of an
+# ACTIVE transcript (the Section branch filters on these).
+_VALID_SECTIONS_SQL = (
+    "SELECT s.id FROM workflow_section s "
+    "JOIN workflow_segmentedversion v ON v.id = s.segmented_version_id "
+    "JOIN workflow_transcript t ON t.id = v.transcript_id "
+    "WHERE " + _CANONICAL_PREDICATE_SQL
+)
+
+_HIDDEN_RECORDINGS_SQL_RAW = RawSQL(_HIDDEN_RECORDINGS_SQL, list(_CANONICAL_PREDICATE_PARAMS))
+_VALID_SECTIONS_SQL_RAW = RawSQL(_VALID_SECTIONS_SQL, list(_CANONICAL_PREDICATE_PARAMS))
+
+
+# The one shared column list of the Library item UNION (identical names and
+# order on BOTH branches so Django's ``union()`` aligns them positionally).
+_ITEM_COLUMNS = (
+    "item_key",
+    "item_kind",
+    "recording_id",
+    "section_id",
+    "display_title",
+    "title_fold",
+    "effective_at",
+    "default_output_language",
+    "processing_status",
+    "summary_status",
+    "audio_status",
+    "retranscription_failed",
+    "resummarization_failed",
+    "has_route_unverified",
+    "recorded_at",
+    "range_start",
+    "range_end",
+)
+
+
+def _fold_expression(title_expression):
+    """``<title-expression> COLLATE unicode_fold`` as a SELECT expression.
+
+    The collation must be applied INSIDE each UNION branch (the ORDER BY
+    of a compound statement cannot reference a differently-collated
+    column): the folded value is projected as the ``title_fold`` column
+    and Title A–Z/Z–A sorts the UNION by that projected column.
+    """
+    return Func(
+        title_expression,
+        function=COLLATION_NAME,
+        template="%(expressions)s COLLATE %(function)s",
+    )
+
+
+def _route_unverified_expression():
+    """Exists: the parent recording has an ACTIVE unverified routing decision."""
+    return Exists(
+        RoutingDecision.objects.filter(
+            recording=OuterRef("transcript__recording_id"),
+            is_active=True,
+            routing_verified=False,
+        )
+    )
+
+
+def _recording_item_columns(filters: ListFilters, timezone_name: str, *, using: str = "default"):
+    """The recording branch of the Library item UNION.
+
+    Every current Recording EXCEPT those replaced by active valid topic
+    Sections. The exclusion is a lazy parameterized RawSQL subquery over
+    the shared canonical-layout predicate (never a Python id set, never a
+    growing ``IN (... )`` parameter list). Applies the EXISTING
+    recording-scope filter predicates (:func:`filter_only` — recording
+    tags/summary semantics unchanged) BEFORE projecting the shared union
+    columns.
+    """
+    qs = Recording.objects.using(using).annotate(effective_at=effective_at_annotation())
+    qs = filter_only(qs, filters, timezone_name)
+    qs = qs.exclude(pk__in=_HIDDEN_RECORDINGS_SQL_RAW)
+    display_title = _display_title_expression()
+    return (
+        qs.annotate(
+            default_output_language=_default_output_language_subquery(),
+            display_title=display_title,
+            title_fold=_fold_expression(display_title),
+            has_route_unverified=Exists(
+                RoutingDecision.objects.filter(
+                    recording=OuterRef("pk"), is_active=True, routing_verified=False
+                )
+            ),
+            item_kind=Value("recording", output_field=CharField(max_length=16)),
+            item_key=Concat(Value("r:"), F("pk"), output_field=CharField()),
+            recording_id=F("pk"),
+            section_id=Value(None, output_field=CharField(max_length=36)),
+            range_start=Value(None, output_field=IntegerField()),
+            range_end=Value(None, output_field=IntegerField()),
+        )
+        .order_by()
+        .values(*_ITEM_COLUMNS)
+    )
+
+
+def _section_default_language_expression() -> Subquery:
+    """Default output language of a topic Section's ACTIVE transcript.
+
+    Uses the same ``langresolve`` ORM expression as the recording branch
+    (keyed on the Section's transcript), so the derived value always
+    agrees with ``resolve_default_language``.
+    """
+    return Subquery(
+        Transcript.objects.filter(pk=OuterRef("transcript_id"))
+        .annotate(_default_output=default_output_language_expression())
+        .values("_default_output")[:1],
+        output_field=CharField(max_length=32),
+    )
+
+
+def _section_summary_state_expression() -> Subquery:
+    """A Section's current DEFAULT-output-variant summary state.
+
+    The ``SummaryVariantState.status`` value (missing/current/failed) or
+    NULL when no variant-state row exists (never generated). Mirrors the
+    recording-level ``summary_status`` semantics scoped to one Section.
+    """
+    return Subquery(
+        SummaryVariantState.objects.filter(
+            transcript=OuterRef("transcript_id"),
+            section=OuterRef("pk"),
+            output_language=OuterRef("default_output_language"),
+        ).values("status")[:1],
+        output_field=CharField(max_length=16),
+    )
+
+
+def _section_has_default_summary_expression() -> Exists:
+    """Exists: an ACTIVE Summary for the Section in its DEFAULT output
+    variant (the section-scoped analog of the recording ``has_summary``
+    predicate)."""
+    return Exists(
+        Summary.objects.filter(
+            transcript=OuterRef("transcript_id"),
+            section=OuterRef("pk"),
+            is_active=True,
+            output_language=OuterRef("default_output_language"),
+        )
+    )
+
+
+def _section_base_queryset(*, using: str = "default"):
+    """The Section branch base: topic Sections whose transcript is ACTIVE
+    and whose SegmentedVersion is that transcript's ACTIVE revision (with
+    the cross-parent ownership guard), limited to canonically valid
+    Section pks via the shared parameterized RawSQL subquery (lazy —
+    never a Python id set, never a growing ``IN (... )`` parameter
+    list), annotated with the filter/order columns."""
+    return (
+        Section.objects.using(using)
+        .filter(
+            pk__in=_VALID_SECTIONS_SQL_RAW,
+            segmented_version__isnull=False,
+            transcript__is_active=True,
+            segmented_version__is_active=True,
+            transcript=F("segmented_version__transcript"),
+        )
+        .annotate(
+            effective_at=Coalesce(
+                "transcript__recording__recorded_at",
+                "transcript__recording__discovered_at",
+                output_field=DateTimeField(),
+            ),
+            default_output_language=_section_default_language_expression(),
+            section_default_summary_state=_section_summary_state_expression(),
+            section_has_default_summary=_section_has_default_summary_expression(),
+        )
+    )
+
+
+def _section_filter_only(qs, filters: ListFilters, timezone_name: str):
+    """Apply the parsed Library filters to the SECTION branch.
+
+    Semantics per the approved product decisions: tag filters inspect the
+    Section's OWN assignment rows only (any/all exact per item);
+    ``has_summary`` inspects the Section's current DEFAULT output
+    variant; status/review/language/date inherit the parent
+    Recording/transcript as appropriate.
+    """
+    if filters.date:
+        start, end = local_day_bounds(filters.date, timezone_name)
+        qs = qs.filter(effective_at__gte=start, effective_at__lt=end)
+    if filters.date_from:
+        start, _ = local_day_bounds(filters.date_from, timezone_name)
+        qs = qs.filter(effective_at__gte=start)
+    if filters.date_to:
+        _, end = local_day_bounds(filters.date_to, timezone_name)
+        qs = qs.filter(effective_at__lt=end)
+
+    if filters.tags:
+        if filters.tag_match == "any":
+            qs = qs.filter(
+                tag_assignments__is_active=True,
+                tag_assignments__tag__name_key__in=filters.tags,
+            ).distinct()
+        else:
+            for key in filters.tags:
+                qs = qs.filter(
+                    tag_assignments__is_active=True,
+                    tag_assignments__tag__name_key=key,
+                )
+
+    if filters.status:
+        qs = qs.filter(transcript__recording__processing_status=filters.status)
+
+    if filters.summary:
+        if filters.summary == SummaryState.NOT_READY:
+            # A topic Section only exists for an ACTIVE transcript, so
+            # "not ready" can never match a Section item.
+            qs = qs.none()
+        elif filters.summary == SummaryState.MISSING:
+            qs = qs.filter(
+                Q(section_default_summary_state=SummaryVariantState.VariantStatus.MISSING)
+                | Q(section_default_summary_state__isnull=True)
+            )
+        else:
+            qs = qs.filter(section_default_summary_state=filters.summary)
+
+    if filters.review:
+        qs = qs.filter(
+            Q(transcript__recording__processing_status=ProcessingStatus.NEEDS_REVIEW)
+            | Q(transcript__recording__processing_status=ProcessingStatus.FAILED)
+            | Q(transcript__recording__retranscription_failed=True)
+            | Q(transcript__recording__resummarization_failed=True)
+            | Q(section_default_summary_state=SummaryVariantState.VariantStatus.FAILED)
+            | Q(
+                transcript__recording__processing_status=ProcessingStatus.TRANSCRIBED,
+                transcript__recording__routing_decisions__is_active=True,
+                transcript__recording__routing_decisions__routing_verified=False,
+            )
+        ).distinct()
+
+    if filters.audio:
+        qs = qs.filter(transcript__recording__audio_status=filters.audio)
+
+    if filters.has_summary is not None:
+        if filters.has_summary:
+            qs = qs.filter(section_has_default_summary=True).distinct()
+        else:
+            qs = qs.exclude(section_has_default_summary=True).distinct()
+
+    return qs
+
+
+def _section_item_columns(filters: ListFilters, timezone_name: str, *, using: str = "default"):
+    """The Section branch of the Library item UNION."""
+    qs = _section_base_queryset(using=using)
+    qs = _section_filter_only(qs, filters, timezone_name)
+    section_title = Coalesce(F("title"), Value(TITLE_PLACEHOLDER))
+    return (
+        qs.annotate(
+            item_kind=Value("section", output_field=CharField(max_length=16)),
+            item_key=Concat(Value("s:"), F("pk"), output_field=CharField()),
+            recording_id=F("transcript__recording_id"),
+            section_id=F("pk"),
+            display_title=section_title,
+            title_fold=_fold_expression(section_title),
+            processing_status=F("transcript__recording__processing_status"),
+            summary_status=Coalesce(
+                "section_default_summary_state", Value(SummaryState.MISSING)
+            ),
+            audio_status=F("transcript__recording__audio_status"),
+            retranscription_failed=F("transcript__recording__retranscription_failed"),
+            resummarization_failed=F("transcript__recording__resummarization_failed"),
+            has_route_unverified=_route_unverified_expression(),
+            recorded_at=F("transcript__recording__recorded_at"),
+            range_start=F("start_segment_ordinal"),
+            range_end=F("end_segment_ordinal_exclusive"),
+        )
+        .order_by()
+        .values(*_ITEM_COLUMNS)
+    )
+
+
+def library_item_queryset(
+    filters: ListFilters,
+    timezone_name: str,
+    *,
+    using: str = "default",
+) -> QuerySet:
+    """The read-only Library item projection (Step 6.2).
+
+    A Django UNION of same-shaped recording-backed and active-topic
+    section-backed branches. Filters are applied PER BRANCH (before the
+    union) so count/pagination/ordering all happen database-side over the
+    union — never a Python expansion of all recordings. The "which
+    recordings are replaced" / "which Sections are valid" state is a lazy
+    parameterized RawSQL subquery shared by both branches — the number of
+    active layouts/sections never materializes in Python and never grows
+    SQL parameters. Callers order with :func:`apply_item_sort` and
+    paginate with a ``Paginator``, then hydrate each page with
+    :func:`hydrate_library_items`.
+    """
+    recording_qs = _recording_item_columns(filters, timezone_name, using=using)
+    section_qs = _section_item_columns(filters, timezone_name, using=using)
+    return recording_qs.union(section_qs)
+
+
+def library_item_count(
+    filters: ListFilters,
+    timezone_name: str,
+    *,
+    using: str = "default",
+) -> int:
+    """Database-side item count for the Library paginator.
+
+    The full projection carries presentation subqueries (title chain,
+    summary state) that are irrelevant to a COUNT; this dedicated query
+    projects ONLY the unique ``item_key`` per branch so the count is
+    computed over a minimal UNION (same filters, same branches, same
+    semantics — never a Python expansion, never a Python id set).
+    """
+    recording_qs = Recording.objects.using(using).annotate(effective_at=effective_at_annotation())
+    recording_qs = filter_only(recording_qs, filters, timezone_name)
+    recording_qs = recording_qs.exclude(pk__in=_HIDDEN_RECORDINGS_SQL_RAW)
+    recording_qs = recording_qs.annotate(
+        item_key=Concat(Value("r:"), F("pk"), output_field=CharField())
+    ).order_by().values("item_key")
+
+    section_qs = _section_base_queryset(using=using)
+    section_qs = _section_filter_only(section_qs, filters, timezone_name)
+    section_qs = section_qs.annotate(
+        item_key=Concat(Value("s:"), F("pk"), output_field=CharField())
+    ).order_by().values("item_key")
+
+    return recording_qs.union(section_qs).count()
+
+
+def apply_item_sort(queryset, sort: str):
+    """Order the Library item UNION by one of the Library sort choices.
+
+    Date grouping/newest/oldest use the parent Recording effective date;
+    Title sorts use the item display title (topic title for a Section,
+    the existing fallback chain for a Recording) folded by the shared
+    ``unicode_fold`` collation INSIDE each union branch and ordered by
+    the projected ``title_fold`` column, with a stable deterministic
+    tie-breaker (the unique ``item_key``).
+    """
+    if sort == "oldest":
+        return queryset.order_by("effective_at", "item_key")
+    if sort == "title_az":
+        ensure_registered()
+        return queryset.order_by("title_fold", "item_key")
+    if sort == "title_za":
+        ensure_registered()
+        return queryset.order_by("-title_fold", "item_key")
+    return queryset.order_by("-effective_at", "item_key")
+
+
+def hydrate_library_items(rows, *, using: str = "default") -> list["LibraryItemCard"]:
+    """Hydrate one page of projected item rows into card adapters.
+
+    Bounded batched queries (never per-item): the parent Recordings come
+    from ONE ``recording_list_queryset()`` batch (the existing prefetch
+    contract), the Sections from ONE batch with their section-scoped
+    active tags, and the section-scoped active Summaries/variant states
+    from TWO bounded batches.
+    """
+    rows = list(rows)
+    if not rows:
+        return []
+    recording_ids = {row["recording_id"] for row in rows}
+    recordings = {
+        r.pk: r
+        for r in recording_list_queryset(include_title=False).using(using).filter(pk__in=recording_ids)
+    }
+    section_ids = [row["section_id"] for row in rows if row.get("section_id")]
+    sections: dict[int, Section] = {}
+    section_tags: dict[int, list] = {}
+    section_summaries: dict[int, Summary] = {}
+    section_languages: dict[int, list[str]] = {}
+    section_variant_states: dict[int, SummaryVariantState] = {}
+    if section_ids:
+        sections = {
+            s.pk: s
+            for s in Section.objects.using(using)
+            .filter(pk__in=section_ids)
+            .select_related("transcript", "segmented_version")
+        }
+        for assignment in (
+            TagAssignment.objects.using(using)
+            .filter(section__in=section_ids, is_active=True)
+            .select_related("tag")
+            .order_by("tag__name")
+        ):
+            section_tags.setdefault(assignment.section_id, []).append(assignment)
+
+        summaries_by_section: dict[int, dict[str, Summary]] = {}
+        for summary in (
+            Summary.objects.using(using)
+            .filter(section__in=section_ids, is_active=True)
+            .only(
+                "id",
+                "section",
+                "transcript",
+                "ordinal",
+                "title",
+                "overview",
+                "language",
+                "output_language",
+                "is_active",
+                "created_at",
+                "model_id",
+                "generation_mode",
+            )
+        ):
+            summaries_by_section.setdefault(summary.section_id, {})[
+                summary.output_language
+            ] = summary
+
+        states_by_section: dict[int, dict[str, SummaryVariantState]] = {}
+        for state in SummaryVariantState.objects.using(using).filter(section__in=section_ids):
+            states_by_section.setdefault(state.section_id, {})[state.output_language] = state
+
+        for row in rows:
+            sid = row.get("section_id")
+            if not sid:
+                continue
+            by_lang = summaries_by_section.get(sid, {})
+            default_lang = row.get("default_output_language") or ""
+            section_summaries[sid] = by_lang.get(default_lang)
+            section_languages[sid] = sorted(set(by_lang) | set(states_by_section.get(sid, {})))
+            section_variant_states[sid] = states_by_section.get(sid, {}).get(default_lang)
+
+    cards = []
+    for row in rows:
+        recording = recordings.get(row["recording_id"])
+        sid = row.get("section_id")
+        cards.append(
+            LibraryItemCard(
+                row,
+                RecordingCard(recording) if recording is not None else None,
+                section=sections.get(sid),
+                section_tags=section_tags.get(sid, ()),
+                section_summary=section_summaries.get(sid),
+                section_languages=section_languages.get(sid, ()),
+                section_variant_state=section_variant_states.get(sid),
+            )
+        )
+    return cards
+
+
+class LibraryItemCard:
+    """Presentation adapter over ONE projected Library item.
+
+    Wraps the item row (from the DB UNION), the hydrated parent
+    Recording via the existing :class:`RecordingCard` contract, and — for
+    a topic-Section item — the Section plus its section-scoped active
+    tags, default-variant Summary, variant state and language set. Every
+    attribute is served from memory; hydration happens once per page in
+    bounded batched queries (never per-item).
+    """
+
+    def __init__(
+        self,
+        row,
+        card: RecordingCard | None,
+        *,
+        section: Section | None = None,
+        section_tags=(),
+        section_summary: Summary | None = None,
+        section_languages=(),
+        section_variant_state: SummaryVariantState | None = None,
+    ) -> None:
+        self._row = row
+        self._card = card
+        self.section = section
+        self._section_tags = list(section_tags)
+        self._section_summary = section_summary
+        self._section_languages = list(section_languages)
+        self._section_variant_state = section_variant_state
+
+    @property
+    def is_section(self) -> bool:
+        return self._row["item_kind"] == "section"
+
+    @property
+    def recording(self) -> Recording | None:
+        return self._card.recording if self._card is not None else None
+
+    @property
+    def recording_id(self):
+        return self._row.get("recording_id")
+
+    @property
+    def section_id(self):
+        return self._row.get("section_id")
+
+    @property
+    def title(self) -> str:
+        """The item display title: the exact projected value used for
+        BOTH rendering and Title A–Z/Z–A ordering (topic title for a
+        Section; the existing fallback chain for a Recording)."""
+        value = self._row.get("display_title")
+        if value:
+            return value
+        if self._card is not None:
+            return self._card.title
+        return TITLE_PLACEHOLDER
+
+    @property
+    def parent_title(self) -> str:
+        """The parent Recording title (context/provenance for a Section
+        item; identical to ``title`` for a Recording item)."""
+        if self._card is not None:
+            return self._card.title
+        return TITLE_PLACEHOLDER
+
+    @property
+    def effective_at(self):
+        value = self._row.get("effective_at")
+        if value is not None:
+            return value
+        recording = self.recording
+        if recording is None:
+            return None
+        return recording.recorded_at or recording.discovered_at
+
+    @property
+    def effective_at_label(self) -> str:
+        return "Recorded" if self._row.get("recorded_at") else "Discovered"
+
+    @property
+    def month_label(self) -> str:
+        return month_label_for(self.effective_at)
+
+    @property
+    def display_summary(self) -> Summary | None:
+        """The single Summary row driving all card Summary content: the
+        Section's DEFAULT-variant active Summary for a Section item, the
+        default-language whole-recording Summary for a Recording item."""
+        if self.is_section:
+            return self._section_summary
+        return self._card.display_summary if self._card is not None else None
+
+    @property
+    def overview_excerpt(self) -> str:
+        summary = self.display_summary
+        if summary is None:
+            return ""
+        text = unicodedata.normalize("NFC", summary.overview).strip()
+        if len(text) > 220:
+            text = text[:220].rstrip() + "…"
+        return text
+
+    @property
+    def active_tags(self) -> list[TagAssignment]:
+        if self.is_section:
+            return list(self._section_tags)
+        return self._card.active_tags if self._card is not None else []
+
+    @property
+    def available_languages(self) -> list[str]:
+        if self.is_section:
+            return list(self._section_languages)
+        return self._card.available_languages if self._card is not None else []
+
+    @property
+    def display_source(self) -> AudioSource | None:
+        return self._card.display_source if self._card is not None else None
+
+    @property
+    def active_route(self) -> RoutingDecision | None:
+        return self._card.active_route if self._card is not None else None
+
+    @property
+    def needs_attention(self) -> bool:
+        row = self._row
+        return bool(
+            row["processing_status"] in (ProcessingStatus.NEEDS_REVIEW, ProcessingStatus.FAILED)
+            or row["retranscription_failed"]
+            or row["resummarization_failed"]
+            or row["summary_status"] == SummaryState.FAILED
+            or row["audio_status"] == AudioStatus.MISSING
+            or (
+                row["processing_status"] == ProcessingStatus.TRANSCRIBED
+                and row["has_route_unverified"]
+            )
+        )
+
+    @property
+    def range_label(self) -> str:
+        if not self.is_section:
+            return ""
+        from workflow.services.segmentation import range_label
+
+        return range_label(self._row.get("range_start"), self._row.get("range_end"))
+
+    @property
+    def summary_status(self):
+        return self._row.get("summary_status")
+
+    @property
+    def default_language(self) -> str:
+        return self._row.get("default_output_language") or ""
+
+    @property
+    def section_variant_state(self) -> SummaryVariantState | None:
+        return self._section_variant_state
+
+
+def month_label_for(dt) -> str:
+    """Local "Month YYYY" group label for chronological sorts."""
+    if dt is None:
+        return ""
+    from brain import settings as django_settings
+
+    tz_name = getattr(django_settings.BRAIN_CONFIG_OBJ, "timezone", "UTC")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("UTC")
+    local = dt.astimezone(tz) if dj_tz.is_aware(dt) else dt
+    return local.strftime("%B %Y")
 
 
 # ---------------------------------------------------------------------------
@@ -584,15 +1373,23 @@ def filter_only(queryset, filters: ListFilters, timezone_name: str):
         queryset = queryset.filter(effective_at__lt=end)
 
     if filters.tags:
+        # Recording-scope only (defense-in-depth): Step 6.2 section-
+        # scoped assignments are per-section concerns, never matched by
+        # the recording Library/search tag filters until item projection
+        # arrives.
         if filters.tag_match == "any":
             queryset = queryset.filter(
-                tag_assignments__is_active=True, tag_assignments__tag__name_key__in=filters.tags
+                tag_assignments__is_active=True,
+                tag_assignments__section__isnull=True,
+                tag_assignments__tag__name_key__in=filters.tags,
             ).distinct()
         else:
             # AND semantics: the recording must carry EVERY selected tag.
             for key in filters.tags:
                 queryset = queryset.filter(
-                    tag_assignments__is_active=True, tag_assignments__tag__name_key=key
+                    tag_assignments__is_active=True,
+                    tag_assignments__section__isnull=True,
+                    tag_assignments__tag__name_key=key,
                 )
 
     if filters.status:
@@ -622,6 +1419,7 @@ def filter_only(queryset, filters: ListFilters, timezone_name: str):
             summaries__is_active=True,
             summaries__transcript__is_active=True,
             summaries__section__ordinal=0,
+            summaries__section__segmented_version__isnull=True,
         )
         queryset = queryset.filter(current).distinct() if filters.has_summary else queryset.exclude(current).distinct()
 
