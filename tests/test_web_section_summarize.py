@@ -388,7 +388,7 @@ class TestConfirmedPost:
 
     def test_confirmed_no_recording_tuple_or_sync_changes(self, client, monkeypatch):
         """The executed section summary must never change the Recording
-        tuple and must schedule no recording search sync."""
+        tuple; the ACTION layer itself performs no search-index work."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
@@ -398,9 +398,10 @@ class TestConfirmedPost:
         fingerprint = section_state_fingerprint(rec, sections[0])
 
         # The fake service returns success WITHOUT creating anything: the
-        # real ``summarize_section_one`` never touches the Recording tuple
-        # and schedules no recording sync (proven by the section-summary
-        # service tests); this test asserts the ACTION layer adds none.
+        # real ``summarize_section_one`` never touches the Recording
+        # tuple (proven by the section-summary service tests, which also
+        # pin the single parent-recording sync schedule); this test
+        # asserts the ACTION layer itself adds no index writes.
         def fake(config, section, regenerate=False, **kwargs):
             return {
                 "recording_id": rec.pk, "section_id": section.pk,

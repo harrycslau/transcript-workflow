@@ -1,4 +1,4 @@
-"""Web tests for the Step 5D Ask page.
+"""Web tests for the Step 5D Ask page (+ Step 6.3 section summaries).
 
 GET renders the form with zero health/embedding/chat work and no writes;
 POST on the same endpoint executes the read-only Ask with CSRF
@@ -319,3 +319,67 @@ class TestSummaryRouteRegression:
         response = client.get(f"/recordings/{rec.pk}/summaries/{summary.pk}/")
         assert response.status_code == 200
         assert "Modern" in response.content.decode()
+
+class TestSectionSummaryCitations:
+    """Step 6.3: an answer citing canonical topic-section summaries links
+    each citation to the EXACT existing summary-version route; the tag
+    names bound in the index aux never appear on the page."""
+
+    def _seed_split(self, tmp_path, monkeypatch):
+        from workflow.models import Section, SegmentedVersion
+        from workflow.services.segmentation import save_segmented_version
+        from workflow.services.tags import add_manual_tag_section
+        from factories import make_tag
+
+        rec, transcript, fixed = make_transcribed_recording(
+            ["solo segment zero", "solo segment one", "solo segment two"],
+            sha="webask-sec-0",
+        )
+        save_segmented_version(
+            rec.pk, transcript.pk, 0, 3, [2], ["Alpha Topic", "Beta Topic"]
+        )
+        layout = SegmentedVersion.objects.get(transcript=transcript, is_active=True)
+        sections = list(
+            Section.objects.filter(segmented_version=layout).order_by("ordinal")
+        )
+        summaries = [
+            make_summary_version(
+                rec, transcript, sections[0], title="alpha s1", overview="alpha o1"
+            ),
+            make_summary_version(
+                rec, transcript, sections[1], title="alpha s2", overview="alpha o2"
+            ),
+            make_summary_version(
+                rec, transcript, fixed, title="alpha whole", overview="alpha ow"
+            ),
+        ]
+        add_manual_tag_section(sections[0], make_tag("Zebra Confidential"))
+        si.rebuild_index()
+        config = ask_config(tmp_path)
+        ei.rebuild_embedding_index(config, embedder=keyword_embedder(["alpha"]))
+        monkeypatch.setattr("workflow.views.ask.get_config", lambda: config)
+        monkeypatch.setattr(
+            "workflow.services.embedding_client.embed_texts",
+            keyword_embedder(["alpha"]),
+        )
+        monkeypatch.setattr(
+            "workflow.services.llm.chat_completion",
+            chat_json("Combined [C1][C2][C3].", ["C1", "C2", "C3"]),
+        )
+        return rec, transcript, sections, summaries
+
+    def test_post_renders_summary_version_links_for_sections(
+        self, client, tmp_path, monkeypatch
+    ):
+        rec, _t, _sections, summaries = self._seed_split(tmp_path, monkeypatch)
+        response = client.post("/ask/", {"question": "alpha"})
+        assert response.status_code == 200
+        content = response.content.decode()
+        for summary in summaries:
+            # The EXACT existing summary-version route carries every
+            # summary citation (section variants included).
+            assert f"/recordings/{rec.pk}/summaries/{summary.pk}/" in content
+        # Layout/tag metadata is never prompt evidence and never rendered:
+        # the citation list carries server-owned recording titles only.
+        assert "Zebra Confidential" not in content
+        assert "Alpha Topic" not in content

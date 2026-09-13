@@ -23,10 +23,12 @@ from django.db.migrations.executor import MigrationExecutor
 TARGET_0007 = ("workflow", "0007_summary_multilingual")
 TARGET_0008 = ("workflow", "0008_search_index")
 # The CURRENT schema leaf: runtime services below reference the current
-# models (Tag definition_origin, Section segmented_version, section-
-# scoped TagAssignments, etc.), so any runtime call on the isolated
-# database must run against the full current schema.
-TARGET_LEAF = ("workflow", "0012_remove_tagassignment_uniq_tag_assignment_and_more")
+# models (Tag definition_origin, Section segmented_version + Step 6.2a
+# title_is_temporary — read by the SHARED canonical-layout predicate of
+# the Step 6.3 section-summary mapping —, section-scoped TagAssignments,
+# etc.), so any runtime call on the isolated database must run against
+# the full current schema.
+TARGET_LEAF = ("workflow", "0013_section_title_is_temporary")
 
 ALIAS = "mig0008"
 
@@ -321,6 +323,23 @@ def test_service_and_migration_fts_schema_sql_match():
 
 
 def test_migration_backfill_matches_runtime_rebuild_parity(executor_and_alias):
+    """Migration 0008's local backfill produces the SAME logical document
+    set with byte-identical searchable text as the runtime rebuild.
+
+    Step 6.3 bumped ``INDEX_VERSION`` to "2"; migration 0008 is frozen
+    (never edited), so its backfill carries the historical version "1"
+    and is DETECTABLY STALE (content_hash binds the version) until an
+    explicit ``brain search-index rebuild``. This test proves the mapping
+    parity holds for the text and that the version drift is exactly the
+    documented ``version_mismatch`` — never silent corruption:
+
+    - the rebuilt doc set is a SUPERSET of the backfilled keys (Step 6.3
+      may add canonical topic-section summary docs; the whole-recording
+      segment/summary/recording docs must be present in both);
+    - for every shared key the title/body/aux text is byte-identical;
+    - the status report BEFORE rebuild flags exactly the version drift
+      and every backfilled row's index_version is "1"; after rebuild
+      every row's index_version is "2" and the index is healthy."""
     executor, connection, alias = executor_and_alias
     apps0007 = _migrate_to(executor, TARGET_0007)
     _build_corpus(apps0007, alias)
@@ -328,28 +347,47 @@ def test_migration_backfill_matches_runtime_rebuild_parity(executor_and_alias):
 
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT document_key, content_hash, title_text, body_text, aux_text "
-            "FROM workflow_search_document ORDER BY document_key"
+            "SELECT document_key, content_hash, title_text, body_text, aux_text, "
+            "index_version FROM workflow_search_document ORDER BY document_key"
         )
         backfilled = {row[0]: row[1:] for row in cursor.fetchall()}
+    assert backfilled, "corpus should backfill some documents"
+    # The frozen migration backfill is version "1".
+    assert {row[4] for row in backfilled.values()} == {"1"}
 
     from workflow.services import search_index
 
-    # The runtime rebuild runs on the CURRENT schema leaf.
+    # The runtime status/rebuild run on the CURRENT schema leaf (version "2").
     _migrate_to(executor, TARGET_LEAF)
+
+    # BEFORE rebuild: the whole backfilled set is reported as version drift
+    # and nothing else — a detectable, safe state, never corruption.
+    report = search_index.build_status_report(using=alias)
+    assert report["healthy"] is False
+    assert report["counts"]["registry_documents"] == len(backfilled)
+    mismatched = set(report["keys"].get("version_mismatch", []))
+    assert mismatched == set(backfilled)
+    # No other defect categories fire for a pure version bump.
+    for category in ("stale_content", "orphan_document", "missing_from_registry"):
+        assert report["categories"].get(category, 0) == 0, category
+
     search_index.rebuild_index(using=alias)
 
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT document_key, content_hash, title_text, body_text, aux_text "
-            "FROM workflow_search_document ORDER BY document_key"
+            "SELECT document_key, content_hash, title_text, body_text, aux_text, "
+            "index_version FROM workflow_search_document ORDER BY document_key"
         )
         rebuilt = {row[0]: row[1:] for row in cursor.fetchall()}
 
-    assert backfilled.keys() == rebuilt.keys()
-    # byte-identical content and identical hash for every document key
+    # Rebuilt set is a superset (Step 6.3 may add canonical topic-section
+    # summary docs); every shared key keeps byte-identical text.
+    assert set(backfilled) <= set(rebuilt)
     for key in backfilled:
-        assert backfilled[key] == rebuilt[key], key
+        assert backfilled[key][1:4] == rebuilt[key][1:4], key  # title/body/aux
+        assert backfilled[key][0] != rebuilt[key][0], key      # hash: version frame
+        assert rebuilt[key][4] == "2"
+    assert search_index.build_status_report(using=alias)["healthy"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -11,11 +11,15 @@ Commands:
   brain summaries ID | brain summary ID [--format markdown|text|json]
   brain tags [--sync]        Summarization, rendering, and tag commands (Step 3).
   brain search "QUERY" [--mode keyword|semantic|hybrid] [--limit N]
-                             Read-only search (no lock, never rebuilds;
-                             keyword is the default mode; exit 1 when the
-                             index/embedding generation is missing, broken,
-                             stale or unavailable; 2 on malformed query;
-                             --json; --limit up to 200, default 50).
+                             Read-only Library-item search (no lock, never
+                             rebuilds; every mode searches the normal
+                             Library items, so a valid active split answers
+                             its Sections with the parent Recording
+                             suppressed; keyword is the default mode;
+                             exit 1 when the index/embedding generation is
+                             missing, broken, stale or unavailable; 2 on
+                             malformed query; --json; --limit up to 200,
+                             default 50).
   brain ask QUESTION [--json]
                              Ask a question with citations drawn only from
                              retrieved transcript segments/summaries
@@ -748,26 +752,57 @@ def _evidence_suffix(evidence) -> str:
     return "  (" + ", ".join(parts) + ")"
 
 
+def _section_context_suffix(item: dict) -> str:
+    """Trailing ``· section of "<parent>" · <range>`` context for a
+    LIBRARY-ITEM section result (Step 6.3). ``parent_title`` /
+    ``section_range`` are the bounded CLI hydration fields; when the item
+    could not be hydrated (it vanished or was replaced between the engine
+    read and the bounded hydration) only the neutral ``· section`` marker
+    is shown — the truthful engine fields stay rendered, nothing is
+    fabricated. Recording rows never receive this suffix, so unsplit
+    output keeps its historical line."""
+    parent = item.get("parent_title")
+    if not parent:
+        return "  · section"
+    suffix = f'  · section of "{parent}"'
+    section_range = item.get("section_range")
+    if section_range:
+        suffix += f" · {section_range}"
+    return suffix
+
+
 def _print_search_human(payload: dict, *, mode: str = "keyword", evidence: bool = False) -> None:
     """Human search output.
 
-    The default ``mode="keyword"`` rendering is byte-for-byte identical
-    to the historical Step 5A.4.1 output. Semantic/hybrid runs get the
-    same provenance labels plus a concise ``[mode]`` header; semantic
-    snippets are plain (unmarked) text, and hybrid rows may carry compact
-    component ranks.
+    The default ``mode="keyword"`` rendering of RECORDING results is
+    byte-for-byte identical to the historical Step 5A.4.1 output.
+    Semantic/hybrid runs get the same provenance labels plus a concise
+    ``[mode]`` header; semantic snippets are plain (unmarked) text, and
+    hybrid rows may carry compact component ranks. Step 6.3: a LIBRARY
+    ITEM section result shows the Section's own display title when
+    hydrated and a trailing ``· section of "<parent>"`` context, so the
+    two units are clearly distinguished. The more-matches note counts
+    LIBRARY ITEMS whenever the engine payload carries the explicit
+    ``item_mode`` flag (``brain search`` always searches the Library
+    item scope, so real runs always say "library item(s)") — never
+    inferred from the visible rows (they can all be Recordings while
+    the omitted matches include Sections); a payload without the flag
+    keeps the historical recording wording.
     """
     query = payload["query"]
     results = payload["results"]
-    suffix = "" if mode == "keyword" else f" [{mode}]"
+    suffix = f" [{mode}]" if mode != "keyword" else ""
     if not results:
         print(f'no results for "{query}"{suffix}')
         return
     print(f'{payload["result_count"]} result(s) for "{query}"{suffix}')
     for item in results:
-        title = item["title"] or "(untitled)"
+        is_section = item.get("item_kind") == "section"
+        title = (item.get("section_title") or item["title"]) or "(untitled)"
         label = _search_source_label(item["match"])
         line = f'{item["rank"]}. {title}  [{label}]'
+        if is_section:
+            line += _section_context_suffix(item)
         if evidence:
             line += _evidence_suffix(item.get("evidence"))
         print(line)
@@ -778,11 +813,83 @@ def _print_search_human(payload: dict, *, mode: str = "keyword", evidence: bool 
         print("note: the candidate scan reached its bound; refine the query.")
     more = payload["more_recordings_matched"]
     if more:
-        print(f"note: {more} more matching recording(s) beyond --limit.")
+        # Item mode counts matched LIBRARY ITEMS; the unit comes from
+        # the engine's EXPLICIT item_mode flag (the matched unit IS a
+        # Library item), never from the visible rows, which can all be
+        # Recordings while the omitted matches include Sections. A
+        # payload without the flag keeps the historical recording
+        # wording.
+        unit = "library item(s)" if payload.get("item_mode") else "recording(s)"
+        print(f"note: {more} more matching {unit} beyond --limit.")
+
+
+def _library_item_scope(config):
+    """The UNFILTERED canonical Library item scope (Step 6.3).
+
+    The unsliced one-column ``item_key`` UNION of the normal Library
+    (``workflow.query.library_item_key_queryset`` with empty
+    ``ListFilters`` and the configured timezone): a valid active split
+    layout yields EXACTLY its topic Section items with the parent
+    Recording SUPPRESSED (never parent + section duplicates), while
+    unsplit/crop-only/historical/malformed recordings answer their
+    single Recording item. Pure QuerySet construction — no query runs
+    here, so the cheap-validation-before-health command order is
+    untouched; the search engine compiles the UNION exactly once (the
+    hybrid service compiles once and shares the value with both of its
+    components).
+    """
+    from workflow.query import ListFilters, library_item_key_queryset
+
+    return library_item_key_queryset(ListFilters(), config.timezone)
+
+
+def _enrich_section_results(payload: dict, config) -> None:
+    """ONE bounded Library hydration of the Section winners (Step 6.3).
+
+    ``workflow.query.library_items_by_keys`` revalidates at most the
+    returned ``item_key``s (bounded by the engine's own 200-result cap)
+    through the EXACT normal-Library semantics with the same unfiltered
+    canonical scope the CLI searched, then enriches each hydratable
+    Section row ADDITIVELY: ``section_title`` (the item's Library
+    display title), ``parent_title`` and ``section_range``. No existing
+    field is touched — every row keeps the parent ``recording_id`` and
+    the engine item identity. A key that no longer names a normal
+    Library item (a racing split/delete) or a card whose parent
+    Recording vanished is left exactly as the engine returned it;
+    display data is never fabricated. NO call happens at all when no
+    Section won (unsplit corpora keep the historical zero-extra-query
+    shape), and ZERO queries run for an all-malformed key set.
+    """
+    from workflow.query import ListFilters, library_items_by_keys
+
+    results = payload.get("results") or []
+    keys = [
+        result.get("item_key")
+        for result in results
+        if result.get("item_kind") == "section"
+    ]
+    if not keys:
+        return
+    cards = library_items_by_keys(keys, ListFilters(), config.timezone)
+    by_key = {
+        f"s:{card.section_id}": card
+        for card in cards
+        if card.is_section and card.recording is not None
+    }
+    for result in results:
+        if result.get("item_kind") != "section":
+            continue
+        card = by_key.get(result.get("item_key"))
+        if card is None:
+            continue
+        result["section_title"] = card.title
+        result["parent_title"] = card.parent_title
+        result["section_range"] = card.range_label
 
 
 def cmd_search(args) -> int:
-    """``brain search QUERY`` (Step 5A.4.1 / Step 5C) — strictly read-only.
+    """``brain search QUERY`` (Step 5A.4.1 / Step 5C / Step 6.3) — strictly
+    read-only.
 
     Order: config/Django/schema preflight -> cheap mode-appropriate input
     validation (exit 2, before any health/network work) -> the query
@@ -790,7 +897,15 @@ def cmd_search(args) -> int:
     EXACTLY once and then ``search_recordings`` (no embedding config or
     network). ``semantic``/``hybrid`` delegate to their services, which
     each run exactly one source health sweep and one embedding request
-    through the shared contract — the CLI adds no second sweep. Never
+    through the shared contract — the CLI adds no second sweep.
+
+    Step 6.3: every mode runs in LIBRARY-ITEM mode over the UNFILTERED
+    canonical Library item scope (configured timezone), so a valid active
+    split layout answers its Section items with the parent Recording
+    suppressed, while everything else answers its single Recording item.
+    Section winners are then enriched through ONE bounded
+    ``library_items_by_keys`` hydration (additive fields only; parent
+    ``recording_id`` and the engine item identity are retained). Never
     takes the pipeline lock, never synchronizes or writes.
     """
     from brainlib.config import ConfigError, load_config
@@ -838,6 +953,11 @@ def cmd_search(args) -> int:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 
+    # Building the Library item scope is pure QuerySet construction
+    # (no DB round trip, no health, no network), so this cannot reorder
+    # the validation-before-health contract above.
+    item_scope = _library_item_scope(config)
+
     try:
         if mode == "semantic":
             # The service owns the exactly-one source health sweep,
@@ -851,10 +971,12 @@ def cmd_search(args) -> int:
                 limit=args.limit,
                 config=config,
                 embedder=embedding_client.embed_texts,
+                item_scope=item_scope,
             )
         elif mode == "hybrid":
-            # The fusion service owns the exact one/one/one contract; the
-            # keyword component never calls ``preflight_full_health``.
+            # The fusion service owns the exact one/one/one contract and
+            # compiles the item scope EXACTLY ONCE for both components;
+            # the keyword component never calls ``preflight_full_health``.
             from workflow.services import embedding_client
             from workflow.services import search_fusion
 
@@ -863,20 +985,27 @@ def cmd_search(args) -> int:
                 limit=args.limit,
                 config=config,
                 embedder=embedding_client.embed_texts,
+                item_scope=item_scope,
             )
         else:
             # Keyword path: full health once, then the engine. No
             # embedding configuration, imports or network are involved.
             search_query.preflight_full_health()
-            payload = search_query.search_recordings(query, limit=args.limit)
+            payload = search_query.search_recordings(
+                query, limit=args.limit, item_scope=item_scope
+            )
     except ConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
+    _enrich_section_results(payload, config)
+
     if args.json:
-        # Keyword JSON is the engine payload unchanged (no synthetic
-        # ``mode`` key); semantic/hybrid payloads already carry their
-        # mode/evidence metadata.
+        # Keyword JSON is the engine payload (no synthetic ``mode`` key);
+        # semantic/hybrid payloads already carry their mode/evidence
+        # metadata. Step 6.3 enrichment added ``section_title`` /
+        # ``parent_title`` / ``section_range`` to hydratable Section rows
+        # only — every row keeps its ``recording_id`` and item fields.
         print(json.dumps(payload, indent=2, default=str))
     elif mode == "semantic":
         _print_search_human(payload, mode="semantic")
@@ -903,6 +1032,9 @@ def _ask_payload(result) -> dict:
                 "recording_id": citation.recording_id,
                 "title": citation.title,
                 "url": citation.url,
+                # Server-owned Section identity for a Step 6.3
+                # section-summary citation (null otherwise).
+                "section_id": citation.section_id,
             }
             for citation in result.citations
         ],
@@ -1084,7 +1216,10 @@ def main(argv: list[str] | None = None) -> int:
 
     search_cmd = subparsers.add_parser(
         "search",
-        help="Search transcripts, summaries and metadata (read-only)",
+        help=(
+            "Search transcripts, summaries and metadata as Library items "
+            "(split recordings answer their sections; read-only)"
+        ),
     )
     search_cmd.add_argument("query", help="Plain-text query (keywords combine with AND)")
     search_cmd.add_argument(
@@ -1097,7 +1232,7 @@ def main(argv: list[str] | None = None) -> int:
         "--limit",
         type=int,
         default=50,
-        help="Maximum matching recordings to show (1-200, default 50)",
+        help="Maximum matching Library items to show (1-200, default 50)",
     )
     search_cmd.add_argument("--json", action="store_true", help="Machine-readable JSON output")
 

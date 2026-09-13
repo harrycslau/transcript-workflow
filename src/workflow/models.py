@@ -822,7 +822,10 @@ class SearchDocument(models.Model):
     Document set (see ``search_index`` for the canonical mappings):
     every non-empty segment of the ACTIVE Transcript, every current
     whole-recording Summary variant (active Transcript, ordinal-0
-    section), and one deterministic metadata document per Recording.
+    section), every ACTIVE variant of a canonical ACTIVE-layout topic
+    Section (Step 6.3 — keyed ``summary:<id>`` like any variant, owned by
+    the parent Recording), and one deterministic metadata document per
+    Recording.
     """
 
     document_key = models.TextField(

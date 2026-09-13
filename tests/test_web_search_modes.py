@@ -12,12 +12,17 @@ filter/view fields in the top bar while other pages search globally.
 Vector search delegates to its services with exactly one health sweep,
 one integrity traversal and one localhost embedding request (zero for an
 empty scope) and no keyword preflight; invalid filters reject BEFORE
-health/network instead of widening; the same Recording scope applies
+health/network instead of widening; the same Library item scope applies
 before both rankings; the query never enters a URL, redirect, log or
 error; result navigation (pagination/sort/filter/view) is POST-only
 with hidden server-validated state; card/table rendering, snippets,
 provenance and segment-link validation are shared with keyword search.
-All network is mocked; no real HTTP.
+All network is mocked; no real HTTP. Since the Step 6.3 web slice every
+mode runs over the normal Library's item scope (the exact
+``library_item_key_queryset`` item_key UNION): a valid active split
+layout yields the Section items with the parent Recording suppressed
+while unsplit corpora answer exactly the historical per-Recording
+results (parity below).
 """
 
 from __future__ import annotations
@@ -33,11 +38,17 @@ from brainlib.config import EmbeddingConfig
 from factories import (
     default_web,
     make_config,
+    make_summary_version,
     make_tag,
     make_tag_assignment,
     make_transcribed_recording,
 )
-from workflow.models import EmbeddingDocument, EmbeddingGeneration, EmbeddingGenerationState
+from workflow.models import (
+    Section,
+    EmbeddingDocument,
+    EmbeddingGeneration,
+    EmbeddingGenerationState,
+)
 from workflow.services import embedding_index as ei
 from workflow.services import search_fusion as sf
 from workflow.services import search_index as si
@@ -45,6 +56,7 @@ from workflow.services import search_query as keyword_query
 from workflow.services import search_web
 from workflow.services import semantic_query as sq
 from workflow.services.embedding_client import EmbeddingBatch, EmbeddingHTTPError
+from workflow.services.segmentation import save_segmented_version
 
 # transaction=True: the semantic/hybrid engines refuse to run inside a
 # SQLite transaction, and pytest-django's default outer transaction would
@@ -939,3 +951,140 @@ class TestAccessibilityAndSafety:
         for fragment in fragments:
             assert type(fragment.text) is str
             assert not isinstance(fragment.text, SafeString)
+
+
+# ---------------------------------------------------------------------------
+# 9. Step 6.3 item-native presentation and sorting in the vector modes:
+#    Section winners sort by their OWN derived titles and render through
+#    the same item card/table branches as the normal Library (section-
+#    detail links, item duration, parent/range context, no library-return
+#    token) with the shared snippets/provenance and POST-only navigation
+# ---------------------------------------------------------------------------
+
+
+def build_item_sort_corpus(tmp_path, monkeypatch, *, sha, titles):
+    """One split recording (two Section items) plus one unsplit
+    "Mid recording"; every item matches ``alpha``."""
+    rec, transcript, _fixed = make_transcribed_recording(
+        [
+            f"{sha} alpha opening discussion",
+            f"{sha} alpha closing discussion",
+        ],
+        sha=f"{sha}-split",
+    )
+    save_segmented_version(rec.pk, transcript.pk, 0, 2, [1], list(titles))
+    sections = list(
+        Section.objects.filter(segmented_version__transcript=transcript).order_by(
+            "ordinal"
+        )
+    )
+    mid, mid_transcript, mid_section = make_transcribed_recording(
+        [f"{sha} alpha middle recording"], sha=f"{sha}-mid"
+    )
+    make_summary_version(mid, mid_transcript, mid_section, title="Mid recording")
+    si.rebuild_index()
+    config = emb_config(tmp_path)
+    ei.rebuild_embedding_index(config, embedder=keyword_embedder(["alpha", "beta"]))
+    monkeypatch.setattr("workflow.views.recordings.get_config", lambda: config)
+    return rec, mid, sections
+
+
+def build_item_render_corpus(tmp_path, monkeypatch):
+    """One split recording: Section 0's default Summary derives the
+    display title; Section 1 keeps its stored title."""
+    rec, transcript, fixed = make_transcribed_recording(
+        [
+            "wvrender alpha opening discussion",
+            "wvrender alpha closing discussion",
+        ],
+        sha="wvrender-split",
+    )
+    save_segmented_version(
+        rec.pk, transcript.pk, 0, 2, [1], ["Draft opener", "Plain closer"]
+    )
+    first, second = Section.objects.filter(
+        segmented_version__transcript=transcript
+    ).order_by("ordinal")
+    make_summary_version(
+        rec, transcript, first, title="Summarised opener", overview="Opening overview."
+    )
+    si.rebuild_index()
+    config = emb_config(tmp_path)
+    ei.rebuild_embedding_index(config, embedder=keyword_embedder(["alpha"]))
+    monkeypatch.setattr("workflow.views.recordings.get_config", lambda: config)
+    return rec, first, second
+
+
+class TestVectorItemPresentation:
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_title_sort_uses_item_titles_not_parents(self, tmp_path, monkeypatch, mode):
+        """The Library sorts order the vector winners with the EXACT
+        item semantics: a Section sorts by its OWN display title and
+        INTERLEAVES with Recording items — never parent-only grouping."""
+        build_item_sort_corpus(
+            tmp_path, monkeypatch, sha="vsort", titles=("Zebra topic", "Alpha topic")
+        )
+        _patch_query_embedder(monkeypatch, keyword_embedder(["alpha"]))
+        az = post(
+            Client(), {"mode": mode, "q": "alpha", "sort": "title_az", "view": "table"}
+        )
+        assert f"3 {mode} search results" in az
+        places = [az.find(t) for t in ("Alpha topic", "Mid recording", "Zebra topic")]
+        assert all(place >= 0 for place in places)
+        assert places == sorted(places)
+
+        za = post(
+            Client(), {"mode": mode, "q": "alpha", "sort": "title_za", "view": "table"}
+        )
+        places = [za.find(t) for t in ("Zebra topic", "Mid recording", "Alpha topic")]
+        assert all(place >= 0 for place in places)
+        assert places == sorted(places)
+
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_date_sort_orders_items_by_parent_effective_date(
+        self, tmp_path, monkeypatch, mode
+    ):
+        """newest/oldest use the shared parent-date item sort; the two
+        Sections of one parent keep their unique item_key tie order."""
+        rec, _mid, sections = build_item_sort_corpus(
+            tmp_path, monkeypatch, sha="vsdate", titles=("Zeta topic", "Eta topic")
+        )
+        _patch_query_embedder(monkeypatch, keyword_embedder(["alpha"]))
+        content = post(
+            Client(), {"mode": mode, "q": "alpha", "sort": "newest", "view": "table"}
+        )
+        expected = sorted([f"/sections/{s.pk}/" for s in sections])
+        places = [content.find(token) for token in expected]
+        assert all(place >= 0 for place in places)
+        assert places == sorted(places)
+
+    @pytest.mark.parametrize("view", ["cards", "table"])
+    @pytest.mark.parametrize("mode", ["semantic", "hybrid"])
+    def test_section_rows_render_like_the_library(
+        self, tmp_path, monkeypatch, mode, view
+    ):
+        rec, first, second = build_item_render_corpus(tmp_path, monkeypatch)
+        _patch_query_embedder(monkeypatch, keyword_embedder(["alpha"]))
+        content = post(Client(), {"mode": mode, "q": "alpha", "view": view})
+        assert f"2 {mode} search results" in content
+        # Section title links go to the SECTION DETAIL (search-origin
+        # returns are unsupported: never a lib_return token).
+        assert f'href="/recordings/{rec.pk}/sections/{first.pk}/"' in content
+        assert f'href="/recordings/{rec.pk}/sections/{second.pk}/"' in content
+        assert "lib_return" not in content
+        # Derived title (default Summary) beats the stored title; the
+        # stored title stays for the Summary-less sibling.
+        assert ">Summarised opener<" in content
+        assert ">Plain closer<" in content
+        assert "Draft opener" not in content
+        # Item duration (each one-segment Section), never the parent 60s.
+        assert ">1s<" in content
+        assert "1m 00s" not in content
+        # Section summary language rides the item card.
+        assert 'class="lang-code"' in content
+        if view == "cards":
+            # Parent/range context exactly like the normal Library card.
+            assert "Topic · segment 0 · in" in content
+            assert "Topic · segment 1 · in" in content
+        # Shared snippet/provenance machinery survives item hydration.
+        assert 'class="match-chip' in content

@@ -48,8 +48,13 @@ Contract (approved Step 6.1):
   revision when it replaces a non-full/split active version;
 - old versions/Sections are never mutated; no summaries, variant
   states, suggestions, or tags are copied;
-- the service does NOT acquire the pipeline lock, does NOT schedule any
-  search/embedding sync, logs nothing, and touches no network/files.
+- the service does NOT acquire the pipeline lock, does NOT call the
+  network, logs nothing, and touches no files. An actual REAL change
+  schedules exactly ONE post-commit recording search sync
+  (``search_sync.schedule_recording_sync`` inside the save transaction —
+  the Step 6.3 index contract: a layout change alters which
+  topic-section summaries are canonical index documents); a ZERO-DML
+  no-op or a rollback schedules nothing.
 
 Failures raise :class:`SegmentationError` with a stable sanitized
 ``code``; the message is fixed per category and never contains input
@@ -352,6 +357,158 @@ def canonical_layout_from_rows(
         "splits": tuple(splits),
         "titles": tuple(titles),
     }
+
+
+# ---------------------------------------------------------------------------
+# Canonical-layout SQL predicate — the ONE shared database-side expression
+# of "this SegmentedVersion is a fully canonical ACTIVE layout".
+#
+# This is the SQL twin of :func:`canonical_layout_from_rows` (every
+# fail-closed Python rule — ACTIVE version + ACTIVE transcript, contiguous
+# segment ordinals ``0..count-1`` over a nonempty transcript, range inside
+# ``[0, count)``, topic count in ``2..MAX_TOPIC_SECTIONS``, cross-parent
+# rejection, section ordinals exactly ``1..N``, the exhaustive contiguous
+# partition, the FULL Python 3.12 ``str.strip()`` nonblank title rule, the
+# length/control bounds and the Step 6.2a temporary-title SHAPE
+# ``Segment <ordinal> of <12 ASCII digits>`` — is expressed here once).
+# It is consumed by the Library item projection (``workflow.query``:
+# which recordings are replaced / which Sections are valid) AND by the
+# Step 6.3 search-index expected-document mapping and canonical registry
+# validation — NEVER forked or re-implemented elsewhere.
+#
+# Read-only and parameterized: valid for aliases ``v``
+# (``workflow_segmentedversion``) and ``t`` (``workflow_transcript``,
+# ``t.id = v.transcript_id``); the only bound values are
+# ``MAX_TOPIC_SECTIONS`` and ``MAX_TOPIC_TITLE_LENGTH``, so the number of
+# active layouts/sections NEVER grows the SQL parameter list. Callers wrap
+# the returned ``(sql, params)`` in their own ``RawSQL`` expression (the
+# params list is a fresh copy per call — never mutate it).
+#
+# Python 3.12 ``str.strip()`` whitespace codepoints, EXCLUDING the C0
+# controls (0x00-0x1F) and DEL (0x7F), which are rejected separately by
+# the control-char check below. SQLite's one-argument ``TRIM`` removes
+# only ASCII space, so the blank-title check passes the FULL Python
+# whitespace set to the two-argument form to stay exactly in parity with
+# ``str.strip()`` (e.g. an all-ideographic-space title must fail closed).
+# ---------------------------------------------------------------------------
+
+_STRIP_WS_CODEPOINTS = (
+    0x20, 0x85, 0xA0, 0x1680,
+    *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+)
+
+
+def _strip_ws_expr() -> str:
+    """A fixed SQL expression concatenating every ``str.strip()``
+    whitespace codepoint via ``CHAR()`` — the two-arg TRIM trim set."""
+    return " || ".join(f"CHAR({cp})" for cp in _STRIP_WS_CODEPOINTS)
+
+
+def canonical_layout_predicate() -> tuple[str, list]:
+    """The shared validated-layout SQL predicate and its fixed parameters.
+
+    Valid for aliases ``v`` = ``workflow_segmentedversion`` and ``t`` =
+    ``workflow_transcript`` with ``t.id = v.transcript_id``. Mirrors
+    :func:`canonical_layout_from_rows` fail-closed semantics (see the
+    section comment above). Read-only and parameterized: the only bound
+    values are ``MAX_TOPIC_SECTIONS`` and ``MAX_TOPIC_TITLE_LENGTH``.
+    """
+    params = [MAX_TOPIC_SECTIONS, MAX_TOPIC_TITLE_LENGTH]
+    return (
+        f"""
+        v.is_active = 1
+        AND t.is_active = 1
+        AND (
+            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        ) > 0
+        AND (
+            SELECT MIN(ts.ordinal) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        ) = 0
+        AND (
+            SELECT MAX(ts.ordinal) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        ) + 1 = (
+            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        )
+        AND v.start_segment_ordinal >= 0
+        AND v.end_segment_ordinal_exclusive > v.start_segment_ordinal
+        AND v.end_segment_ordinal_exclusive <= (
+            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
+        )
+        AND (
+            SELECT COUNT(*) FROM workflow_section s WHERE s.segmented_version_id = v.id
+        ) BETWEEN 2 AND %s
+        AND NOT EXISTS (
+            SELECT 1 FROM workflow_section bad
+            WHERE bad.segmented_version_id = v.id
+            AND (
+                bad.transcript_id != v.transcript_id
+                OR bad.ordinal < 1
+                OR bad.start_segment_ordinal IS NULL
+                OR bad.end_segment_ordinal_exclusive IS NULL
+                OR bad.end_segment_ordinal_exclusive <= bad.start_segment_ordinal
+                OR TRIM(bad.title, {_strip_ws_expr()}) = ''
+                OR LENGTH(bad.title) > %s
+                OR INSTR(bad.title, CHAR(0)) > 0
+                OR bad.title GLOB '*[' || CHAR(1) || '-' || CHAR(31) || CHAR(127) || ']*'
+                -- A True temporary flag requires the EXACT canonical
+                -- shape 'Segment <ordinal> of <12 ASCII digits>' (titles
+                -- are immutable creation-time metadata; the digits are
+                -- never compared to the current timestamp on reads). An
+                -- arbitrary custom title on a temporary row is corrupt
+                -- stored state and fails closed.
+                OR (
+                    bad.title_is_temporary = 1
+                    AND NOT (
+                        bad.title GLOB 'Segment ' || bad.ordinal || ' of '
+                        || '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+                    )
+                )
+                OR (
+                    SELECT COUNT(*) FROM workflow_section lo
+                    WHERE lo.segmented_version_id = v.id AND lo.ordinal < bad.ordinal
+                ) != bad.ordinal - 1
+                OR bad.start_segment_ordinal != COALESCE(
+                    (
+                        SELECT MAX(hi.end_segment_ordinal_exclusive) FROM workflow_section hi
+                        WHERE hi.segmented_version_id = v.id AND hi.ordinal < bad.ordinal
+                    ),
+                    v.start_segment_ordinal
+                )
+            )
+        )
+        AND (
+            SELECT MAX(s.end_segment_ordinal_exclusive) FROM workflow_section s
+            WHERE s.segmented_version_id = v.id
+        ) = v.end_segment_ordinal_exclusive
+        """,
+        params,
+    )
+
+
+def canonical_hidden_recording_ids() -> tuple[str, list]:
+    """``SELECT`` of the parent Recording pks replaced by their valid
+    topic Sections (the Library recording branch excludes these)."""
+    sql, params = canonical_layout_predicate()
+    return (
+        "SELECT t.recording_id FROM workflow_segmentedversion v "
+        "JOIN workflow_transcript t ON t.id = v.transcript_id "
+        "WHERE " + sql,
+        params,
+    )
+
+
+def canonical_active_section_ids() -> tuple[str, list]:
+    """``SELECT`` of the Section pks that are canonical topic items of an
+    ACTIVE layout of an ACTIVE transcript (the Library Section branch and
+    the Step 6.3 search index filter on these)."""
+    sql, params = canonical_layout_predicate()
+    return (
+        "SELECT s.id FROM workflow_section s "
+        "JOIN workflow_segmentedversion v ON v.id = s.segmented_version_id "
+        "JOIN workflow_transcript t ON t.id = v.transcript_id "
+        "WHERE " + sql,
+        params,
+    )
 
 
 def require_active_topic_section(section, *, using: str = "default") -> dict:
@@ -711,6 +868,18 @@ def _save_locked(
                 for ordinal, lo, hi, title, flag in topic_sections
             ]
         )
+        # Step 6.3: a REAL layout change alters which topic-section
+        # summaries are canonical index content (the superseded revision's
+        # summary docs must leave the index; the post-commit reconcile
+        # recomputes the full expected set). Exactly ONE post-commit
+        # recording sync is scheduled INSIDE this transaction: the no-op
+        # paths returned earlier (zero callbacks) and a rollback discards
+        # the registered callback. ``search_sync`` is imported lazily HERE
+        # (not at module load) to keep the import graph acyclic:
+        # search_sync -> search_index -> segmentation.
+        from workflow.services import search_sync
+
+        search_sync.schedule_recording_sync([recording.pk], using=using)
         return SegmentationResult(
             created=True,
             version_id=version.pk,

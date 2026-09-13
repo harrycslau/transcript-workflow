@@ -249,8 +249,16 @@ class TestHealthySearch:
             "results",
             "result_count",
             "truncated",
+            # Step 6.3: item-neutral count + SAME-VALUE recording alias.
+            "more_items_matched",
             "more_recordings_matched",
         }
+        assert (
+            payload["more_items_matched"] == payload["more_recordings_matched"]
+        )
+        # Recording mode carries NO item-mode marker (legacy payload
+        # shape is byte-identical).
+        assert "item_mode" not in payload
         gen = active_generation()
         assert payload["embedding_generation"] == {
             "id": gen.pk,

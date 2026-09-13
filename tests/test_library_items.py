@@ -21,6 +21,8 @@ Proves the approved product decisions on the CURRENT schema:
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
@@ -41,11 +43,14 @@ from workflow.models import (
     TranscriptSegment,
 )
 from workflow.query import (
+    LIBRARY_ITEM_KEY_LIMIT,
     ListFilters,
     apply_item_sort,
     hydrate_library_items,
     library_item_count,
+    library_item_key_queryset,
     library_item_queryset,
+    library_items_by_keys,
 )
 from workflow.services.segmentation import save_segmented_version
 
@@ -653,3 +658,431 @@ class TestLibraryProjectionLazyState:
         cards = _items()
         assert not _recording_item(cards, rec)
         assert {c.section_id for c in cards} == {s.pk for s in sections}
+
+
+# ---------------------------------------------------------------------------
+# library_item_key_queryset: the unsliced one-column item_key UNION must be
+# the EXACT identity set behind library_item_queryset for every branch case,
+# the canonical parent-replacement semantics and the per-branch filters.
+# ---------------------------------------------------------------------------
+
+
+def _helper_keys_and_count(filters=None, timezone_name="Europe/Helsinki"):
+    """(sorted item_key list, count) from the key UNION helper."""
+    filters = filters or ListFilters()
+    qs = library_item_key_queryset(filters, timezone_name)
+    keys = [row["item_key"] for row in qs]
+    return keys, qs.count()
+
+
+def _projection_keys_and_count(filters=None, timezone_name="Europe/Helsinki"):
+    """(sorted item_key list, count) from the FULL projection UNION."""
+    filters = filters or ListFilters()
+    qs = library_item_queryset(filters, timezone_name)
+    keys = [row["item_key"] for row in qs]
+    return keys, qs.count()
+
+
+def _assert_helper_matches_projection(filters=None, timezone_name="Europe/Helsinki"):
+    """The key UNION's key set/count is exactly the projection's; the count
+    helper agrees. Returns the shared key set for scenario assertions."""
+    helper_keys, helper_count = _helper_keys_and_count(filters, timezone_name)
+    projection_keys, projection_count = _projection_keys_and_count(filters, timezone_name)
+    # Identical identity set, no duplicate keys (unsliced UNION DISTINCT).
+    assert set(helper_keys) == set(projection_keys)
+    assert len(helper_keys) == len(set(helper_keys))
+    # The projection is one row per item too (its item_key is unique).
+    assert projection_count == len(projection_keys)
+    # Exact count parity across helper, projection and library_item_count.
+    assert helper_count == projection_count == len(helper_keys)
+    assert library_item_count(filters or ListFilters(), timezone_name) == helper_count
+    return set(helper_keys)
+
+
+class TestItemKeyUnionMatchesProjection:
+    """The one-column ``item_key`` UNION equals the full projection's item
+    identity across every branch, the canonical replacement rule and the
+    per-branch filters — no Python id set, exact DB-side parity."""
+
+    def test_recording_item_only(self):
+        rec = Recording.objects.create(
+            sha256="keyunion-rec", processing_status=ProcessingStatus.DISCOVERED
+        )
+        keys = _assert_helper_matches_projection()
+        assert keys == {f"r:{rec.pk}"}
+
+    def test_valid_split_yields_section_keys_and_hides_recording(self):
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d", "e"], sha="keyunion-split"
+        )
+        sections = _split(rec, transcript, [2], ["Topic A", "Topic B"])
+        keys = _assert_helper_matches_projection()
+        assert keys == {f"s:{sections[0].pk}", f"s:{sections[1].pk}"}
+        assert f"r:{rec.pk}" not in keys
+
+    def test_crop_only_yields_one_recording_key(self):
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="keyunion-crop"
+        )
+        _split(rec, transcript, [], [], start=1, end=3)
+        keys = _assert_helper_matches_projection()
+        assert keys == {f"r:{rec.pk}"}
+
+    def test_malformed_layout_fails_closed_recording_key(self):
+        # A corrupt active layout (lone topic Section) hides nothing and
+        # yields no Section key: the recording stays as its own item.
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="keyunion-malformed"
+        )
+        version = SegmentedVersion.objects.create(
+            transcript=transcript, revision=1, start_segment_ordinal=0,
+            end_segment_ordinal_exclusive=4, is_active=True,
+            activated_at=transcript.activated_at or transcript.created_at,
+        )
+        lone = Section.objects.create(
+            transcript=transcript, segmented_version=version, ordinal=1,
+            title="Only topic", start_segment_ordinal=0,
+            end_segment_ordinal_exclusive=4,
+        )
+        keys = _assert_helper_matches_projection()
+        assert keys == {f"r:{rec.pk}"}
+        assert f"s:{lone.pk}" not in keys
+
+    def test_recording_tag_filter_matches_recording_item_only(self):
+        rec, _t, _s = make_transcribed_recording(["a"], sha="keyunion-rectag")
+        tag = make_tag("Work")
+        make_tag_assignment(rec, tag, origin="manual")
+        filters = ListFilters(tags=[tag.name_key])
+        keys = _assert_helper_matches_projection(filters)
+        assert keys == {f"r:{rec.pk}"}
+
+    def test_section_tag_filter_matches_section_item_only(self):
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="keyunion-sectag"
+        )
+        sections = _split(rec, transcript, [2], ["Topic A", "Topic B"])
+        tag = make_tag("Family")
+        TagAssignment.objects.create(
+            recording=rec, section=sections[0], tag=tag, origin="manual", is_active=True
+        )
+        filters = ListFilters(tags=[tag.name_key], tag_match="any")
+        keys = _assert_helper_matches_projection(filters)
+        # The section-scoped assignment matches ONLY that Section item and
+        # never the (already-hidden) recording or the untagged sibling.
+        assert keys == {f"s:{sections[0].pk}"}
+
+    def test_recording_vs_section_tag_filter_independent_scopes(self):
+        # One unsplit recording with a RECORDING-scope tag and one split
+        # recording whose Section carries a SECTION-scope tag: the recording
+        # filter and the section filter select independent items, and the
+        # key UNION matches the projection in each case.
+        rec_plain, _t, _s = make_transcribed_recording(["x"], sha="keyunion-both-plain")
+        work = make_tag("Work")
+        make_tag_assignment(rec_plain, work, origin="manual")
+
+        rec_split, transcript, _f = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="keyunion-both-split"
+        )
+        sections = _split(rec_split, transcript, [2], ["Topic A", "Topic B"])
+        family = make_tag("Family")
+        TagAssignment.objects.create(
+            recording=rec_split, section=sections[0], tag=family,
+            origin="manual", is_active=True,
+        )
+
+        work_keys = _assert_helper_matches_projection(ListFilters(tags=[work.name_key]))
+        assert work_keys == {f"r:{rec_plain.pk}"}
+
+        family_keys = _assert_helper_matches_projection(
+            ListFilters(tags=[family.name_key], tag_match="any")
+        )
+        assert family_keys == {f"s:{sections[0].pk}"}
+
+    def test_summary_filter_current_matches_section_default_variant(self):
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="keyunion-summary-current"
+        )
+        sections = _split(rec, transcript, [2], ["Topic A", "Topic B"])
+        SummaryVariantState.objects.create(
+            transcript=transcript, section=sections[0],
+            output_language="en", status="current",
+        )
+        filters = ListFilters(summary=SummaryState.CURRENT)
+        keys = _assert_helper_matches_projection(filters)
+        # Only the Section whose DEFAULT variant is current (the split
+        # parent recording is hidden and no recording carries CURRENT).
+        assert keys == {f"s:{sections[0].pk}"}
+
+    def test_summary_filter_missing_matches_recording_and_untagged_section(self):
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="keyunion-summary-missing"
+        )
+        sections = _split(rec, transcript, [2], ["Topic A", "Topic B"])
+        SummaryVariantState.objects.create(
+            transcript=transcript, section=sections[0],
+            output_language="en", status="current",
+        )
+        plain, _t, _s = make_transcribed_recording(
+            ["z"], sha="keyunion-summary-plain"
+        )
+        filters = ListFilters(summary=SummaryState.MISSING)
+        keys = _assert_helper_matches_projection(filters)
+        # The section WITHOUT a current default variant + the unsplit
+        # recording (default MISSING); the CURRENT section is excluded.
+        assert keys == {f"s:{sections[1].pk}", f"r:{plain.pk}"}
+
+    def test_honors_using_default(self):
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="keyunion-using"
+        )
+        sections = _split(rec, transcript, [2], ["Topic A", "Topic B"])
+        # An explicit using="default" is plumbed through to both branches
+        # and matches the projection exactly.
+        helper_keys = [
+            row["item_key"]
+            for row in library_item_key_queryset(
+                ListFilters(), "Europe/Helsinki", using="default"
+            )
+        ]
+        projection_keys = [
+            row["item_key"]
+            for row in library_item_queryset(
+                ListFilters(), "Europe/Helsinki", using="default"
+            )
+        ]
+        assert set(helper_keys) == set(projection_keys)
+        assert set(helper_keys) == {f"s:{sections[0].pk}", f"s:{sections[1].pk}"}
+        assert f"r:{rec.pk}" not in set(helper_keys)
+
+    def test_mixed_library_full_parity(self):
+        # A realistic mix: unprocessed + unsplit + split + crop-only. The
+        # key UNION equals the full projection key-for-key and count-for-
+        # count (never a Python expansion).
+        for index in range(6):
+            make_transcribed_recording([f"u{index}"], sha=f"keyunion-mix-plain-{index}")
+        for index in range(3):
+            rec, transcript, _f = make_transcribed_recording(
+                ["a", "b", "c", "d"], sha=f"keyunion-mix-split-{index}"
+            )
+            _split(rec, transcript, [2], [f"S{index} A", f"S{index} B"])
+        for index in range(2):
+            rec, transcript, _f = make_transcribed_recording(
+                ["a", "b", "c", "d"], sha=f"keyunion-mix-crop-{index}"
+            )
+            _split(rec, transcript, [], [], start=1, end=3)
+        keys = _assert_helper_matches_projection()
+        # 6 plain + 2 crop-only = 8 recording items; 3 splits * 2 = 6
+        # section items => 14 items total.
+        assert len(keys) == 14
+        assert sum(1 for k in keys if k.startswith("r:")) == 8
+        assert sum(1 for k in keys if k.startswith("s:")) == 6
+
+
+# ---------------------------------------------------------------------------
+# library_items_by_keys: the bounded search-result item hydration entry
+# point (Step 6.3). Engine item keys are revalidated through the EXACT
+# normal-Library branch/filter/canonical semantics, fetched with bounded
+# IN predicates and returned as LibraryItemCards in REQUESTED key order.
+# Malformed or vanished keys are skipped; the caller contract (at most
+# the search result cap) is enforced before any query.
+# ---------------------------------------------------------------------------
+
+
+def _by_keys(keys, filters=None, timezone_name="Europe/Helsinki"):
+    return library_items_by_keys(keys, filters or ListFilters(), timezone_name)
+
+
+class TestLibraryItemsByKeys:
+    def _split_pair(self, sha):
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d", "e"], sha=sha
+        )
+        sections = _split(rec, transcript, [2], ["Topic A", "Topic B"])
+        return rec, transcript, sections
+
+    def test_recording_key_returns_hydrated_card(self):
+        rec, _t, _s = make_transcribed_recording(["a"], sha="bykeys-rec")
+        cards = _by_keys([f"r:{rec.pk}"])
+        assert len(cards) == 1
+        card = cards[0]
+        assert not card.is_section
+        assert card.recording_id == rec.pk
+        assert card.recording.pk == rec.pk
+        assert card.title  # the full projection row drives presentation
+
+    def test_section_keys_return_section_cards(self):
+        rec, _t, sections = self._split_pair("bykeys-sections")
+        cards = _by_keys([f"s:{sections[0].pk}", f"s:{sections[1].pk}"])
+        assert [c.section_id for c in cards] == [sections[0].pk, sections[1].pk]
+        assert [c.title for c in cards] == ["Topic A", "Topic B"]
+        assert all(c.is_section and c.recording_id == rec.pk for c in cards)
+
+    def test_hydrated_card_carries_section_default_summary(self):
+        rec, transcript, sections = self._split_pair("bykeys-summary")
+        make_summary_version(rec, transcript, sections[0], output_language="en")
+        SummaryVariantState.objects.create(
+            transcript=transcript,
+            section=sections[0],
+            output_language="en",
+            status="current",
+        )
+        cards = _by_keys([f"s:{sections[0].pk}"])
+        assert len(cards) == 1
+        assert cards[0].display_summary is not None
+        assert cards[0].available_languages == ["en"]
+
+    def test_requested_order_is_exact(self):
+        a, _t, _s = make_transcribed_recording(["a"], sha="bykeys-order-a")
+        b, _t, _s = make_transcribed_recording(["b"], sha="bykeys-order-b")
+        rec, _t, sections = self._split_pair("bykeys-order-split")
+        order = [
+            f"s:{sections[1].pk}",
+            f"r:{b.pk}",
+            f"r:{a.pk}",
+            f"s:{sections[0].pk}",
+        ]
+        cards = _by_keys(order)
+        # DB UNION order is irrelevant: the cards follow the REQUESTED
+        # key order exactly (identity = (section_id, recording_id)).
+        assert [(c.section_id, c.recording_id) for c in cards] == [
+            (sections[1].pk, rec.pk),
+            (None, b.pk),
+            (None, a.pk),
+            (sections[0].pk, rec.pk),
+        ]
+
+    def test_stale_recording_key_replaced_by_split_layout_is_dropped(self):
+        # Canonical revalidation: a Recording item key that the engine
+        # produced BEFORE the split is no longer a normal Library item
+        # once a valid active layout replaced it — silently skipped, and
+        # the section keys of THAT layout resolve.
+        rec, _t, sections = self._split_pair("bykeys-replaced")
+        assert _by_keys([f"r:{rec.pk}"]) == []
+        cards = _by_keys([f"s:{sections[0].pk}"])
+        assert [c.section_id for c in cards] == [sections[0].pk]
+
+    def test_historical_section_key_is_dropped_recording_key_returns(self):
+        rec, transcript, sections = self._split_pair("bykeys-historical")
+        # A crop-only save supersedes: the old Section items are gone
+        # from the normal Library and the recording item is back.
+        _split(rec, transcript, [], [])
+        assert _by_keys([f"s:{sections[0].pk}", f"s:{sections[1].pk}"]) == []
+        cards = _by_keys([f"r:{rec.pk}"])
+        assert len(cards) == 1
+        assert not cards[0].is_section
+
+    def test_filters_revalidate_the_key_set(self):
+        # The same per-branch ListFilters as the normal Library decide
+        # survival: a key that exists in the UNFILTERED Library but fails
+        # the current filter is skipped.
+        rec, _t, sections = self._split_pair("bykeys-filter")
+        tag = make_tag("Family")
+        TagAssignment.objects.create(
+            recording=rec,
+            section=sections[0],
+            tag=tag,
+            origin="manual",
+            is_active=True,
+        )
+        plain, _t2, _s2 = make_transcribed_recording(["z"], sha="bykeys-filter-plain")
+        filters = ListFilters(tags=[tag.name_key], tag_match="any")
+        cards = _by_keys(
+            [f"s:{sections[0].pk}", f"s:{sections[1].pk}", f"r:{plain.pk}"],
+            filters,
+        )
+        assert [c.section_id for c in cards] == [sections[0].pk]
+
+    def test_malformed_and_duplicate_keys_are_skipped_safely(self):
+        rec, _t, sections = self._split_pair("bykeys-malformed")
+        good = f"s:{sections[0].pk}"
+        malformed = [
+            None,
+            123,
+            True,
+            "",
+            "r:",
+            "s:",
+            "s:abc",
+            "s:0",
+            "s:-1",
+            "s:1.5",
+            "x:1",
+            "nosep",
+            "r:not-a-uuid",
+            "r:1234",
+            f"R:{rec.pk}",  # uppercase prefix is not the UNION's shape
+            f"r:{sections[0].pk}",  # uuid-shaped section id is not a recording
+        ]
+        cards = _by_keys(malformed + [good, good])
+        # Every malformed entry skipped, the duplicate collapsed once.
+        assert [c.section_id for c in cards] == [sections[0].pk]
+
+    def test_canonical_spellings_resolve_to_the_same_identity(self):
+        rec, _t, _s = make_transcribed_recording(["a"], sha="bykeys-norm-rec")
+        cards = _by_keys([f"r:{rec.pk.upper()}"])  # UUID normalization
+        assert [c.recording_id for c in cards] == [rec.pk]
+
+        rec2, transcript, _f = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="bykeys-norm-sec"
+        )
+        sections = _split(rec2, transcript, [2], ["T A", "T B"])
+        cards = _by_keys([f"s:0{sections[1].pk}", f"s:{sections[1].pk}"])
+        # The padded spelling canonicalizes to the same (deduplicated) key.
+        assert [c.section_id for c in cards] == [sections[1].pk]
+
+    def test_vanished_item_is_skipped_between_reads(self):
+        a, _t, _s = make_transcribed_recording(["a"], sha="bykeys-vanish-a")
+        b = Recording.objects.create(
+            sha256="bykeys-vanish-b", processing_status=ProcessingStatus.DISCOVERED
+        )
+        keys = [f"r:{a.pk}", f"r:{b.pk}"]
+        b.delete()  # plain unprocessed Recording: cascades cleanly
+        cards = _by_keys(keys)
+        assert [c.recording_id for c in cards] == [a.pk]
+
+    def test_empty_and_all_malformed_input_run_zero_queries(self):
+        with CaptureQueriesContext(connection) as ctx:
+            assert _by_keys([]) == []
+            assert _by_keys([None, "bogus", "s:0", "r:zz"]) == []
+        assert len(ctx.captured_queries) == 0
+
+    def test_over_cap_input_rejected_before_any_query(self):
+        keys = [f"r:{uuid.uuid4()}" for _ in range(LIBRARY_ITEM_KEY_LIMIT + 1)]
+        with CaptureQueriesContext(connection) as ctx:
+            with pytest.raises(ValueError):
+                _by_keys(keys)
+        assert len(ctx.captured_queries) == 0
+
+    def test_cap_boundary_input_is_accepted(self):
+        # Exactly the cap is within contract (nothing exists ⇒ no cards,
+        # but no exception either).
+        keys = [f"r:{uuid.uuid4()}" for _ in range(LIBRARY_ITEM_KEY_LIMIT)]
+        assert _by_keys(keys) == []
+
+    def test_bare_string_input_rejected(self):
+        with pytest.raises(ValueError):
+            _by_keys(f"r:{uuid.uuid4()}")
+
+    def test_query_count_constant_as_keys_grow(self):
+        # Bounded batched hydration, never per-key: 5 vs 40 split
+        # recordings (10 vs 80 requested section keys) run the SAME
+        # number of queries.
+        def seed(prefix, count):
+            keys = []
+            for index in range(count):
+                rec, transcript, _fixed = make_transcribed_recording(
+                    ["a", "b", "c", "d"], sha=f"{prefix}-{index:04d}"
+                )
+                sections = _split(rec, transcript, [2], [f"T{index} A", "T B"])
+                keys.extend([f"s:{sections[0].pk}", f"s:{sections[1].pk}"])
+            return keys
+
+        small_keys = seed("bykeys-q-small", 5)
+        large_keys = seed("bykeys-q-large", 40)
+        with CaptureQueriesContext(connection) as small_ctx:
+            small_cards = _by_keys(small_keys)
+        with CaptureQueriesContext(connection) as large_ctx:
+            large_cards = _by_keys(large_keys)
+        assert len(small_cards) == 10
+        assert len(large_cards) == 80
+        assert len(large_ctx.captured_queries) == len(small_ctx.captured_queries)

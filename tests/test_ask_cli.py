@@ -1,4 +1,4 @@
-"""CLI tests for ``brain ask`` (Step 5D).
+"""CLI tests for ``brain ask`` (Step 5D + Step 6.3 section summaries).
 
 All network is mocked (fake embedder + fake chat); no real HTTP. Proves:
 exit 0 for an answer OR the explicit insufficiency result, exit 2 for an
@@ -17,7 +17,11 @@ from django.test.utils import CaptureQueriesContext
 
 from brainlib import cli
 from brainlib.config import EmbeddingConfig, LLMConfig
-from factories import make_config, make_transcribed_recording
+from factories import (
+    make_config,
+    make_summary_version,
+    make_transcribed_recording,
+)
 from workflow.services import embedding_index as ei
 from workflow.services import search_index as si
 from workflow.services.embedding_client import EmbeddingBatch
@@ -257,3 +261,64 @@ class TestAskCli:
             )
         ]
         assert writes == []
+
+
+class TestAskCliSectionSummaries:
+    """Step 6.3: section-summary citations carry the server-owned
+    ``section_id`` and link to the EXACT existing summary-version route;
+    the whole-recording variant keeps ``section_id`` null."""
+
+    def test_section_citations_json_and_human(self, tmp_path, monkeypatch, capsys):
+        from workflow.models import Section, SegmentedVersion
+        from workflow.services.segmentation import save_segmented_version
+
+        rec, transcript, fixed = make_transcribed_recording(
+            ["solo segment zero", "solo segment one", "solo segment two"],
+            sha="askcli-sec-0",
+        )
+        save_segmented_version(
+            rec.pk, transcript.pk, 0, 3, [2], ["Alpha Topic", "Beta Topic"]
+        )
+        layout = SegmentedVersion.objects.get(transcript=transcript, is_active=True)
+        sections = list(
+            Section.objects.filter(segmented_version=layout).order_by("ordinal")
+        )
+        section_summaries = [
+            make_summary_version(
+                rec, transcript, sections[0], title="alpha s1", overview="alpha o1"
+            ),
+            make_summary_version(
+                rec, transcript, sections[1], title="alpha s2", overview="alpha o2"
+            ),
+        ]
+        whole = make_summary_version(
+            rec, transcript, fixed, title="alpha whole", overview="alpha ow"
+        )
+        si.rebuild_index()
+        config = ask_config(tmp_path)
+        ei.rebuild_embedding_index(config, embedder=keyword_embedder(["alpha"]))
+        monkeypatch.setattr("brainlib.config.load_config", lambda: config)
+        patch_network(
+            monkeypatch,
+            chat=chat_json("Combined [C1][C2][C3].", ["C1", "C2", "C3"]),
+        )
+        capsys.readouterr()
+        assert cli.main(["ask", "alpha", "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["state"] == "answered"
+        by_url = {citation["url"]: citation for citation in payload["citations"]}
+        for section, summary in zip(sections, section_summaries):
+            citation = by_url[f"/recordings/{rec.pk}/summaries/{summary.pk}/"]
+            assert citation["source"] == "summary"
+            assert citation["section_id"] == section.pk
+        assert (
+            by_url[f"/recordings/{rec.pk}/summaries/{whole.pk}/"]["section_id"]
+            is None
+        )
+        # Evidence prose is still never exposed by the payload.
+        assert "alpha o1" not in json.dumps(payload)
+
+        capsys.readouterr()
+        assert cli.main(["ask", "alpha"]) == 0
+        out = capsys.readouterr().out
+        assert "/summaries/" in out

@@ -31,9 +31,13 @@ SegmentedVersion (shared canonical validation); historical sections are
 read-only. Section-scoped operations share the exact input validation,
 retired opt-in, origin transitions, suppression, no-op/zero-DML
 semantics, custom-tag collision behavior, and the local SQLite
-BUSY/LOCKED retry, but NEVER schedule a recording search sync — section
-tags are not indexed until Step 6.3 — and never acquire the pipeline
-lock.
+BUSY/LOCKED retry. Since Step 6.3 section tags ARE indexed (inside their
+section-summary documents' aux text), every section mutation that
+actually changes ACTIVE assignment membership schedules exactly ONE
+recording search sync (parent Recording) inside its transaction — an
+unchanged Done / origin-only confirm / no-op schedules nothing;
+``confirm_section_suggestion`` never syncs (origin-only, mirroring
+``confirm_suggestion``). They never acquire the pipeline lock.
 
 ``sync_tags`` mutates the database and therefore runs ONLY inside
 locked mutating commands (``brain summarize``, ``brain tags --sync``);
@@ -579,8 +583,10 @@ def _apply_tag_selection_impl(
     are the rows read and written (``section=section``). A concurrent
     layout change therefore either lands before the lock (seen by the
     post-lock validation) or conflicts with the write and is re-validated
-    on the fresh retry. Section-scoped changes never schedule a
-    recording search sync (section tags are not indexed until Step 6.3).
+    on the fresh retry. Any CHANGED membership (either scope) schedules
+    exactly ONE recording search sync inside the transaction (Section
+    tags are indexed via the section-summary documents of the parent
+    Recording since Step 6.3); an unchanged Done schedules nothing.
 
     ``selected_available_ids`` / ``selected_retired_ids`` are the desired
     active set: available IDs must reference ``is_configured=True``
@@ -766,11 +772,12 @@ def _apply_tag_selection_impl(
         changed = True
         counts["created"] += 1
 
-    if changed and section is None:
-        # Step 5A.3: effective recording-scoped tag membership changed
-        # (add/reactivate/remove/new custom) — exactly ONE recording sync
-        # inside the txn. Section-scoped changes are not indexed until
-        # Step 6.3 and schedule nothing.
+    if changed:
+        # Step 5A.3 + 6.3: effective tag membership changed — exactly ONE
+        # recording sync inside the txn. Recording-scope assignments feed
+        # the metadata doc aux; Section-scope assignments feed the
+        # section-summary documents' aux (both are indexed content of the
+        # SAME parent Recording). An unchanged Done schedules nothing.
         schedule_recording_sync([recording.pk])
 
     return {
@@ -906,11 +913,15 @@ def create_custom_tag_and_assign(recording, raw_name: str) -> dict:
 # opt-in, origin transitions, suppression, no-op/zero-DML semantics,
 # custom-tag collision/promotion behavior, and the local SQLite
 # BUSY/LOCKED retry of the recording operations; they take no pipeline
-# lock and NEVER schedule a recording search sync (section tags are not
-# indexed until Step 6.3). A section target must be a TOPIC Section of
-# the recording's ACTIVE transcript and ACTIVE SegmentedVersion —
-# historical sections are read-only and rejected with the stable
-# ``section_not_available`` category before any write.
+# lock. Since Step 6.3 section tags ARE indexed (in the section-summary
+# documents of the parent Recording), exactly ONE parent-recording search
+# sync is scheduled inside the transaction ONLY when the section's
+# indexed content — its set of ACTIVE tag names — actually changes
+# (created / reactivated / removed membership); origin-only
+# confirms/promotions, idempotent no-ops and failures never schedule. A section target must
+# be a TOPIC Section of the recording's ACTIVE transcript and ACTIVE
+# SegmentedVersion — historical sections are read-only and rejected with
+# the stable ``section_not_available`` category before any write.
 
 
 @_retry_on_sqlite_contention
@@ -921,9 +932,14 @@ def add_manual_tag_section(section, tag: Tag, *, include_retired: bool = False) 
     Identical ownership semantics to :func:`add_manual_tag` (create /
     promote / reactivate / no-op), scoped to the Section's assignment
     rows only. The section must be a live topic target of the ACTIVE
-    layout (historical sections are read-only). No recording search sync
-    is scheduled. Retired tags require the explicit ``include_retired``
-    opt-in.
+    layout (historical sections are read-only). Retired tags require the
+    explicit ``include_retired`` opt-in.
+
+    Sync contract (Step 6.3): exactly ONE parent-recording search sync
+    is scheduled when the section's ACTIVE tag-name set changes (a
+    created or reactivated assignment); an origin-only promotion, an
+    idempotent no-op, and every failure schedule NOTHING (indexed
+    membership is the active tag names only — origin is not indexed).
 
     Ordering inside the ONE top-level transaction: the parent recording
     is derived first, the recording serialization boundary
@@ -944,6 +960,15 @@ def add_manual_tag_section(section, tag: Tag, *, include_retired: bool = False) 
     assignment, created, promoted, reactivated = _manual_assignment_for(
         recording, tag, section=section
     )
+    if created or reactivated:
+        # Step 5A.3 + 6.3: the ACTIVE section tag NAMES are the indexed
+        # aux text of the section-summary documents, so a created or
+        # reactivated membership changes the parent Recording's expected
+        # index content — exactly ONE sync inside the transaction. An
+        # origin-only PROMOTION and an idempotent no-op leave the active
+        # name set unchanged (origin is not indexed content), so they
+        # schedule nothing (zero callback, zero reconcile DML).
+        schedule_recording_sync([recording.pk])
     return {
         "assignment": assignment,
         "created": created,
@@ -963,7 +988,9 @@ def confirm_section_suggestion(section, tag: Tag) -> dict:
     preserved and must belong to the SAME section (never cross-scope).
     The section must be a live topic target of the ACTIVE layout; the
     recording serialization boundary precedes the authoritative
-    validation inside the one top-level transaction.
+    validation inside the one top-level transaction. Origin-only: the
+    active membership is unchanged, so NO recording search sync is
+    scheduled (exact mirror of :func:`confirm_suggestion`).
     """
     recording = _section_parent_recording(section)
     _lock_recording(recording.pk)
@@ -1000,7 +1027,9 @@ def remove_section_tag(section, tag: Tag) -> dict:
     assignment rows: ``deactivated_by="user"`` — future model
     suggestions stay recorded on their summary versions but never
     reactivate the row; all SummaryTagSuggestion history is preserved.
-    No recording search sync. The section must be a live topic target of
+    Exactly one parent-recording search sync is scheduled when a row was
+    actually deactivated (none on an idempotent no-op). The section must
+    be a live topic target of
     the ACTIVE layout; the recording serialization boundary precedes the
     authoritative validation inside the one top-level transaction.
     """
@@ -1009,6 +1038,10 @@ def remove_section_tag(section, tag: Tag) -> dict:
     _require_topic_section(section)
     assignment = TagAssignment.objects.filter(section=section, tag=tag).first()
     removed = _remove_assignment_for(assignment)
+    if removed:
+        # Step 5A.3 + 6.3: deactivation drops the tag name from the
+        # section-summary documents' indexed aux text.
+        schedule_recording_sync([recording.pk])
     return {"removed": removed, "assignment": assignment}
 
 
@@ -1029,8 +1062,9 @@ def apply_section_tag_selection(
     ``_retry_on_sqlite_contention`` outside exactly ONE
     ``transaction.atomic`` (every retry runs in a fresh top-level
     transaction). The impl derives the recording, locks it BEFORE the
-    authoritative active-section validation, and schedules no recording
-    search sync for section-scoped changes.
+    authoritative active-section validation, and schedules exactly ONE
+    parent-recording search sync only when the effective indexed tag
+    membership actually changed (Step 6.3).
     """
     return _apply_tag_selection_impl(
         None,
@@ -1049,11 +1083,13 @@ def create_custom_tag_and_assign_section(section, raw_name: str) -> dict:
     The definition is global and config-compatible (identical custom
     validation/creation/collision rules to
     :func:`create_custom_tag_and_assign`); only the ASSIGNMENT is
-    section-scoped. No recording search sync is scheduled — section tags
-    are not indexed until Step 6.3. The section must be a live topic
-    target of the ACTIVE layout; the recording serialization boundary
-    precedes the authoritative validation inside the one top-level
-    transaction.
+    section-scoped. Exactly one parent-recording search sync is
+    scheduled inside the successful transaction (the freshly created
+    definition is always newly assigned — the tag name enters the
+    section-summary documents' indexed aux). The section must be a live
+    topic target of the ACTIVE layout; the recording serialization
+    boundary precedes the authoritative validation inside the one
+    top-level transaction.
     """
     recording = _section_parent_recording(section)
     _lock_recording(recording.pk)
@@ -1062,6 +1098,7 @@ def create_custom_tag_and_assign_section(section, raw_name: str) -> dict:
     assignment, created, promoted, reactivated = _manual_assignment_for(
         recording, tag, section=section
     )
+    schedule_recording_sync([recording.pk])
     return {
         "tag": tag,
         "created_tag": created_tag,

@@ -1,22 +1,25 @@
-# Step 6 — Planning document (overall plan accepted; Step 6.0 complete; Step 6.1, Step 6.2 and Step 6.2a delivered; 6.3 next)
+# Step 6 — Planning document (overall plan accepted; Step 6.0 complete; Step 6.1, Step 6.2, Step 6.2a and Step 6.3 delivered; 6.4 next)
 
 > **Status: the overall Step 6 plan has been accepted by the user as the
 > working baseline, Step 6.0 is COMPLETE, Step 6.1 (segmented
 > versions: logical trim + topic layout/history, structure/history only)
 > is DELIVERED, Step 6.2 (section-level summaries/tags + derived
-> Library items) is DELIVERED, and Step 6.2a (safe Library return,
+> Library items) is DELIVERED, Step 6.2a (safe Library return,
 > temporary split titles, derived display title, section duration) is
+> DELIVERED, and Step 6.3 (section content in the
+> search/embedding/Ask stack, Library-item search everywhere) is
 > DELIVERED.** The approved Step 6.0
 > decisions D1–D12 and the phase acceptance contracts live in
 > `docs/step-6-decisions.md`; the Step 6 screens in `design/ui-prototype/`
 > prototype those approved decisions, and this document's §8 is the
 > concrete implementation plan that the delivered 6.1 implements
 > (see the delivery note at the top of §8).
-> Step 6.3 (search/embedding/Ask integration for section content) is the
-> next planned phase and is
-> NOT yet implemented; §9's Phase 6.3 acceptance contract remains the
-> baseline for it (Phase 6.2 is delivered — see the delivery note at the
-> top of §9).
+> The delivered Step 6.3 final contract, the required post-upgrade
+> rebuild sequence and the verification state (NO new migration; full
+> suite 3100 passed) are recorded in the Phase 6.3 delivery note in §9.
+> **Step 6.4 (retention + Keep Audio + Rescan / missing-file
+> reconciliation) is the next planned phase**; §9's Phase 6.4 acceptance
+> contract is its baseline.
 >
 > Two items remain explicit separate approval gates and are NOT approved:
 > (1) any actual source file deletion/move/trash/quarantine (and its
@@ -93,12 +96,24 @@ deletion under retention requires a separate explicit approval gate.
   delivered: nullable `TagAssignment.section` (migration 0012) makes a
   section scope with mutually exclusive recording/section uniques a reality
   (see §9).
-- Search indexes the active transcript's segments (whole transcript) and
-  the whole-recording summary. Embedding sync and Ask reuse those
-  documents. Any change to the searchable scope flows through
-  `schedule_recording_sync` post-commit and the embedding post-commit
-  callback; web GETs stay strictly read-only. **6.1 changes no indexed
-  content and schedules no sync.**
+- Since the delivered 6.3 the search index (`search_index.INDEX_VERSION`
+  `"2"`) indexes the active transcript's segments, the whole-recording
+  ordinal-0 summary variants, the canonical active-layout topic-section
+  summary variants (documents of the PARENT Recording) and the metadata
+  documents, and every search mode (keyword/semantic/hybrid, web AND
+  CLI) operates over the normal Library item identity: a valid
+  canonical split answers its Section items with the parent Recording
+  suppressed. Ask is NOT part of the item-mode replacement: it stays
+  DOCUMENT-LEVEL (never item mode, never a per-item suppression),
+  keeping the segment/ordinal-0-summary evidence and additionally
+  admitting the canonical active section-summary variants as
+  prose-only evidence. Embedding sync and Ask reuse those documents. Any change
+  to the searchable scope flows through `schedule_recording_sync`
+  post-commit and the embedding post-commit callback; web GETs stay
+  strictly read-only. 6.1 itself changed no indexed content and
+  scheduled no sync at its delivery; since 6.3 a REAL layout change
+  schedules exactly ONE post-commit parent-recording sync (the layout
+  decides which section summaries are canonical index content) — see §9.
 - Mutating pipeline processing actions run under the exclusive `flock` at
   `data/temp/locks/pipeline.lock`; bounded web tag mutations run unlocked
   under the existing local SQLite BUSY/LOCKED retry. Segmented-version save
@@ -118,7 +133,9 @@ deletion under retention requires a separate explicit approval gate.
   writer.** All searchable-scope changes flow through
   `schedule_recording_sync` inside the successful mutation transaction
   (post-commit), and the embedding post-commit callback follows. GET stays
-  strictly read-only. 6.1 introduces no searchable-scope change.
+  strictly read-only. 6.1 introduced no searchable-scope change at its
+  delivery; since the delivered 6.3 a real layout change schedules
+  exactly one parent-recording sync (see §9).
 - **E4 — Existing ordinal-0 behavior.** The active transcript's ordinal-0
   section remains the derivation basis for the recording-level default
   summary and the whole-recording search document (D1/D8 Option A).
@@ -149,9 +166,11 @@ deletion under retention requires a separate explicit approval gate.
 2. **Topic splitting** as an immutable/versioned segmented version — Phase 6.1 (DELIVERED).
 3. **Section-level summaries** — Phase 6.2 (DELIVERED).
 4. **Section-level tags** — Phase 6.2 (DELIVERED).
-5. **Retention cleanup** (Keep-Audio override, missing-file
-   reconciliation UI) — Phase 6.4.
-6. **launchd scheduling** — Phase 6.5.
+5. Section content in the search/embedding/Ask stack, Library-item
+   search everywhere — Phase 6.3 (DELIVERED).
+6. **Retention cleanup** (Keep-Audio override, missing-file
+   reconciliation UI) — Phase 6.4 (NEXT).
+7. **launchd scheduling** — Phase 6.5.
 
 **Non-goals:**
 
@@ -160,8 +179,11 @@ deletion under retention requires a separate explicit approval gate.
   not approved).
 - New audio tooling beyond the current `afinfo`/`afconvert` — no ffmpeg
   dependency (D2).
-- Changing the default whole-recording summary derivation or the
-  search/Ask index scope (D1/D8 Option A).
+- Changing the default whole-recording summary derivation (D1/D8
+  Option A — unchanged, and the delivered 6.3 kept the ordinal-0
+  defaults/documents intact). The search/Ask index scope was out of
+  6.1's scope; the delivered 6.3 expanded it additively under D7 and
+  the 6.2a Library-replacement requirement (see §9).
 - Section editing that mutates boundaries under existing summaries (G1).
 - Automatic/background retry daemons for sync (stays manual/no-retry).
 - Automatic summary/variant/suggestion/section-tag carry-forward into a
@@ -174,8 +196,10 @@ deletion under retention requires a separate explicit approval gate.
 - 6.2 (section summaries/tags) depends on 6.1's topic `Section` rows —
   DELIVERED (see the delivery note at the top of §9).
 - 6.3 (search/embedding/Ask integration) depends on 6.1's structure and,
-  for section-level search, on 6.2's section summaries.
-- 6.4 (retention + Rescan) is largely orthogonal to 6.1–6.3 but shares the
+  for section-level search, on 6.2's section summaries — DELIVERED (see
+  the Phase 6.3 delivery note in §9).
+- 6.4 (retention + Rescan) is the NEXT phase; it is largely orthogonal
+  to 6.1–6.3 but shares the
   mutating-action/concurrency plumbing.
 - 6.5 (launchd) is an operations layer on top of 6.4 and the existing
   pipeline.
@@ -222,6 +246,13 @@ No production schema, migration, or runtime implementation was part of 6.0.
 > anywhere else); historical views are read-only through
 > `?v=<transcript-id>&layout=<version-id>` (the layout parameter
 > selects an explicit `SegmentedVersion` of the selected transcript).
+> **Post-delivery change (6.3):** at the 6.1 delivery a save scheduled
+> no search/embedding sync because no section content was indexed yet;
+> since the delivered 6.3 an actual REAL layout change schedules
+> exactly ONE post-commit parent-recording search sync (the layout
+> decides which section summaries are canonical index content; see §9),
+> while the zero-DML no-op path still schedules nothing. The "no sync
+> on save" statements below describe the 6.1 delivery state.
 
 **Bounded to structure/history only.** 6.1 creates and versions the
 segmented-version structure and shows its history. It does not generate
@@ -288,8 +319,10 @@ segmented version ("Not segmented").
 - Existing ordinal-0 defaults (default summary/search/embedding/Ask) are
   unchanged; the Transcript working presentation follows the active
   segmented version's crop (cropped rows hidden by default, full transcript
-  one toggle away). **No search sync is scheduled on 6.1 save** because no
-  currently indexed content/default changes.
+  one toggle away). At the 6.1 delivery **no search sync was scheduled
+  on save** because no indexed content had changed yet; since 6.3 a
+  REAL layout change schedules exactly ONE parent-recording sync (see
+  §9).
 
 ### 8.3 Likely minimal model/migration shape (recommended; exact names chosen in 6.1)
 
@@ -386,8 +419,11 @@ topic sections; do not create a parallel topic-section model.
   are no splits; no client-supplied section ranges, no automatic topic
   inference), computes the canonical payload first and short-circuits to a
   no-op when unchanged.
-- The service **does not acquire the pipeline lock** and does **not**
-  schedule search/embedding sync. The calling web action layer acquires
+- The service **does not acquire the pipeline lock**, and at the 6.1
+  delivery did **not** schedule search/embedding sync (since 6.3 a
+  REAL layout change schedules exactly ONE parent-recording
+  `schedule_recording_sync` inside the save transaction; the zero-DML
+  no-op schedules none — see §9). The calling web action layer acquires
   the lock, runs recovery, re-derives eligibility, and compares the
   fingerprint (mirroring `workflow/services/web_actions.py`).
 - Returns safe counts/identifiers only; no raw exceptions, paths, or
@@ -465,7 +501,9 @@ topic sections; do not create a parallel topic-section model.
   satisfy the fixed-section shape).
 - Web tests: editor GET strictly read-only; POST-only + CSRF; confirmation;
   lock busy → 409; stale fingerprint → safe no-op; history read-only; no
-  search/embedding sync scheduled on save.
+  search/embedding sync scheduled on save (6.1-delivery state; 6.3 made
+  a real layout change schedule exactly one parent-recording sync, with
+  no-op saves still scheduling none).
 - Regression tests: ordinal-0 creation and the existing
   summary/transcript/history routes unaffected (including ordinal-0 queries
   that gain a `segmented_version IS NULL` filter); no index changes.
@@ -484,7 +522,8 @@ topic sections; do not create a parallel topic-section model.
 ### 8.12 Explicit exclusions
 
 - No section summaries, `SummaryVariantState`, or section tags (6.2).
-- No search/embedding index change or sync callback on save (6.3).
+- No search/embedding index change or sync callback on save at the 6.1
+  delivery; both arrived with the delivered 6.3 (see §9).
 - No derived audio, playback, or export (D2).
 - No separate trim/sections editor screen or route; editing lives on the
   active Transcript page and historical transcript versions stay read-only.
@@ -522,8 +561,9 @@ topic sections; do not create a parallel topic-section model.
 - The saved crop becomes the normal Transcript working presentation
   (cropped rows hidden by default, "Show full transcript" toggle); no
   ordinal-0 default (default summary/search/embedding/Ask), persisted full
-  transcript data, or source audio changes; no search/embedding sync is
-  scheduled on save.
+  transcript data, or source audio changes; no search/embedding sync was
+  scheduled on save at the 6.1 delivery (since 6.3 a real layout change
+  schedules exactly one parent-recording sync; see §9).
 - `makemigrations --check` is clean and the new migration is reversible
   with MigrationExecutor coverage.
 
@@ -544,7 +584,8 @@ topic sections; do not create a parallel topic-section model.
 > `workflow.0012_...`, additive and fully reversible); and the Library
 > exposes topic Sections as derived items through the read-only
 > `workflow/query.py` UNION projection (no `LibraryItem` model).
-> Step 6.3 (search/embedding/Ask integration) remains NOT implemented.
+> Step 6.3 (search/embedding/Ask integration) has since been DELIVERED
+> — see its delivery note below.
 
 ### Phase 6.2a — Safe Library return, temporary split titles, derived display title, section duration (DELIVERED)
 
@@ -580,8 +621,8 @@ topic sections; do not create a parallel topic-section model.
 > during summary generation; section duration is one bounded scalar
 > subquery per page
 > row with safe `None` for unavailable/nonpositive, endpoints selected
-> independently over the canonical range). Step 6.3 remains
-> NOT implemented.
+> independently over the canonical range). Step 6.3 has since been
+> DELIVERED — see its delivery note below.
 
 - Section summaries scope exactly as the existing
   (transcript, section, output_language) contract; ordinal-0 derivation is
@@ -594,18 +635,109 @@ topic sections; do not create a parallel topic-section model.
   section tag edits follow the bounded tag-mutation pattern; mutating
   actions are POST-only.
 
-### Phase 6.3 — Search / embedding / Ask integration
+### Phase 6.3 — Section content in the search/embedding/Ask stack, Library-item search everywhere (DELIVERED)
 
-- Keyword/semantic/hybrid/Ask keep full-recording behavior (Option A).
-- Section summaries belonging to the active segmented version are indexed
-  using the existing summary document identity/type where feasible; bare
-  boundaries are never documents; section-summary prose may be Ask evidence
-  but metadata/tags never are (D7).
-- Only active segmented-version summaries are indexed; recording-level
-  defaults/search are untouched.
-- All scope changes flow through `schedule_recording_sync` post-commit and
-  the embedding post-commit callback; any index mapping/version impact is
-  explicit; sync failures stay nonfatal, no-auto-retry, detectably stale.
+> **Delivery note (2026-09-13):** this phase is implemented in the
+> working tree — see the durable Step 6.3 invariant bullet in
+> `AGENTS.md`. **NO new migration** (`workflow.0013` stays the head;
+> the index-contract bump is code-only). Final implementation calls:
+>
+> - **Index v2 + item mode everywhere.** `search_index.INDEX_VERSION`
+>   is `"2"`. The canonical summary set is the ordinal-0
+>   whole-recording variants PLUS every ACTIVE variant of a topic Section of
+>   the fully canonical ACTIVE layout of the ACTIVE Transcript (keyed
+>   `summary:<id>` like any variant, owned by the PARENT Recording).
+>   Every search surface (keyword/semantic/hybrid, web AND CLI) runs
+>   LIBRARY-ITEM mode over the normal Library item scope: a valid
+>   active split layout answers its Section items with the parent
+>   Recording SUPPRESSED (never parent + section duplicates) while
+>   unsplit/crop-only/historical/malformed recordings fail closed to
+>   their single Recording item — the 6.2a explicit requirement, now
+>   FULFILLED.
+> - **One canonical-layout SQL home.** The shared
+>   `segmentation.canonical_layout_predicate()` is consumed by
+>   the Library projection, the engine item-key mapping
+>   (`search_query._item_key_case`: anything the layout cannot own
+>   derives `NULL` and is EXCLUDED — fail closed) and Ask.
+>   `query.library_item_key_queryset` + `search_query.compile_item_scope`
+>   (`CompiledItemScope`, compiled EXACTLY once and shared by both
+>   hybrid components) are the engine plumbing; payloads gained only
+>   ADDITIVE `item_key`/`item_kind`/`section_id`/`more_items_matched`
+>   fields plus the explicit `item_mode: true` flag (the legacy
+>   unsplit payload stays byte-identical and the unchanged
+>   Recording-scope engine API remains available). The web window
+>   hydrates ONLY through `query.library_items_by_keys` (stale/
+>   replaced/filtered-out keys silently dropped; the same item card/
+>   table renders; search-origin Section links carry no `lib_return`
+>   token); `brain search` runs every mode over the UNFILTERED
+>   canonical item scope with ONE bounded additive Section enrichment.
+> - **Section-summary docs bind tags aux:** the Section's ACTIVE tag
+>   names follow the shared people/organizations/topics parts, so tag
+>   membership changes converge through the normal content-hash
+>   detection with no separate bookkeeping; the Recording metadata
+>   document still carries ONLY recording-scope tag names.
+> - **Sync hooks, no new mechanism:** a REAL segmentation layout
+>   change and every successful section-summary activation schedule
+>   exactly ONE post-commit parent-recording `schedule_recording_sync`
+>   inside the writing transaction; section tag writes schedule one
+>   ONLY when the Section's ACTIVE tag-name set actually changes;
+>   zero-DML no-ops and rollbacks schedule nothing. The 5B.4
+>   embedding sync rides the same callback. No per-Section writer,
+>   queue, retry or daemon exists.
+> - **Ask:** canonical active topic-section summaries join as
+>   PROSE-ONLY evidence (body, else title — never `aux_text`, so tag
+>   names, layout titles and segment boundaries are never prompt
+>   evidence); citations carry the server-owned `section_id`;
+>   post-chat revalidation includes the canonical section/layout
+>   ownership. The rest of the Ask contract is unchanged.
+> - **Required post-upgrade rebuild sequence:** `brain search-index
+>   rebuild` FIRST (materializes the version-2 mapping), THEN `brain
+>   embedding-index rebuild` — the old active generation carries
+>   `source_index_version` "1" (`embedding-index status` reports
+>   `source_index_version_mismatch`; `repair` requires an EXACT
+>   INDEX_VERSION match, so a mismatch means rebuild). Semantic/
+>   hybrid/Ask fail closed until a compatible active generation
+>   exists; migration 0008's backfill deliberately still mirrors the
+>   historical version-1 mapping, so the index is DETECTABLY stale
+>   (`version_mismatch`) after an upgrade and is never rebuilt
+>   implicitly. Incremental sync keeps both indexes current afterwards.
+> - **Verification (independently confirmed):** full suite **3100
+>   collected and 3100 passed** (the Step 6.2a bug-fix state was
+>   2857 — historical; the 6.3 delta is **243 tests**), only the known
+>   `audioop` warning; `manage.py check`, `makemigrations --check`
+>   (no migration) and `git diff --check` clean. No commit and no
+>   real-database migration is claimed; the work and its tests are in
+>   the working tree, uncommitted.
+
+The original acceptance bullets below are the 6.3 delivery baseline;
+where the delivered contract refined one, the bullet states it. The
+ordinal-0 defaults themselves (default summary derivation,
+whole-recording documents) stayed unchanged, so Option A still holds at
+the defaults level.
+
+- Supersedes the original "Keyword/semantic/hybrid/Ask keep
+  full-recording behavior (Option A)" bullet per the user's explicit
+  6.2a requirement (decisions doc §9a): every SEARCH mode searches the
+  NORMAL Library items — a valid active split answers its Section
+  items with the parent Recording suppressed; Ask stays document-level
+  and admits canonical
+  active section-summary prose alongside the unchanged ordinal-0
+  variants.
+- Section summaries belonging to the canonical active layout are
+  indexed using the existing summary document identity/type
+  (`summary:<id>`, parent-Recording ownership); bare boundaries are
+  never documents; section-summary prose may be Ask evidence but
+  metadata/tags never are (D7) — DELIVERED as stated.
+- Only canonical active-layout section summaries were ADDED to the
+  index and the recording-level defaults/documents are untouched (B);
+  the Library-item mode REPLACES the per-Recording presentation unit
+  on the search surfaces (supersedes "search are untouched" at the
+  presentation level).
+- All scope changes flow through `schedule_recording_sync` post-commit
+  and the embedding post-commit callback; the index mapping/version
+  impact is explicit (`INDEX_VERSION` "2", code-only, no migration)
+  with the required rebuild sequence above; sync failures stay
+  nonfatal, no-auto-retry, detectably stale.
 - Web GETs stay strictly read-only.
 
 ### Phase 6.4 — Retention + Keep Audio + missing-file reconciliation
@@ -644,7 +776,13 @@ topic sections; do not create a parallel topic-section model.
   segmented versions, G1).
 - Existing ordinal-0 behavior unchanged (E4/D1/D8 Option A).
 - Search/embedding/Ask consistent with the effective scope through the
-  shared sync writer (E3); 6.1 introduces no scope change.
+  shared sync writer (E3); 6.1 introduced no scope change at its
+  delivery, and since 6.3 a real layout change schedules exactly one
+  parent-recording sync.
+- Every search mode answers the NORMAL Library items (6.3): a valid
+  canonical split suppresses the parent Recording, and
+  unsplit/crop-only/historical/malformed recordings fail closed to
+  their single Recording item — never parent + section duplicates.
 - Segmented-version save POST-only, pipeline-locked, stale-state guarded
   (G3); no background daemons.
 - No new framework/dependency.
@@ -654,10 +792,14 @@ topic sections; do not create a parallel topic-section model.
 - **Schema.** The 6.1 shape is in §8.3. Any migration is a NEW migration,
   never an edit to an existing/applied one, covered by genuine
   MigrationExecutor tests plus `makemigrations --check`.
-- **Search/embedding index.** 6.1 changes no indexed content and schedules
-  no sync. Later phases that add section-level documents route through the
-  existing per-recording reconcile (`schedule_recording_sync` post-commit +
-  embedding callback).
+- **Search/embedding index.** 6.1 changed no indexed content and
+  scheduled no sync at its delivery. The delivered 6.3 adds canonical
+  active-layout section-summary documents through the SAME existing
+  per-recording reconcile (`schedule_recording_sync` post-commit +
+  the 5B.4 embedding callback) — no new writer — and bumps
+  `search_index.INDEX_VERSION` to `"2"` in code only (no migration);
+  after an upgrade the required rebuild sequence is
+  `search-index rebuild` THEN `embedding-index rebuild` (see §9).
 - **Concurrency.** Segmented-version save uses the pipeline lock, POST-only,
   with stale-state protection. Pipeline processing actions hold the flock
   today; unlocked web tag mutations rely on SQLite write serialization plus
@@ -699,6 +841,12 @@ topic sections; do not create a parallel topic-section model.
   assignment rows before restoring the old global `(recording, tag)`
   unique, preserving recording assignments. Covered by genuine
   MigrationExecutor tests including a real reverse attempt.
+- 6.3 introduced **no new migration**: `workflow.0013` remains the
+  head and the index-contract bump to version `"2"` is code-only, so
+  an upgraded database's index is DETECTABLY stale until the explicit
+  `search-index rebuild` → `embedding-index rebuild` sequence (§9);
+  the index is never rebuilt by a migration, and
+  `makemigrations --check` is clean with no pending migration.
 - The existing ordinal-0 behavior (E4) and G1 guide the design.
 - Any retention source-deletion feature that touches existing models is a
   separate approval gate and likewise a new migration.
@@ -717,7 +865,7 @@ retention timer, Rescan, scheduling) live there. Summary:
 | D3/D5 | Immutable/versioned segmented versions; range + topics saved atomically as one revision |
 | D4 | Inter-segment segment-ordinal boundaries only; canonical half-open `[start, end_exclusive)` |
 | D6 | Section tags orthogonal to recording tags; no inference/promotion |
-| D7 | 6.3 indexes active-segmented-version summaries; boundaries never documents |
+| D7 | 6.3 indexes canonical active-layout section summaries; boundaries never documents — DELIVERED, with the 6.2a Library-item replacement across every search surface |
 | D9 | 6.4 first delivery = eligibility reporting + Keep Audio + dry run; deletion is a separate gate |
 | D10 | Disabled launchd template; activation is a separate gate |
 | D11 | Splits create N+1 sections partitioning the retained range; crop-only has zero sections |
@@ -746,13 +894,22 @@ retention timer, Rescan, scheduling) live there. Summary:
   `section_state_fingerprint`), section tags (migration 0012 with
   mutually exclusive recording/section `TagAssignment` scopes), and the
   derived Library item projection (no `LibraryItem` model; see the §9
-  delivery note and the project-status Step 6.2 section). The next
-  planned phase is **Step 6.3** (search/embedding/Ask integration for
-  section content), not yet implemented. The work and its tests are in
-  the working tree, uncommitted; no real-database migration is claimed.
+  delivery note and the project-status Step 6.2 section).
+- Step 6.2a and **Step 6.3 are also delivered in the working tree**:
+  the 6.2a refinements (safe Library-return token, temporary split
+  titles, derived display title, section duration — migration 0013)
+  and the 6.3 section content in the search/embedding/Ask stack with
+  Library-item search everywhere and `INDEX_VERSION` "2" (NO new
+  migration; see the §9 Phase 6.3 delivery note for the final
+  contract and the required post-upgrade rebuild sequence). The next
+  planned phase is **Step 6.4** (retention/Keep Audio/Rescan +
+  missing-file reconciliation); real source deletion/move and any
+  launchd activation remain separate explicit approval gates. The
+  work and its tests are in the working tree, uncommitted; no
+  real-database migration is claimed.
 - The Step 6.0 round (this document + `docs/step-6-decisions.md` + the
   Step 6 screens in `design/ui-prototype/` + the prototype README) was
   documentation/prototype only: no production code, schema, migration,
-  command, config, or real file operations. The Step 6.1 and Step 6.2
-  deliveries are the subsequent production implementations described by
-  §8 and §9.
+  command, config, or real file operations. The Step 6.1, Step 6.2,
+  Step 6.2a and Step 6.3 deliveries are the subsequent production
+  implementations described by §8 and §9.

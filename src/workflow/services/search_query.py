@@ -50,6 +50,14 @@ Query contract (plain-text users only, never raw FTS MATCH syntax):
 - ``more_recordings_matched`` is EXACT while the matched-Recording set
   is complete (the global fetch bound did not cut rows) and ``null``
   (unknown) otherwise — never guessed;
+- every result additionally carries the additive Library item-identity
+  fields ``item_key``, ``item_kind`` and nullable ``section_id``,
+  mirroring the ``workflow.query`` Library item-union key contract
+  (``r:<pk>`` / ``s:<pk>``). Without an item scope every result is the
+  whole Recording (always ``r:<recording_id>`` / ``"recording"`` /
+  ``None`` — purely additive, no existing field or value changes);
+  with an item scope the identity is SQL-derived from the matched
+  document (see the Library item-scope paragraph below);
 - ranking is deterministic: (worst satisfied-column rank,
   document-type rank, total fold-occurrences desc, first match offset,
   document_key) with the Recording id as the final tie-break; the best
@@ -82,6 +90,53 @@ documents can neither evict in-scope candidates at the bounds nor trigger
 truncation, and a lower-ranked in-scope match can never be starved by an
 out-of-scope flood.
 
+Library item scope (Step 6.3 groundwork): :func:`compile_item_scope`
+compiles the one-column ``item_key`` UNION produced by
+``workflow.query.library_item_key_queryset`` (the normal Library's
+item-identity set, ``r:<pk>``/``s:<pk>``) into an immutable
+:class:`CompiledItemScope` for consumption by :func:`search_recordings`.
+The compiler validates the UNION exactly as the builder produces it (a
+QuerySet, unsliced, union combinator, EXACTLY one ``item_key`` column on
+the combined query and on every branch — a combined query can never be
+re-projected or re-filtered, so the shape itself is the contract) and
+compiles it once on the SAME database alias; a compiler-proven empty
+UNION answers the same provably-empty subquery as the Recording scope,
+and every other compilation failure is the same sanitized index failure
+(the compiled SQL, parameters and the underlying exception text never
+escape). ``search_recordings`` consumes the compiled value through the
+optional ``compiled_item_scope=`` parameter (or compiles the raw UNION
+itself for ``item_scope=``); the Recording-scope ``scope=`` /
+:class:`CompiledScope` API and its SQL are unchanged, and the two
+mechanisms are mutually exclusive (exactly one eligibility mechanism
+per call).
+
+Library item mode (Step 6.3): when an item scope is supplied the
+innermost matched-set SQL derives every candidate's Library item
+identity from the SHARED ``workflow.services.segmentation``
+canonical-layout SQL (never a forked predicate, never a Python id set):
+no canonical split ⇒ ``r:<recording_id>``; a canonical split ⇒ a valid
+topic Summary maps to its own Section and a retained Segment ordinal
+maps to its owning valid Section, while the parent metadata document,
+the whole-recording fixed Summary and cropped-out Segments derive
+``NULL`` and are excluded. The derived key is restricted to the
+compiled item scope in the next subquery level — WHERE evaluates
+before the window functions of the same SELECT — so the partition, the
+per-item candidate bound, ``truncated``, the per-item dedup and
+``more_items_matched`` are all item truths: a valid active split layout
+yields EXACTLY the active Section items with the parent Recording
+suppressed (never parent + section duplicates), while
+unsplit/crop-only/historical/malformed recordings fail closed to their
+single Recording item. Winners deduplicate and count per ``item_key``;
+the historical ``more_recordings_matched`` stays as the SAME-VALUE
+compatibility alias of ``more_items_matched``. Titles remain the parent
+Recording's Library display title until the web slice renders section
+titles. The item-mode payload additionally carries the simple flag
+``item_mode: true`` (OMITTED entirely outside item mode, so the legacy
+payload stays byte-identical): the matched unit IS a Library item, so
+presentation counts Library items unconditionally and NEVER infers the
+unit from the returned rows (they may all be Recordings while the
+omitted matches include Sections).
+
 Index/SQLite failures, malformed input and over-cap queries raise
 ``ConfigError`` subclasses with fixed sanitized messages: category and
 command names only, never query text, indexed content, keys, paths or
@@ -104,6 +159,13 @@ from workflow.services.search_index import (
     _registry_schema_present,
     build_status_report,
     inspect_fts_schema,
+)
+# The SHARED canonical-layout SQL (the SAME predicate the Library item
+# union uses; never a forked copy): import-safe one way only —
+# segmentation imports neither search_index nor search_query.
+from workflow.services.segmentation import (
+    canonical_active_section_ids,
+    canonical_hidden_recording_ids,
 )
 from workflow.sqlite_unicode import ensure_fold_function, fold_text
 
@@ -174,6 +236,25 @@ _SCOPE_AMBIGUOUS_ERROR = (
 )
 _SCOPE_ALIAS_ERROR = (
     "the compiled search scope was built for a different database connection"
+)
+_ITEM_SCOPE_TYPE_ERROR = (
+    "the item scope must be the unsliced one-column item_key UNION from "
+    "workflow.query.library_item_key_queryset"
+)
+_COMPILED_ITEM_SCOPE_TYPE_ERROR = (
+    "the compiled item scope must be a CompiledItemScope value produced by "
+    "compile_item_scope"
+)
+_ITEM_SCOPE_AMBIGUOUS_ERROR = (
+    "the item scope must be supplied either as an item_key UNION queryset "
+    "or as a precompiled item scope, never both"
+)
+_ITEM_SCOPE_ALIAS_ERROR = (
+    "the compiled item scope was built for a different database connection"
+)
+_SCOPE_ITEM_CONFLICT_ERROR = (
+    "the search scope must be either a Recording eligibility scope or a "
+    "Library item scope, never both"
 )
 _QUERY_FAILED_ERROR = (
     "the keyword-search index could not be queried; inspect with: "
@@ -324,6 +405,12 @@ def _registry_table() -> str:
     return SearchDocument._meta.db_table
 
 
+# The provably-empty scope subquery both scope compilers answer for a
+# compiler-proven empty scope (``EmptyResultSet``): it matches nothing on
+# every connection, so an empty scope takes the normal zero-result path.
+_EMPTY_SCOPE_SQL = "SELECT NULL WHERE 1 = 0"
+
+
 def _compile_scope(scope, *, using: str) -> tuple[str, list]:
     """Validate and compile the constrained recording-scope QuerySet.
 
@@ -366,7 +453,7 @@ def _compile_scope(scope, *, using: str) -> tuple[str, list]:
     try:
         sql, params = scoped.query.get_compiler(using=using).as_sql()
     except EmptyResultSet:
-        return "SELECT NULL WHERE 1 = 0", []
+        return _EMPTY_SCOPE_SQL, []
     except Exception:
         raise SearchIndexError(_QUERY_FAILED_ERROR) from None
     return sql, list(params)
@@ -407,6 +494,91 @@ def compile_scope(scope, *, using: str) -> CompiledScope:
     return CompiledScope(sql=sql, params=tuple(params), using=using)
 
 
+def _item_projection_names(query) -> tuple[str, ...]:
+    """The selected column names of one compiled SELECT branch, in the
+    compiler's own select order (plain values, then unmasked annotations,
+    then extra selects). ``()`` for a default-column (all-model-fields)
+    selection, which is NEVER a valid item-scope projection."""
+    return (
+        tuple(query.values_select)
+        + tuple(query.annotation_select)
+        + tuple(query.extra_select)
+    )
+
+
+@dataclass(frozen=True)
+class CompiledItemScope:
+    """Immutable compiled Library-item-scope value for trusted orchestration.
+
+    Produced ONCE by :func:`compile_item_scope` from the one-column
+    ``item_key`` UNION returned by ``workflow.query.library_item_key_queryset``
+    (the normal Library item-identity set). Same value shape as
+    :class:`CompiledScope` — ``sql`` the compiled subquery (never echoed
+    anywhere), ``params`` the bound parameters and ``using`` the database
+    alias it was compiled against — but over the ``r:<pk>``/``s:<pk>``
+    item keys rather than Recording pks. Frozen: fields are never mutated.
+    Consumed by :func:`search_recordings` via ``compiled_item_scope=``.
+    """
+
+    sql: str
+    params: tuple
+    using: str
+
+
+def compile_item_scope(scope, *, using: str) -> CompiledItemScope:
+    """Compile the one-column ``item_key`` UNION from
+    ``workflow.query.library_item_key_queryset`` into an immutable
+    :class:`CompiledItemScope`.
+
+    A combined (UNION) QuerySet can never be re-projected, re-annotated
+    or re-filtered, so — unlike the Recording-scope ``_compile_scope``,
+    which FORCES a single-column PK selection — this compiler VALIDATES
+    the exact built shape instead of forcing one:
+
+    - accepts ONLY an UNSLICED ``QuerySet`` whose query is a ``union``
+      combinator and whose combined query AND every branch project
+      EXACTLY one column named ``item_key`` (anything else — SQL text, a
+      mapping, a plain Recording queryset, a different or multi-column
+      projection, a slice — is the same stable, content-free error);
+    - an EMPTY UNION is VALID in every form the compiler proves empty
+      (``library_item_key_queryset(...).none()``): ``EmptyResultSet``
+      from ``as_sql`` is caught and answered with the same
+      provably-empty subquery the Recording scope uses — never an error;
+    - compiles on the SAME database alias used by the consuming query
+      (the alias is stored on the value for the consumer to enforce);
+    - every OTHER compilation failure is the same sanitized index failure
+      as any query execution failure (``from None`` severs the context
+      chain): compiled SQL, parameters, paths, the underlying exception
+      text and the connection alias NEVER escape.
+
+    The QuerySet is captured, never executed: compilation is SQL
+    generation only (no DB round trip, no reads).
+    """
+    from django.core.exceptions import EmptyResultSet
+    from django.db.models import QuerySet
+
+    if not isinstance(scope, QuerySet):
+        raise SearchQueryInputError(_ITEM_SCOPE_TYPE_ERROR)
+    query = scope.query
+    if query.is_sliced:
+        raise SearchQueryInputError(_ITEM_SCOPE_TYPE_ERROR)
+    branches = tuple(query.combined_queries)
+    if (
+        query.combinator != "union"
+        or len(branches) < 2
+        or _item_projection_names(query) != ("item_key",)
+        or any(_item_projection_names(branch) != ("item_key",) for branch in branches)
+    ):
+        raise SearchQueryInputError(_ITEM_SCOPE_TYPE_ERROR)
+    try:
+        sql, params = query.get_compiler(using=using).as_sql()
+    except EmptyResultSet:
+        return CompiledItemScope(sql=_EMPTY_SCOPE_SQL, params=(), using=using)
+    except Exception:
+        raise SearchIndexError(_QUERY_FAILED_ERROR) from None
+    return CompiledItemScope(sql=sql, params=tuple(params), using=using)
+
+
 # Mirrors _DOC_TYPE_RANKS: within one Recording the per-recording
 # candidate bound keeps Summary first, then Recording metadata, then
 # Segments (document_key order inside each class) — a flood of matching
@@ -416,6 +588,67 @@ _DOC_TYPE_PRIORITY_SQL = (
     "CASE d.doc_type WHEN 'summary' THEN 0"
     " WHEN 'recording' THEN 1 ELSE 2 END"
 )
+
+# Same priority over the item-mode middle-level alias (Step 6.3): within
+# one LIBRARY ITEM the per-item candidate bound keeps Summary first,
+# then Recording metadata (recording items only), then Segments.
+_ITEM_DOC_TYPE_PRIORITY_SQL = (
+    "CASE m.doc_type WHEN 'summary' THEN 0"
+    " WHEN 'recording' THEN 1 ELSE 2 END"
+)
+
+
+def _item_key_case(table: str = "d") -> tuple[str, list]:
+    """The SQL-derived Library ITEM identity of one registry row
+    (Step 6.3), mirroring the ``workflow.query`` Library item-union
+    contract over the SHARED ``segmentation`` canonical-layout SQL (the
+    same predicate the union uses — never forked, never a Python id set):
+
+    - the parent Recording has NO canonical split layout ⇒ the item is
+      ``r:<recording_id>`` (every document type of the Recording);
+    - the parent Recording IS hidden by a canonical split layout ⇒
+      an ACTIVE Summary variant maps to its own valid topic Section
+      (``s:<section_id>``), a Segment maps to the valid topic Section
+      owning its ordinal range, and anything the layout cannot own
+      (parent metadata document, the fixed whole-recording Summary,
+      cropped-out Segments, rows of stale/malformed/cross-parent
+      layouts) derives ``NULL``.
+
+    ``table`` is the SQL reference for the OUTER registry row: the
+    default alias ``d`` (the keyword selection's registry alias — the
+    generated SQL is byte-identical to the historical default) or the
+    quoted registry TABLE NAME for the semantic traversal, whose
+    page SELECT has no ``d`` alias (SQLite resolves quoted
+    table-qualified references to its single FROM table; the correlated
+    subselects qualify their own tables, so no reference is shadowed).
+
+    Returns ``(sql, params)`` in SQL text order (hidden-recording
+    subquery, then the valid-Section subquery of each scalar branch)."""
+    hidden_sql, hidden_params = canonical_hidden_recording_ids()
+    valid_sql, valid_params = canonical_active_section_ids()
+    ref = f"{table}."
+    sql = (
+        "CASE"
+        " WHEN " + ref + "recording_id NOT IN (" + hidden_sql + ")"
+        " THEN 'r:' || " + ref + "recording_id"
+        " WHEN " + ref + "doc_type = 'summary' AND " + ref + "summary_id IS NOT NULL THEN ("
+        " SELECT 's:' || s.id FROM workflow_summary su"
+        " JOIN workflow_section s ON s.id = su.section_id"
+        " WHERE su.id = " + ref + "summary_id AND su.is_active = 1"
+        " AND su.transcript_id = " + ref + "transcript_id"
+        " AND s.transcript_id = " + ref + "transcript_id"
+        " AND s.segmented_version_id IS NOT NULL"
+        " AND s.id IN (" + valid_sql + "))"
+        " WHEN " + ref + "doc_type = 'segment' THEN ("
+        " SELECT 's:' || s.id FROM workflow_section s"
+        " WHERE s.transcript_id = " + ref + "transcript_id"
+        " AND s.segmented_version_id IS NOT NULL"
+        " AND " + ref + "segment_ordinal >= s.start_segment_ordinal"
+        " AND " + ref + "segment_ordinal < s.end_segment_ordinal_exclusive"
+        " AND s.id IN (" + valid_sql + ") LIMIT 1)"
+        " ELSE NULL END"
+    )
+    return sql, [*hidden_params, *valid_params, *valid_params]
 
 
 def _selection_sql(where: str) -> str:
@@ -450,6 +683,71 @@ _LIKE_GROUP = (
 )
 
 
+def _item_selection_sql(where: str, item_case: str, item_scope_sql: str) -> str:
+    """Item-mode selection (Step 6.3). Load-bearing layering:
+
+    - INNERMOST: the matched-set WHERE (terms only) plus the derived
+      ``item_key`` CASE projected as a column;
+    - MIDDLE: ``WHERE m.item_key IN (scope)`` restricts to the compiled
+      Library-item scope, and the window functions of the SAME SELECT
+      therefore compute over the in-scope item population ONLY —
+      ``ROW_NUMBER`` partitions by ``m.item_key`` (per-ITEM bound),
+      ``recording_matches`` counts per item and ``total_matches`` counts
+      the whole in-scope candidate set. ``NULL`` item keys (parent
+      metadata, fixed whole-recording Summary, cropped-out or
+      unmappable rows) never satisfy ``IN`` and are excluded;
+    - OUTER: the per-item bound, deterministic ``document_key`` order
+      and the bounded fetch (identical semantics to recording mode).
+    """
+    registry = _registry_table()
+    return (
+        "SELECT id, document_key, doc_type, recording_id, transcript_id, "
+        "summary_id, segment_ordinal, start_ms, end_ms, output_language, "
+        "title_text, body_text, aux_text, item_key, "
+        "recording_matches, total_matches FROM ("
+        " SELECT m.*,"
+        " ROW_NUMBER() OVER ("
+        f"PARTITION BY m.item_key ORDER BY {_ITEM_DOC_TYPE_PRIORITY_SQL},"
+        " m.document_key) AS rn,"
+        " COUNT(*) OVER (PARTITION BY m.item_key) AS recording_matches,"
+        " COUNT(*) OVER () AS total_matches"
+        " FROM ("
+        " SELECT d.id AS id, d.document_key AS document_key,"
+        " d.doc_type AS doc_type, d.recording_id AS recording_id,"
+        " d.transcript_id AS transcript_id, d.summary_id AS summary_id,"
+        " d.segment_ordinal AS segment_ordinal, d.start_ms AS start_ms,"
+        " d.end_ms AS end_ms, d.output_language AS output_language,"
+        " d.title_text AS title_text, d.body_text AS body_text,"
+        " d.aux_text AS aux_text,"
+        f" {item_case} AS item_key"
+        f" FROM {FTS_TABLE} JOIN {registry} d"
+        f" ON d.id = {FTS_TABLE}.rowid"
+        f" WHERE {where}"
+        f" ) m WHERE m.item_key IN ({item_scope_sql})"
+        ") WHERE rn <= %s ORDER BY document_key LIMIT %s"
+    )
+
+
+def _term_predicates(terms: list[str]) -> tuple[list[str], list, bool]:
+    """AND-combined matched-set predicates for the user terms: long
+    terms become one quoted MATCH phrase each; short terms become
+    escaped Unicode-aware LIKE groups. Returns
+    ``(predicates, params, needs_fold)``."""
+    predicates: list[str] = []
+    params: list = []
+    needs_fold = False
+    for term in terms:
+        if len(term) >= 3:
+            predicates.append(f"{FTS_TABLE} MATCH %s")
+            params.append(_quote_phrase(term))
+        else:
+            needs_fold = True
+            predicates.append(_LIKE_GROUP)
+            pattern = _short_term_pattern(term)
+            params.extend([pattern, pattern, pattern])
+    return predicates, params, needs_fold
+
+
 def _build_selection(
     terms: list[str],
     scope_sql: str | None = None,
@@ -468,23 +766,30 @@ def _build_selection(
     ``more_recordings_matched`` are computed over the in-scope
     population only. Param order: terms → scope → window bounds.
     """
-    where: list[str] = []
-    params: list = []
-    needs_fold = False
-    for term in terms:
-        if len(term) >= 3:
-            where.append(f"{FTS_TABLE} MATCH %s")
-            params.append(_quote_phrase(term))
-        else:
-            needs_fold = True
-            where.append(_LIKE_GROUP)
-            pattern = _short_term_pattern(term)
-            params.extend([pattern, pattern, pattern])
+    where, params, needs_fold = _term_predicates(terms)
     if scope_sql is not None:
         where.append(f"d.recording_id IN ({scope_sql})")
         params.extend(scope_params or [])
     sql = _selection_sql(" AND ".join(where))
     return sql, params, needs_fold
+
+
+def _build_item_selection(
+    terms: list[str],
+    item_scope_sql: str,
+    item_scope_params: list | None,
+) -> tuple[str, list, bool]:
+    """Item-mode counterpart of :func:`_build_selection` (Step 6.3): the
+    term predicates select the matched set, the innermost projection
+    derives each row's Library ``item_key`` and the scope filter lands
+    in the MIDDLE WHERE — still before the window functions — so the
+    per-item bound and both counts are item truths. Param order:
+    item-identity case → terms → item scope → window bounds. The
+    compiled scope SQL/params are engine-internal and never echoed."""
+    where, term_params, needs_fold = _term_predicates(terms)
+    item_case, case_params = _item_key_case()
+    sql = _item_selection_sql(" AND ".join(where), item_case, item_scope_sql)
+    return sql, [*case_params, *term_params, *(item_scope_params or [])], needs_fold
 
 
 _COLUMNS = (
@@ -503,6 +808,12 @@ _COLUMNS = (
     "aux_text",
 )
 
+# Item-mode selection columns (Step 6.3): the same columns plus the
+# SQL-derived Library item key (the per-item/global window counts stay
+# the final two columns of both row shapes — the positional window-count
+# reads in ``_select_candidates`` rely on that).
+_ITEM_COLUMNS = _COLUMNS + ("item_key",)
+
 
 def _select_candidates(
     terms: list[str],
@@ -512,27 +823,41 @@ def _select_candidates(
     per_recording_candidates: int,
     scope_sql: str | None = None,
     scope_params: list | None = None,
+    item_scope_sql: str | None = None,
+    item_scope_params: list | None = None,
 ) -> tuple[list[dict], bool, bool]:
     """Returns ``(candidates, truncated, recordings_complete)``.
 
     ``truncated`` is TRUE for ANY overflow of either bound — the global
     candidate bound (``total_matches`` from ``COUNT(*) OVER ()`` counts
-    ALL matching candidates, including rows the per-recording bound
-    removed) or a per-recording bound exceeded by any single Recording.
-    Overflow is detected from window counts, never inferred from the
-    kept row count.
+    ALL matching candidates, including rows the per-unit bound removed)
+    or a per-unit bound exceeded by any single unit. Overflow is
+    detected from window counts, never inferred from the kept row
+    count.
 
     ``recordings_complete`` is False only when the GLOBAL fetch bound
-    actually cut rows (bound+1 detection): then entire Recordings may
-    be missing and ``more_recordings_matched`` is unknowable. A
-    per-recording overflow keeps every matched Recording represented
-    (the bound always keeps the highest-priority candidate of each
-    Recording) so the Recording set stays complete while that one
-    Recording's best document stays approximate.
+    actually cut rows (bound+1 detection): then entire units may be
+    missing and the matched count is unknowable. A per-unit overflow
+    keeps every matched unit represented (the bound always keeps the
+    highest-priority candidate of each unit) so the unit set stays
+    complete while that unit's best document stays approximate.
+
+    The unit is the Recording (recording mode) or the Library item
+    (item mode, ``item_scope_sql`` supplied): the SAME contract one
+    level down — the derived ``item_key`` is restricted to the compiled
+    item scope BEFORE the windows, ``per_recording_candidates`` is then
+    the PER-ITEM bound and ``recording_matches`` counts per item.
     """
-    sql, params, needs_fold = _build_selection(
-        terms, scope_sql=scope_sql, scope_params=scope_params
-    )
+    if item_scope_sql is not None:
+        sql, params, needs_fold = _build_item_selection(
+            terms, item_scope_sql, item_scope_params
+        )
+        columns = _ITEM_COLUMNS
+    else:
+        sql, params, needs_fold = _build_selection(
+            terms, scope_sql=scope_sql, scope_params=scope_params
+        )
+        columns = _COLUMNS
     if needs_fold:
         try:
             ensure_fold_function(using)
@@ -557,7 +882,7 @@ def _select_candidates(
     truncated = total_matches > max_scored_documents or per_recording_overflow
     recordings_complete = len(fetched) <= max_scored_documents
     rows = fetched[:max_scored_documents]
-    return [dict(zip(_COLUMNS, row[: len(_COLUMNS)])) for row in rows], truncated, (
+    return [dict(zip(columns, row[: len(columns)])) for row in rows], truncated, (
         recordings_complete
     )
 
@@ -755,6 +1080,19 @@ def _provenance(row: dict) -> dict:
     return provenance
 
 
+def _parse_item_key(item_key: str) -> tuple[str, str, int | None]:
+    """Split one engine-derived item key into the result identity fields
+    ``(item_key, item_kind, section_id)``. Only the two shapes the SQL
+    derives are honoured (``r:<recording pk>`` / ``s:<section pk>``, the
+    ``workflow.query`` Library item-union contract); anything else falls
+    back DEFENSIVELY to a recording identity — the engine never
+    fabricates a section id it cannot prove."""
+    prefix, separator, remainder = (item_key or "").partition(":")
+    if separator and prefix == "s" and remainder.isdigit():
+        return item_key, "section", int(remainder)
+    return item_key, "recording", None
+
+
 # ---------------------------------------------------------------------------
 # The engine
 # ---------------------------------------------------------------------------
@@ -769,13 +1107,20 @@ def search_recordings(
     per_recording_candidates: int = PER_RECORDING_CANDIDATES,
     scope=None,
     compiled_scope: CompiledScope | None = None,
+    item_scope=None,
+    compiled_item_scope: CompiledItemScope | None = None,
 ) -> dict:
     """Run one read-only keyword search against the existing index.
 
     NEVER runs the full health sweep (that is ``preflight_full_health``,
     the caller's policy), NEVER rebuilds, repairs, synchronizes, locks
-    or writes. Returns one deduplicated result per Recording with plain
-    text snippets, structured highlight offsets and match provenance.
+    or writes. Returns one deduplicated result per Recording — per
+    LIBRARY ITEM in item mode — with plain text snippets, structured
+    highlight offsets and match provenance. Each result also carries
+    the additive Library item-identity fields
+    ``item_key``/``item_kind``/nullable ``section_id`` (see the module
+    docstring): the whole Recording without an item scope, the
+    SQL-derived owner of the matched document with one.
 
     ``scope`` (Step 5A.4.2a) is an optional constrained ``Recording``
     eligibility QuerySet (``workflow.query.search_scope_queryset``) —
@@ -797,6 +1142,29 @@ def search_recordings(
     and ``compiled_scope`` is ambiguous and rejected with a fixed
     sanitized usage error. The QuerySet ``scope=`` path is unchanged and
     byte-identical to the historical behavior.
+
+    ``item_scope`` / ``compiled_item_scope`` (Step 6.3) are the
+    LIBRARY-ITEM-mode alternative to the Recording scope: the unsliced
+    one-column ``item_key`` UNION from
+    ``workflow.query.library_item_key_queryset`` (or its precompiled
+    :class:`CompiledItemScope`, compiled ONCE on the SAME alias, which
+    the engine uses VERBATIM and never recompiles). They are mutually
+    exclusive with each other AND with ``scope``/``compiled_scope`` —
+    exactly one eligibility mechanism per call, rejected otherwise with
+    a fixed sanitized usage error. In item mode the innermost SQL
+    derives every matched document's item identity from the SHARED
+    segmentation canonical-layout SQL, the derived key is restricted to
+    the compiled scope BEFORE the window functions, and the partition,
+    per-item candidate bound, ``truncated``, the per-``item_key`` dedup
+    and ``more_items_matched`` are all item truths; the historical
+    ``more_recordings_matched`` stays as the SAME-VALUE compatibility
+    alias, and the payload carries the explicit ``item_mode: true``
+    flag (present ONLY in item mode, omitted outside it) so
+    presentation counts Library items unconditionally — never from
+    the returned rows. Titles remain the parent Recording's Library
+    display title until the web slice renders section titles. Without
+    an item scope the SQL and results are byte-identical to the
+    unscoped engine.
     """
     normalized = normalize_query(query)
     _validate_limit(limit)
@@ -809,6 +1177,12 @@ def search_recordings(
 
     if scope is not None and compiled_scope is not None:
         raise SearchQueryInputError(_SCOPE_AMBIGUOUS_ERROR)
+    if item_scope is not None and compiled_item_scope is not None:
+        raise SearchQueryInputError(_ITEM_SCOPE_AMBIGUOUS_ERROR)
+    if (item_scope is not None or compiled_item_scope is not None) and (
+        scope is not None or compiled_scope is not None
+    ):
+        raise SearchQueryInputError(_SCOPE_ITEM_CONFLICT_ERROR)
     if compiled_scope is not None:
         if type(compiled_scope) is not CompiledScope:
             raise SearchQueryInputError(_COMPILED_SCOPE_TYPE_ERROR)
@@ -821,32 +1195,58 @@ def search_recordings(
     else:
         scope_sql = scope_params = None
 
-    candidates, truncated, recordings_complete = _select_candidates(
+    if compiled_item_scope is not None:
+        if type(compiled_item_scope) is not CompiledItemScope:
+            raise SearchQueryInputError(_COMPILED_ITEM_SCOPE_TYPE_ERROR)
+        if compiled_item_scope.using != using:
+            raise SearchQueryInputError(_ITEM_SCOPE_ALIAS_ERROR)
+        item_scope_sql = compiled_item_scope.sql
+        item_scope_params = list(compiled_item_scope.params)
+    elif item_scope is not None:
+        compiled_items = compile_item_scope(item_scope, using=using)
+        item_scope_sql = compiled_items.sql
+        item_scope_params = list(compiled_items.params)
+    else:
+        item_scope_sql = item_scope_params = None
+    item_mode = item_scope_sql is not None
+
+    candidates, truncated, selection_complete = _select_candidates(
         terms,
         using=using,
         max_scored_documents=max_scored_documents,
         per_recording_candidates=per_recording_candidates,
         scope_sql=scope_sql,
         scope_params=scope_params,
+        item_scope_sql=item_scope_sql,
+        item_scope_params=item_scope_params,
     )
 
+    # One winner per unit: the Recording (recording mode) or the
+    # derived Library item (item mode).
     best: dict[str, tuple[tuple, dict, dict]] = {}
     for row in candidates:
         score = _score_document(row, folded_terms)
         key = _comparator(row, score)
-        current = best.get(row["recording_id"])
+        unit = row["item_key"] if item_mode else row["recording_id"]
+        current = best.get(unit)
         if current is None or key < current[0]:
-            best[row["recording_id"]] = (key, row, score)
+            best[unit] = (key, row, score)
 
-    winners = sorted(best.values(), key=lambda item: (item[0], item[1]["recording_id"]))
+    winners = sorted(
+        best.values(),
+        key=lambda item: (
+            item[0],
+            item[1]["item_key"] if item_mode else item[1]["recording_id"],
+        ),
+    )
     page = winners[:limit]
-    # EXACT only while the matched-Recording set is known complete (the
+    # EXACT only while the matched-unit set is known complete (the
     # global fetch bound did not cut rows); null (unknown) otherwise —
-    # never guessed. A per-recording-only overflow keeps every matched
-    # Recording present, so the count stays exact there while
-    # ``truncated`` still honestly reports the approximate winner.
-    more_recordings_matched: int | None = (
-        max(len(winners) - len(page), 0) if recordings_complete else None
+    # never guessed. A per-unit-only overflow keeps every matched unit
+    # present, so the count stays exact there while ``truncated`` still
+    # honestly reports the approximate winner.
+    more_items_matched: int | None = (
+        max(len(winners) - len(page), 0) if selection_complete else None
     )
 
     titles = _lookup_titles([row["recording_id"] for _key, row, _s in page], using=using)
@@ -858,25 +1258,54 @@ def search_recordings(
             field for field in _FIELD_NAMES if score["field_ranges"][field]
         ]
         provenance["occurrences"] = score["occurrences"]
+        if item_mode:
+            item_key, item_kind, section_id = _parse_item_key(row["item_key"])
+        else:
+            item_key = f"r:{row['recording_id']}"
+            item_kind = "recording"
+            section_id = None
         results.append(
             {
                 "rank": rank,
                 "recording_id": row["recording_id"],
+                # Additive Library item identity mirroring the
+                # workflow.query Library item-union contract: the whole
+                # Recording without an item scope; in item mode the
+                # SQL-derived owner of the matched document.
+                "item_key": item_key,
+                "item_kind": item_kind,
+                "section_id": section_id,
+                # Titles stay the parent Recording's Library display
+                # title until the web slice renders section titles.
                 "title": titles.get(row["recording_id"], ""),
                 "match": provenance,
                 "snippet": _build_snippet(row, score),
             }
         )
 
-    return {
+    payload = {
         "query": normalized,
         "index_version": INDEX_VERSION,
         "limit": limit,
         "results": results,
         "result_count": len(results),
         "truncated": truncated,
-        "more_recordings_matched": more_recordings_matched,
+        # Additive Step 6.3 item-level matched-unit count; the
+        # historical Recording key stays as the SAME-VALUE
+        # compatibility alias (item mode counts items, recording mode
+        # counts Recordings — identical values either way).
+        "more_items_matched": more_items_matched,
+        "more_recordings_matched": more_items_matched,
     }
+    if item_mode:
+        # The EXPLICIT item-mode flag (see the module docstring): in
+        # Library-item mode the matched unit IS a Library item, so
+        # presentation counts Library items unconditionally — never
+        # inferred from the returned rows (they may all be Recordings
+        # while the omitted matches include Sections). Omitted entirely
+        # outside item mode, so the legacy payload is byte-identical.
+        payload["item_mode"] = True
+    return payload
 
 
 def _lookup_titles(recording_ids: list[str], *, using: str) -> dict[str, str]:

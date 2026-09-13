@@ -17,8 +17,11 @@ Proves on the CURRENT schema:
   suppression;
 - custom tag creation is global/config-compatible with the exact
   collision rules; only the assignment is section-scoped;
-- no-op/zero-DML semantics; no pipeline lock; NO recording search sync
-  is ever scheduled by section-scoped mutations;
+- no-op/zero-DML semantics; no pipeline lock; the Step 6.3 sync
+  contract is membership-driven: mutations that change the section's
+  ACTIVE tag-name set schedule exactly ONE parent-recording search
+  sync, an unchanged selection / origin-only confirm or promotion /
+  no-op schedules nothing;
 - the recording serialization boundary precedes the authoritative
   active-section validation inside ONE top-level transaction, so a
   layout that becomes historical is rejected with no assignment (the
@@ -506,7 +509,7 @@ class TestCustomCreateSection:
 
 
 class TestNoSyncAndRetry:
-    def test_no_section_mutation_schedules_sync(self, monkeypatch):
+    def test_section_mutations_schedule_parent_sync(self, monkeypatch):
         from workflow.services import tags as tags_module
 
         called: list = []
@@ -518,16 +521,88 @@ class TestNoSyncAndRetry:
             ["a", "b", "c"], [2], ["A", "B"]
         )
         section = sections[0]
+        parent = [recording.pk]
         tag = make_tag("Work")
         add_manual_tag_section(section, tag)
+        assert called == [parent]  # membership created — one sync
         apply_section_tag_selection(section, [tag.pk], [], new_tag_name="")
+        assert called == [parent]  # unchanged selection — nothing
         remove_section_tag(section, tag)
+        assert called == [parent, parent]  # removal — one sync
         # Confirm without an active assignment raises (still no sync).
         with pytest.raises(TagOperationError) as excinfo:
             confirm_section_suggestion(section, tag)
         assert excinfo.value.code == "no_active_assignment"
+        assert called == [parent, parent]
         create_custom_tag_and_assign_section(section, "Another")
+        assert called == [parent, parent, parent]  # new assignment — one
+
+        # An origin-only confirm schedules nothing (exact mirror of the
+        # recording scope): active membership is unchanged.
+        TagAssignment.objects.filter(section=section, tag=tag).update(
+            is_active=True, origin=TagOrigin.SUGGESTED,
+            deactivated_by=TagDeactivatedBy.NONE, deactivated_at=None,
+        )
+        called.clear()
+        result = confirm_section_suggestion(section, tag)
+        assert result["already_confirmed"] is False
+        assignment = TagAssignment.objects.get(section=section, tag=tag)
+        assert assignment.origin == TagOrigin.CONFIRMED
         assert called == []
+
+    def test_add_manual_tag_section_syncs_only_on_membership_change(
+        self, monkeypatch
+    ):
+        # Sync follows the INDEXED membership (the set of ACTIVE tag
+        # names) exactly: create/reactivate schedule once; a repeated
+        # already-active add (true no-op) and an origin-only promotion
+        # schedule nothing.
+        from workflow.services import tags as tags_module
+
+        called: list = []
+        monkeypatch.setattr(
+            tags_module, "schedule_recording_sync",
+            lambda ids: called.append(list(ids)),
+        )
+        recording, transcript, sections = split_recording(
+            ["a", "b", "c"], [2], ["A", "B"]
+        )
+        section = sections[0]
+        parent = [recording.pk]
+        tag = make_tag("Work")
+
+        result = add_manual_tag_section(section, tag)
+        assert result["created"] is True
+        assert called == [parent]  # new active membership — one sync
+
+        # Repeated add on the already-active manual assignment: the
+        # active name set is unchanged -> ZERO additional schedule.
+        result = add_manual_tag_section(section, tag)
+        assert (result["created"], result["promoted"], result["reactivated"]) == (
+            False, False, False,
+        )
+        assert called == [parent]
+
+        # Origin-only PROMOTION (active suggested -> manual) keeps the
+        # active name set identical: origin is not indexed content.
+        TagAssignment.objects.filter(section=section, tag=tag).update(
+            origin=TagOrigin.SUGGESTED,
+        )
+        called.clear()
+        result = add_manual_tag_section(section, tag)
+        assert result["promoted"] is True
+        assert called == []
+
+        # Removal schedules once (name leaves the indexed set)...
+        remove_section_tag(section, tag)
+        assert called == [parent]
+        # ...and the user re-add reactivates the row: one schedule.
+        called.clear()
+        result = add_manual_tag_section(section, tag)
+        assert result["reactivated"] is True
+        assignment = TagAssignment.objects.get(section=section, tag=tag)
+        assert assignment.is_active and assignment.origin == TagOrigin.MANUAL
+        assert called == [parent]
 
     def test_section_functions_carry_the_contention_retry_wrapper(self):
         # The same local SQLite BUSY/LOCKED retry decorator wraps every

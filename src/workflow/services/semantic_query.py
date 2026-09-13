@@ -36,6 +36,13 @@ no CLI/web wiring and no migration):
   (:class:`SemanticMatch`): the heap and the returned results never
   retain vectors, so memory is bounded by the current input/group vector
   plus K metadata winners — never K vectors.
+- ``select_semantic_item_winners`` — the Step 6.3 LIBRARY-ITEM variant
+  of that primitive: the SAME ``(recording_id, document_key)`` order
+  contract and comparator, but one winner per ``item_key``. Items are
+  Recording-exclusive, so each Recording's item bests finish together
+  when its contiguous stream section ends (an item need NOT be
+  contiguous inside its own Recording). Memory stays bounded by the
+  current Recording's bounded item bests plus the K metadata winners.
 
 The second half is the PUBLIC semantic engine (read-only, strict
 SELECT/PRAGMA + exactly one localhost embedding request, no lock, no
@@ -48,9 +55,11 @@ writes, no rebuild/repair/sync, no logs):
   (only when at least one in-scope document exists), ONE complete
   global active-generation integrity traversal with in-scope brute-force
   scoring in deterministic ``(recording_id, document_key)`` order, and a
-  final data_version + active-identity re-read. Empty valid scope →
-  zero embedding calls and a successful zero-result payload (global
-  integrity is still validated).
+  final data_version + active-identity re-read. Empty valid scope → zero
+  embedding calls and a successful zero-result payload (global integrity
+  is still validated). ``item_scope``/``compiled_item_scope`` select
+  Library-item mode (see the item-mode paragraph below); without them
+  the behavior is the unchanged legacy per-Recording contract.
 - ``semantic_rank`` — the reusable validated snapshot/result entry point
   for later hybrid orchestration: accepts an already-embedded normalized
   query vector and scope, never triggers the source health sweep itself,
@@ -67,6 +76,36 @@ are scored. Scope is the existing unsliced ``Recording`` QuerySet
 contract compiled by ``search_query._compile_scope`` (semantics are
 never forked); it applies before ranking and out-of-scope rows can never
 win.
+
+Library item mode (Step 6.3, ``item_scope``/``compiled_item_scope`` on
+``semantic_search``, on the reusable ``SemanticSnapshot``/
+``run_semantic_snapshot`` pair and on ``embed_query_vector``): the
+Recording-scope mechanisms and the legacy per-Recording contract are
+UNCHANGED and mutually exclusive with it.
+The scope is the unsliced one-column ``item_key`` UNION of
+``workflow.query.library_item_key_queryset`` compiled ONCE by the SHARED
+``search_query.compile_item_scope`` into a :class:`CompiledItemScope`,
+and every document's item identity derives from the SHARED
+``search_query._item_key_case`` canonical-layout SQL (never a forked
+predicate): a valid active split layout yields EXACTLY the canonical
+Section items (the Section's ACTIVE summaries and its retained Segments
+map to the owning Section; the parent metadata document, the fixed
+whole-recording Summary and cropped-out Segments derive ``NULL`` and are
+excluded, so the parent Recording is SUPPRESSED, never duplicated),
+while unsplit/crop-only/historical/malformed recordings fail closed to
+their single Recording item. In item mode the traversal's in-scope
+membership, ``select_semantic_item_winners``' grouping, the matched
+count and the ranks are all per-Library-item truths; the item key is
+carried on the candidate/match winner metadata and surfaced as the
+additive ``item_key``/``item_kind``/``section_id`` result fields, with
+``more_items_matched`` the item-neutral count and
+``more_recordings_matched`` its SAME-VALUE compatibility alias (the
+same contract the keyword engine exposes) and the item-mode payload
+carries the explicit ``item_mode: true`` flag (OMITTED outside item
+mode) so more-match presentation counts Library items unconditionally,
+never inferring the unit from the returned rows. One health sweep,
+one integrity traversal, one embedding request and bounded pages are
+unchanged.
 
 Everything here is read-only, deterministic and content-free in its
 errors: query text, vector values, document keys, recording ids, SQL and
@@ -113,10 +152,14 @@ from workflow.services.search_query import (
     MAX_QUERY_CODEPOINTS,
     MAX_RESULT_LIMIT,
     SNIPPET_MAX_CODEPOINTS,
+    CompiledItemScope,
     CompiledScope,
     _compile_scope,
+    _item_key_case,
     _lookup_titles,
+    _parse_item_key,
     _provenance,
+    compile_item_scope,
     compile_scope,
 )
 
@@ -150,6 +193,8 @@ CANDIDATE_ORDER = "candidate_order"
 INVALID_QUERY_VECTOR = "invalid_query_vector"
 INVALID_DOCUMENT_VECTOR = "invalid_document_vector"
 DIMENSION_MISMATCH = "dimension_mismatch"
+# Step 6.3 Library-item-scope usage failures (semantic_search only).
+INVALID_ITEM_SCOPE = "invalid_item_scope"
 
 # Fixed sanitized messages — never interpolate query text, vector values,
 # document keys, recording ids, indexed content, SQL or paths.
@@ -173,6 +218,21 @@ _CANDIDATE_ORDER_ERROR = (
 _INVALID_QUERY_VECTOR_ERROR = "the semantic query vector is invalid"
 _INVALID_DOCUMENT_VECTOR_ERROR = "a semantic document vector is invalid"
 _DIMENSION_MISMATCH_ERROR = "semantic vector dimensions do not match"
+_ITEM_SCOPE_AMBIGUOUS_ERROR = (
+    "the item scope must be supplied either as an item_key UNION queryset "
+    "or as a precompiled item scope, never both"
+)
+_SCOPE_ITEM_CONFLICT_ERROR = (
+    "the semantic scope must be either a Recording eligibility scope or a "
+    "Library item scope, never both"
+)
+_COMPILED_ITEM_SCOPE_TYPE_ERROR = (
+    "the compiled item scope must be a CompiledItemScope value produced by "
+    "compile_item_scope"
+)
+_ITEM_SCOPE_ALIAS_ERROR = (
+    "the compiled item scope was built for a different database connection"
+)
 
 # ---------------------------------------------------------------------------
 # Engine-level stable codes (never renamed silently). These belong to the
@@ -463,6 +523,12 @@ class SemanticCandidate:
     ``CharField(36)`` primary key (UUID-producing default, but manually
     supplied or legacy nonempty strings are valid and pass through
     unchanged). ``None`` means the column is absent for the doc type.
+
+    ``item_key`` (Step 6.3) is the additive Library-item identity
+    (``r:<pk>``/``s:<pk>``, the ``workflow.query`` union contract) the
+    engine derives over the SHARED canonical-layout SQL. The legacy
+    per-Recording/evidence primitives ignore this field entirely; only
+    :func:`select_semantic_item_winners` validates and groups by it.
     """
 
     recording_id: str
@@ -475,6 +541,7 @@ class SemanticCandidate:
     start_ms: int | None = None
     end_ms: int | None = None
     output_language: str = ""
+    item_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -485,6 +552,10 @@ class SemanticMatch:
     Recording group ends; the global heap and the returned winners hold
     ONLY these metadata matches, so at most one input/group vector is
     ever live alongside the K metadata winners (never K vectors).
+
+    ``item_key`` mirrors the candidate's additive Library-item identity
+    (empty outside item mode; validated non-empty by
+    :func:`select_semantic_item_winners`).
     """
 
     recording_id: str
@@ -496,6 +567,7 @@ class SemanticMatch:
     start_ms: int | None = None
     end_ms: int | None = None
     output_language: str = ""
+    item_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -520,6 +592,7 @@ def _match_from_candidate(candidate: SemanticCandidate) -> SemanticMatch:
         start_ms=candidate.start_ms,
         end_ms=candidate.end_ms,
         output_language=candidate.output_language,
+        item_key=candidate.item_key,
     )
 
 
@@ -562,6 +635,30 @@ def _valid_int_provenance(value) -> bool:
     if value is None:
         return True
     return not isinstance(value, bool) and isinstance(value, int)
+
+
+def _candidate_fields_valid(candidate: SemanticCandidate) -> bool:
+    """The shared pure-boundary field validation of :func:`select_semantic_winners`,
+    :func:`select_semantic_evidence` and :func:`select_semantic_item_winners`:
+    ``recording_id``/``document_key``/``doc_type``/``output_language`` exact
+    built-in ``str``, ``doc_type`` a known SearchDocument type, present
+    ``transcript_id`` an exact positive int, present ``summary_id`` an exact
+    nonempty built-in string (no UUID-syntax check), present
+    ``segment_ordinal`` an exact nonnegative int, present ``start_ms``/
+    ``end_ms`` exact ints. The offending value is never echoed. The
+    item-only ``item_key`` contract is checked by the item primitive."""
+    return (
+        type(candidate.recording_id) is str
+        and type(candidate.document_key) is str
+        and type(candidate.doc_type) is str
+        and candidate.doc_type in _KNOWN_DOC_TYPES
+        and type(candidate.output_language) is str
+        and _valid_transcript_id(candidate.transcript_id)
+        and _valid_summary_id(candidate.summary_id)
+        and _valid_segment_ordinal(candidate.segment_ordinal)
+        and _valid_int_provenance(candidate.start_ms)
+        and _valid_int_provenance(candidate.end_ms)
+    )
 
 
 def _rank_key(score: float, candidate: SemanticCandidate) -> tuple:
@@ -656,18 +753,7 @@ def select_semantic_winners(
             raise SemanticQueryError(INVALID_CANDIDATE, _CANDIDATE_ERROR)
         recording_id = candidate.recording_id
         document_key = candidate.document_key
-        if (
-            type(recording_id) is not str
-            or type(document_key) is not str
-            or type(candidate.doc_type) is not str
-            or candidate.doc_type not in _KNOWN_DOC_TYPES
-            or type(candidate.output_language) is not str
-            or not _valid_transcript_id(candidate.transcript_id)
-            or not _valid_summary_id(candidate.summary_id)
-            or not _valid_segment_ordinal(candidate.segment_ordinal)
-            or not _valid_int_provenance(candidate.start_ms)
-            or not _valid_int_provenance(candidate.end_ms)
-        ):
+        if not _candidate_fields_valid(candidate):
             raise SemanticQueryError(INVALID_CANDIDATE, _CANDIDATE_ERROR)
 
         if last_recording is not None:
@@ -695,6 +781,98 @@ def select_semantic_winners(
             group_best = (key, score, candidate)
 
     _offer(heap, group_best, limit)
+
+    ordered = sorted(heap, key=lambda entry: entry.key)
+    return [
+        SemanticWinner(rank=rank, score=entry.score, match=entry.match)
+        for rank, entry in enumerate(ordered, start=1)
+    ]
+
+
+def select_semantic_item_winners(
+    query_vector,
+    candidates,
+    *,
+    limit: int = SEMANTIC_DEFAULT_RESULT_LIMIT,
+) -> list[SemanticWinner]:
+    """Return the global top-``limit`` per-LIBRARY-ITEM semantic winners
+    (Step 6.3).
+
+    The SAME ``(recording_id, document_key)`` order contract and the
+    SAME comparator as :func:`select_semantic_winners`, but one winner
+    per ``item_key`` (``r:<pk>``/``s:<pk>``) instead of one per
+    Recording. Every candidate additionally requires a NONEMPTY built-in
+    ``str`` ``item_key`` (anything else is the fixed sanitized
+    ``invalid_candidate`` failure); the order validation is identical
+    because a Library item belongs to exactly ONE Recording: the stream
+    sections are contiguous per Recording, and each Recording's item
+    bests are finished TOGETHER (every item of that Recording has been
+    fully seen the moment its Recording section ends) before any of them
+    enters the global heap of at most ``limit`` — an item itself needs
+    NOT be contiguous inside its own Recording (a Section's Summary and
+    its Segments are separated by other items' documents in
+    ``document_key`` order), which is exactly why the per-Recording
+    accumulator is a bounded dict of per-item bests. Memory stays
+    bounded: one Recording's item bests (the shared canonical-layout
+    contract caps a Recording's items) plus the K provenance-only
+    :class:`SemanticMatch` winners — never vectors.
+
+    Results are returned best-first with deterministic 1-based ranks
+    (the comparator's ``document_key`` component makes exact ties
+    impossible, so the global order is insertion-independent). A
+    zero/non-finite query norm fails ``invalid_query_vector``; a
+    zero/non-finite document norm fails ``invalid_document_vector``
+    (fail closed), exactly as the per-Recording primitive.
+    """
+    validate_semantic_limit(limit)
+    query, query_norm = _prepare_query_vector(query_vector)
+
+    heap: list[_WorstFirst] = []
+    last_recording: str | None = None
+    last_document_key: str | None = None
+    # Per-item best of the CURRENT (contiguous) Recording section only.
+    group_bests: dict[str, tuple] = {}
+
+    for candidate in candidates:
+        if type(candidate) is not SemanticCandidate:
+            raise SemanticQueryError(INVALID_CANDIDATE, _CANDIDATE_ERROR)
+        recording_id = candidate.recording_id
+        document_key = candidate.document_key
+        if not _candidate_fields_valid(candidate) or (
+            type(candidate.item_key) is not str or not candidate.item_key
+        ):
+            raise SemanticQueryError(INVALID_CANDIDATE, _CANDIDATE_ERROR)
+
+        if last_recording is not None:
+            if recording_id == last_recording:
+                if document_key <= last_document_key:
+                    raise SemanticQueryError(
+                        CANDIDATE_ORDER, _CANDIDATE_ORDER_ERROR
+                    )
+            else:
+                # A recording may never reappear and ids never decrease.
+                if recording_id < last_recording:
+                    raise SemanticQueryError(
+                        CANDIDATE_ORDER, _CANDIDATE_ORDER_ERROR
+                    )
+                # The Recording section ended: every item of this
+                # Recording is finished, offer them all.
+                for group_best in group_bests.values():
+                    _offer(heap, group_best, limit)
+                group_bests = {}
+                last_document_key = None
+
+        last_recording = recording_id
+        last_document_key = document_key
+
+        score = _cosine_against_query(query, query_norm, candidate.vector)
+        key = _rank_key(score, candidate)
+        current = group_bests.get(candidate.item_key)
+        if current is None or key < current[0]:
+            group_bests[candidate.item_key] = (key, score, candidate)
+
+    for group_best in group_bests.values():
+        _offer(heap, group_best, limit)
 
     ordered = sorted(heap, key=lambda entry: entry.key)
     return [
@@ -796,18 +974,7 @@ def select_semantic_evidence(
             raise SemanticQueryError(INVALID_CANDIDATE, _CANDIDATE_ERROR)
         recording_id = candidate.recording_id
         document_key = candidate.document_key
-        if (
-            type(recording_id) is not str
-            or type(document_key) is not str
-            or type(candidate.doc_type) is not str
-            or candidate.doc_type not in _KNOWN_DOC_TYPES
-            or type(candidate.output_language) is not str
-            or not _valid_transcript_id(candidate.transcript_id)
-            or not _valid_summary_id(candidate.summary_id)
-            or not _valid_segment_ordinal(candidate.segment_ordinal)
-            or not _valid_int_provenance(candidate.start_ms)
-            or not _valid_int_provenance(candidate.end_ms)
-        ):
+        if not _candidate_fields_valid(candidate):
             raise SemanticQueryError(INVALID_CANDIDATE, _CANDIDATE_ERROR)
 
         if last_recording is not None:
@@ -876,6 +1043,14 @@ def select_semantic_evidence(
 # (it is a structurally-valid but unusable document vector); every other
 # integrity defect (missing/stale/orphan/wrong-length/non-finite) uses
 # the stable ``embedding_index_integrity`` category.
+#
+# Library-item mode (Step 6.3, ``semantic_search`` only) changes NOTHING
+# in this sequence: the same one sweep / one traversal / one embedding /
+# bounded pages run; only the in-scope MEMBERSHIP predicate becomes the
+# SHARED canonical-layout item derivation restricted to the compiled
+# Library item scope, the grouped top-K groups per item, and the
+# matched-unit count/ranks are item-level. The stepwise integrity,
+# concurrency and fail-closed guarantees are identical.
 
 
 def _reject_in_atomic_block(using: str) -> None:
@@ -941,6 +1116,29 @@ def _scope_has_documents(scope_sql, scope_params, *, using: str) -> bool:
     return queryset.exists()
 
 
+def _registry_table_ref() -> str:
+    """The quoted registry table name as the OUTER reference for the
+    shared item-identity CASE inside the traversal/existence SELECTs
+    (those have no ``d`` alias; SQLite resolves quoted table-qualified
+    references to the single FROM table)."""
+    return f'"{SearchDocument._meta.db_table}"'
+
+
+def _item_scope_exists(item_scope_sql, item_scope_params, *, using: str) -> bool:
+    """Item-mode counterpart of :func:`_scope_has_documents`: bounded
+    existence check over the current SearchDocuments whose SHARED
+    canonical-layout-derived Library item key lands in the compiled item
+    scope (NULL derivations — parent metadata, fixed whole-recording
+    summaries, cropped-out segments — never satisfy ``IN``). The
+    compiled scope SQL/params are engine-internal and never echoed."""
+    case_sql, case_params = _item_key_case(table=_registry_table_ref())
+    queryset = SearchDocument.objects.using(using).extra(
+        where=[f"({case_sql}) IN ({item_scope_sql})"],
+        params=[*case_params, *(item_scope_params or [])],
+    )
+    return queryset.exists()
+
+
 def _validated_query_vector(embedded, normalized: str, dimensions: int) -> tuple[float, ...]:
     """Validate the ONE returned query embedding: exact cardinality and
     text pairing, dimension equal to the active generation's, and a
@@ -961,15 +1159,27 @@ def _validated_query_vector(embedded, normalized: str, dimensions: int) -> tuple
 
 
 def _iter_current_document_pages(
-    *, using: str, page_size: int, scope_sql, scope_params
+    *, using: str, page_size: int, scope_sql, scope_params,
+    item_scope_sql=None, item_scope_params=None,
 ):
     """ALL current SearchDocuments in deterministic
     ``(recording_id, document_key)`` order, keyset-paged with the exact
     composite predicate (a recording may never reappear and ids never
     decrease). Every row carries an ``in_scope`` attribute computed from
     the compiled scope subquery, so the SAME traversal validates GLOBAL
-    integrity while scoring only in-scope rows. With ``scope=None``
-    ``in_scope`` is ``1`` for every row (full-scope parity).
+    integrity while scoring only in-scope rows. With ``scope=None`` (and
+    no item scope) ``in_scope`` is ``1`` for every row (full-scope
+    parity).
+
+    LIBRARY-ITEM mode (``item_scope_sql`` supplied, Step 6.3) computes
+    membership over the SHARED ``search_query._item_key_case``
+    canonical-layout derivation instead: the single extra column
+    ``item_scope_key`` carries the derived ``r:<pk>``/``s:<pk>`` key when
+    it lands in the compiled item scope and ``NULL`` otherwise — one
+    SQL expression, so a row is in scope exactly when its Library item
+    is (NULL keys — unmappable rows under a canonical split — are never
+    in scope). The Recording-scope SQL and the no-scope parity path are
+    byte-identical to the historical traversal.
 
     Rows are loaded with an EXACT ``.only(...)`` projection — the fields
     needed for integrity (``document_key``/``content_hash``), ordering
@@ -977,8 +1187,9 @@ def _iter_current_document_pages(
     (``doc_type``/``transcript_id``/``summary_id``/``segment_ordinal``/
     ``start_ms``/``end_ms``/``output_language``). The unbounded
     ``title_text``/``body_text``/``aux_text`` TextFields are NEVER
-    loaded during the traversal; winner excerpts are the only bounded
-    text fetch (``_fetch_excerpts``).
+    loaded during the traversal (the item-membership expression reads
+    only registry identity columns); winner excerpts are the only
+    bounded text fetch (``_fetch_excerpts``).
     """
     _TRAVERSAL_ONLY_FIELDS = (
         "document_key",
@@ -992,6 +1203,21 @@ def _iter_current_document_pages(
         "output_language",
         "content_hash",
     )
+    item_mode = item_scope_sql is not None
+    if item_mode:
+        case_sql, case_params = _item_key_case(table=_registry_table_ref())
+        # One expression: the derived item key when it is in the
+        # compiled scope, else NULL. Params follow the SQL text order:
+        # case, scope, case (the case appears in WHEN and in THEN).
+        scope_expression = (
+            f"CASE WHEN ({case_sql}) IN ({item_scope_sql})"
+            f" THEN ({case_sql}) ELSE NULL END"
+        )
+        scope_select_params = [
+            *case_params,
+            *(item_scope_params or []),
+            *case_params,
+        ]
     last_recording: str | None = None
     last_key: str | None = None
     while True:
@@ -1000,7 +1226,12 @@ def _iter_current_document_pages(
             .only(*_TRAVERSAL_ONLY_FIELDS)
             .order_by("recording_id", "document_key")
         )
-        if scope_sql is not None:
+        if item_mode:
+            queryset = queryset.extra(
+                select={"item_scope_key": scope_expression},
+                select_params=list(scope_select_params),
+            )
+        elif scope_sql is not None:
             queryset = queryset.extra(
                 select={"in_scope": f"recording_id IN ({scope_sql})"},
                 select_params=list(scope_params or []),
@@ -1029,6 +1260,8 @@ def _iter_integrity_scored(
     scope_params,
     query_vector,
     state: dict,
+    item_scope_sql=None,
+    item_scope_params=None,
 ):
     """ONE complete active-generation integrity traversal.
 
@@ -1044,11 +1277,24 @@ def _iter_integrity_scored(
     second blob pass. ``query_vector`` may be ``None`` for an
     empty-scope/integrity-only traversal (no scoring, no candidates).
 
+    LIBRARY-ITEM mode (``item_scope_sql`` supplied, Step 6.3) defines
+    in-scope by the SHARED canonical-layout item derivation (see
+    :func:`_iter_current_document_pages`): in-scope rows carry their
+    derived ``item_key`` on the yielded candidate, and the matched-unit
+     count is EXACT per item without an unbounded key set — items are
+     Recording-exclusive, so the current Recording's item keys are folded
+     into ``matched_items`` the moment its contiguous stream section
+     ends. ``state`` then carries ``matched_items`` (exact distinct
+     in-scope ITEM count), ``item_group_recording`` and the bounded
+     per-Recording ``item_group_keys`` set; the recording-mode state
+     keys/behavior are unchanged.
+
     ``state`` carries bounded scalar counters: ``current_documents``,
     ``in_scope_documents``, ``matched_recordings`` (distinct in-scope
     recordings, exact), ``matched_active_keys`` and the last seen
     in-scope recording id.
     """
+    item_mode = item_scope_sql is not None
     active_total = (
         EmbeddingDocument.objects.using(using).filter(generation=active).count()
     )
@@ -1057,6 +1303,8 @@ def _iter_integrity_scored(
         page_size=SEMANTIC_PAGE_SIZE,
         scope_sql=scope_sql,
         scope_params=scope_params,
+        item_scope_sql=item_scope_sql,
+        item_scope_params=item_scope_params,
     ):
         keys = [row.document_key for row in page]
         active_rows = list(
@@ -1090,6 +1338,35 @@ def _iter_integrity_scored(
                 raise SemanticQueryError(
                     SEMANTIC_INDEX_INTEGRITY, _INVALID_VECTOR_ERROR
                 )
+            if item_mode:
+                item_key = getattr(row, "item_scope_key", None)
+                if item_key is None:
+                    continue
+                state["in_scope_documents"] += 1
+                if row.recording_id != state["item_group_recording"]:
+                    # The previous Recording's stream section ended:
+                    # fold its bounded distinct item keys (an item never
+                    # spans Recordings, so no key set grows with the
+                    # corpus).
+                    state["matched_items"] += len(state["item_group_keys"])
+                    state["item_group_keys"] = set()
+                    state["item_group_recording"] = row.recording_id
+                state["item_group_keys"].add(item_key)
+                if query_vector is not None:
+                    yield SemanticCandidate(
+                        recording_id=row.recording_id,
+                        document_key=row.document_key,
+                        doc_type=row.doc_type,
+                        vector=values,
+                        transcript_id=row.transcript_id,
+                        summary_id=row.summary_id,
+                        segment_ordinal=row.segment_ordinal,
+                        start_ms=row.start_ms,
+                        end_ms=row.end_ms,
+                        output_language=row.output_language,
+                        item_key=item_key,
+                    )
+                continue
             if not bool(getattr(row, "in_scope", True)):
                 continue
             state["in_scope_documents"] += 1
@@ -1109,6 +1386,10 @@ def _iter_integrity_scored(
                     end_ms=row.end_ms,
                     output_language=row.output_language,
                 )
+    if item_mode:
+        # Fold the final Recording's bounded item keys.
+        state["matched_items"] += len(state["item_group_keys"])
+        state["item_group_keys"] = set()
     if state["matched_active_keys"] != active_total:
         raise SemanticQueryError(SEMANTIC_INDEX_INTEGRITY, _ORPHAN_DOCUMENT_ERROR)
 
@@ -1205,12 +1486,29 @@ def _build_payload(
     using: str,
     active,
     winners: list[SemanticWinner],
-    matched_recordings: int,
+    matched_units: int,
+    item_mode: bool = False,
 ) -> dict:
     """Assemble the ``search_recordings``-aligned semantic payload.
     Titles use canonical metadata (shared ``search_query._lookup_titles``,
-    bounded chunked); the match shape is the shared ``_provenance``
-    contract; snippets are winner-only bounded plain-text excerpts."""
+    bounded chunked — the parent Recording's Library display title, also
+    for a section item, until the web slice renders section titles);
+    the match shape is the shared ``_provenance`` contract; snippets are
+    winner-only bounded plain-text excerpts.
+
+    Every result carries the additive Library item-identity fields
+    ``item_key``/``item_kind``/nullable ``section_id`` (the keyword
+    engine's contract): the whole Recording outside item mode, the
+    shared-SQL-derived identity parsed with ``search_query._parse_item_key``
+    inside it. ``matched_units`` is the EXACT matched-unit count in the
+    active mode (Recording or Library item); the historical
+    ``more_recordings_matched`` key stays as the SAME-VALUE compatibility
+    alias of the item-neutral ``more_items_matched``. The item-mode
+    payload additionally carries the simple ``item_mode: true`` flag
+    (OMITTED outside item mode, so the legacy payload stays
+    byte-identical): the matched unit IS a Library item, so presentation
+    counts Library items unconditionally, never inferring the unit from
+    the returned rows."""
     titles = _lookup_titles([w.match.recording_id for w in winners], using=using)
     excerpts = _fetch_excerpts([w.match for w in winners], using=using)
     results = []
@@ -1226,17 +1524,29 @@ def _build_payload(
             "start_ms": match.start_ms,
             "end_ms": match.end_ms,
         }
+        if item_mode:
+            item_key, item_kind, section_id = _parse_item_key(match.item_key)
+        else:
+            item_key = f"r:{match.recording_id}"
+            item_kind = "recording"
+            section_id = None
         results.append(
             {
                 "rank": winner.rank,
                 "recording_id": match.recording_id,
+                # Additive Library item identity mirroring the
+                # workflow.query Library item-union contract.
+                "item_key": item_key,
+                "item_kind": item_kind,
+                "section_id": section_id,
                 "title": titles.get(match.recording_id, ""),
                 "match": _provenance(provenance_row),
                 "snippet": excerpts.get(match.document_key),
                 "score": winner.score,
             }
         )
-    return {
+    more_matched = max(matched_units - len(results), 0)
+    payload = {
         "query": normalized,
         "mode": "semantic",
         "semantic_query_version": SEMANTIC_QUERY_VERSION,
@@ -1252,10 +1562,22 @@ def _build_payload(
         "results": results,
         "result_count": len(results),
         "truncated": False,  # exhaustive scan: truncation never applies
-        # EXACT (derived with scalar counts during the grouped
-        # traversal, never a COUNT DISTINCT extra sweep).
-        "more_recordings_matched": max(matched_recordings - len(results), 0),
+        # EXACT (derived with bounded scalar counts during the grouped
+        # traversal, never a COUNT DISTINCT extra sweep). Additive
+        # item-level count; the historical Recording key stays as the
+        # SAME-VALUE compatibility alias (item mode counts items,
+        # recording mode counts Recordings — identical values either
+        # way).
+        "more_items_matched": more_matched,
+        "more_recordings_matched": more_matched,
     }
+    if item_mode:
+        # Explicit item-mode flag (the keyword engine's contract): the
+        # matched unit IS a Library item, so presentation counts Library
+        # items unconditionally. Omitted outside item mode so the legacy
+        # payload is byte-identical.
+        payload["item_mode"] = True
+    return payload
 
 
 def _traverse_and_finish(
@@ -1269,6 +1591,8 @@ def _traverse_and_finish(
     scope_params,
     data_version_before: int,
     verify_final: bool = True,
+    item_scope_sql=None,
+    item_scope_params=None,
 ) -> dict:
     """Run the ONE integrity traversal (+ in-scope scoring), build the
     payload, then perform the final data_version + active-identity
@@ -1276,11 +1600,20 @@ def _traverse_and_finish(
     empty in-scope set): the traversal then integrity-checks the
     complete global set and returns a zero-result payload.
 
+    ``item_scope_sql``/``item_scope_params`` (Step 6.3) select
+    LIBRARY-ITEM mode: the traversal's in-scope membership and matched-
+    unit count derive every document's item identity over the SHARED
+    canonical-layout SQL restricted to the compiled item scope, and the
+    grouped top-K is :func:`select_semantic_item_winners` (one winner
+    per Library item); without them the per-Recording pipeline is
+    byte-for-byte the legacy behavior.
+
     ``verify_final=False`` skips the final re-read so a hybrid
     orchestrator can run the keyword component and perform ONE final
     data_version + active-identity check AFTER BOTH components (no
     concurrent commit may slip between the two components and still
     report results)."""
+    item_mode = item_scope_sql is not None
     state = {
         "current_documents": 0,
         "in_scope_documents": 0,
@@ -1288,6 +1621,10 @@ def _traverse_and_finish(
         "matched_active_keys": 0,
         "last_in_scope_recording": None,
     }
+    if item_mode:
+        state["matched_items"] = 0
+        state["item_group_recording"] = None
+        state["item_group_keys"] = set()
     stream = _iter_integrity_scored(
         using=using,
         active=active,
@@ -1296,9 +1633,14 @@ def _traverse_and_finish(
         scope_params=scope_params,
         query_vector=query_vector,
         state=state,
+        item_scope_sql=item_scope_sql,
+        item_scope_params=item_scope_params,
     )
     if query_vector is not None:
-        winners = select_semantic_winners(query_vector, stream, limit=limit)
+        if item_mode:
+            winners = select_semantic_item_winners(query_vector, stream, limit=limit)
+        else:
+            winners = select_semantic_winners(query_vector, stream, limit=limit)
     else:
         for _candidate in stream:
             pass
@@ -1309,7 +1651,10 @@ def _traverse_and_finish(
         using=using,
         active=active,
         winners=winners,
-        matched_recordings=state["matched_recordings"],
+        matched_units=(
+            state["matched_items"] if item_mode else state["matched_recordings"]
+        ),
+        item_mode=item_mode,
     )
     if verify_final:
         _verify_final_state(active, data_version_before, using)
@@ -1330,6 +1675,15 @@ class SemanticSnapshot:
     ``search_query.compile_scope``, places that SAME compiled value here
     and passes it to the keyword engine — the runner NEVER re-sweeps
     source health, NEVER re-embeds and NEVER recompiles the scope.
+
+    ``item_scope`` (Step 6.3) is the Library-ITEM-mode alternative: the
+    immutable :class:`~workflow.services.search_query.CompiledItemScope`
+    compiled EXACTLY ONCE by the orchestrator (via the SHARED
+    ``search_query.compile_item_scope``) and consumed VERBATIM by the
+    runner while the SAME object goes to the keyword engine. It is
+    mutually exclusive with ``scope`` (exactly one eligibility mechanism
+    per run); ``None`` keeps the legacy per-Recording traversal
+    byte-identical.
     """
 
     normalized: str
@@ -1337,6 +1691,7 @@ class SemanticSnapshot:
     scope: CompiledScope | None
     query_vector: tuple[float, ...] | None
     data_version_before: int
+    item_scope: CompiledItemScope | None = None
 
 
 def embed_query_vector(
@@ -1348,6 +1703,8 @@ def embed_query_vector(
     using: str,
     config,
     embedder,
+    item_scope_sql=None,
+    item_scope_params=None,
 ) -> tuple[float, ...] | None:
     """Prepare the query vector for one already-validated snapshot.
 
@@ -1357,8 +1714,21 @@ def embed_query_vector(
     against the active generation's dimensions and the prepared query
     text; failures raise the fixed sanitized semantic errors. The
     request is made outside any DB transaction (the caller already
-    rejected atomic blocks at its boundary)."""
-    if not _scope_has_documents(scope_sql, scope_params, using=using):
+    rejected atomic blocks at its boundary).
+
+    ``item_scope_sql``/``item_scope_params`` (Step 6.3) are the compiled
+    Library-ITEM-scope alternative to the Recording ``scope_*`` pair (the
+    compiled values come from the SHARED ``compile_item_scope``; the
+    orchestrator validates exclusivity before calling): the empty check
+    then uses the same canonical-layout item-membership existence query
+    as :func:`semantic_search` item mode (NULL derivations never count).
+    Without them the behavior is the unchanged Recording-scope contract."""
+    if item_scope_sql is not None:
+        if not _item_scope_exists(
+            item_scope_sql, item_scope_params, using=using
+        ):
+            return None
+    elif not _scope_has_documents(scope_sql, scope_params, using=using):
         return None
     embedded = embedder(config, [prepare_query_text(normalized)])
     return _validated_query_vector(embedded, normalized, active.dimensions)
@@ -1375,23 +1745,37 @@ def run_semantic_snapshot(
     a prevalidated :class:`SemanticSnapshot`.
 
     The snapshot's active generation, compiled scope (an immutable
-    :class:`~workflow.services.search_query.CompiledScope`), prepared
-    query vector and ``data_version`` capture were validated by the
-    caller (a hybrid orchestrator that already ran the single
-    source-health sweep, the single scope compilation and the query
-    embedding itself), so this entry point NEVER sweeps source health,
-    NEVER embeds and NEVER recompiles the scope — the snapshot is
-    consumed as-is. With ``verify_final=True`` (the default) it ends with
+    :class:`~workflow.services.search_query.CompiledScope` — or the
+    Library-item alternative :class:`CompiledItemScope` on
+    ``snapshot.item_scope``, Step 6.3), prepared query vector and
+    ``data_version`` capture were validated by the caller (a hybrid
+    orchestrator that already ran the single source-health sweep, the
+    single scope compilation and the query embedding itself), so this
+    entry point NEVER sweeps source health, NEVER embeds and NEVER
+    recompiles the scope — the snapshot is consumed as-is. Exactly one
+    eligibility mechanism per snapshot: a snapshot carrying BOTH a
+    Recording scope and an item scope is a caller bug, rejected fail-
+    closed with the same fixed sanitized usage error the engines raise.
+    With ``verify_final=True`` (the default) it ends with
     the data_version + active-identity re-read; a hybrid orchestrator
     passes ``verify_final=False`` and performs that final re-read itself
     AFTER its other component, so no concurrent commit can slip between
     the two components and still report results. Returns the standard
-    semantic payload."""
+    semantic payload (item-mode payloads carry the additive
+    ``item_key``/``item_kind``/``section_id``/``more_items_matched``
+    contract, unchanged elsewhere)."""
     validate_semantic_limit(limit)
+    if snapshot.scope is not None and snapshot.item_scope is not None:
+        raise SemanticQueryInputError(
+            INVALID_ITEM_SCOPE, _SCOPE_ITEM_CONFLICT_ERROR
+        )
     scope_sql = snapshot.scope.sql if snapshot.scope is not None else None
     scope_params = (
         list(snapshot.scope.params) if snapshot.scope is not None else None
     )
+    item = snapshot.item_scope
+    item_scope_sql = item.sql if item is not None else None
+    item_scope_params = list(item.params) if item is not None else None
     return _traverse_and_finish(
         snapshot.query_vector,
         normalized=snapshot.normalized,
@@ -1402,6 +1786,8 @@ def run_semantic_snapshot(
         scope_params=scope_params,
         data_version_before=snapshot.data_version_before,
         verify_final=verify_final,
+        item_scope_sql=item_scope_sql,
+        item_scope_params=item_scope_params,
     )
 
 
@@ -1413,6 +1799,8 @@ def semantic_search(
     scope=None,
     config=None,
     embedder=None,
+    item_scope=None,
+    compiled_item_scope: CompiledItemScope | None = None,
 ) -> dict:
     """One complete read-only semantic search.
 
@@ -1430,12 +1818,55 @@ def semantic_search(
     fail closed. Strictly SELECT/PRAGMA plus one localhost embedding
     request; no lock, no writes, no rebuild/repair/sync, no logs.
 
+    ``item_scope`` / ``compiled_item_scope`` (Step 6.3) are the
+    LIBRARY-ITEM-mode alternative to the Recording scope, mirroring the
+    keyword engine: the unsliced one-column ``item_key`` UNION from
+    ``workflow.query.library_item_key_queryset`` (or its precompiled
+    :class:`~workflow.services.search_query.CompiledItemScope`, compiled
+    ONCE on the SAME alias via the SHARED ``compile_item_scope`` and then
+    consumed VERBATIM — never recompiled). They are mutually exclusive
+    with each other AND with ``scope`` — exactly one eligibility
+    mechanism per call, rejected otherwise with a fixed sanitized
+    ``invalid_item_scope`` input error BEFORE any DB/embedding work; a
+    wrong-typed or wrong-alias compiled value is the same stable input
+    failure. In item mode every document's item identity derives from
+    the SHARED ``search_query._item_key_case`` canonical-layout SQL: a
+    valid active split layout yields EXACTLY the canonical Section items
+    with the parent Recording SUPPRESSED (never duplicated), while
+    unsplit/crop-only/historical/malformed recordings fail closed to
+    their single Recording item; grouping, the matched-unit count and
+    the ranks are per-item, results carry the additive
+    ``item_key``/``item_kind``/``section_id`` fields and
+    ``more_recordings_matched`` is the SAME-VALUE alias of
+    ``more_items_matched``. The one-sweep/one-traversal/one-embedding
+    and bounded-page contracts are unchanged, and the payload plus the
+    SQL of the unscoped/per-Recording path stay byte-identical.
+
     ``embedder`` is injectable for tests; when ``None`` the production
     ``embedding_client.embed_texts`` is resolved AT CALL TIME (a
     module-level lookup, matching the embedding-index commands), so the
     production seam can be patched consistently.
     """
     normalized = validate_semantic_query(raw, limit)
+    # Item-scope usage validation is pure and cheap: it fails closed
+    # BEFORE any DB/embedding work (never an implicit widening).
+    if item_scope is not None and compiled_item_scope is not None:
+        raise SemanticQueryInputError(
+            INVALID_ITEM_SCOPE, _ITEM_SCOPE_AMBIGUOUS_ERROR
+        )
+    if scope is not None and (
+        item_scope is not None or compiled_item_scope is not None
+    ):
+        raise SemanticQueryInputError(
+            INVALID_ITEM_SCOPE, _SCOPE_ITEM_CONFLICT_ERROR
+        )
+    if compiled_item_scope is not None:
+        if type(compiled_item_scope) is not CompiledItemScope:
+            raise SemanticQueryInputError(
+                INVALID_ITEM_SCOPE, _COMPILED_ITEM_SCOPE_TYPE_ERROR
+            )
+        if compiled_item_scope.using != using:
+            raise SemanticQueryInputError(INVALID_ITEM_SCOPE, _ITEM_SCOPE_ALIAS_ERROR)
     try:
         _reject_in_atomic_block(using)
         if config is None:
@@ -1453,9 +1884,23 @@ def semantic_search(
         active = _validate_embedding_setup(config, using=using)
         _require_unchanged_data_version(data_version_before, using)
         scope_sql, scope_params = _compile_scope_or_none(scope, using=using)
-        has_scope_documents = _scope_has_documents(
-            scope_sql, scope_params, using=using
-        )
+        if compiled_item_scope is not None:
+            item_scope_sql = compiled_item_scope.sql
+            item_scope_params: list | None = list(compiled_item_scope.params)
+        elif item_scope is not None:
+            compiled_items = compile_item_scope(item_scope, using=using)
+            item_scope_sql = compiled_items.sql
+            item_scope_params = list(compiled_items.params)
+        else:
+            item_scope_sql = item_scope_params = None
+        if item_scope_sql is not None:
+            has_scope_documents = _item_scope_exists(
+                item_scope_sql, item_scope_params, using=using
+            )
+        else:
+            has_scope_documents = _scope_has_documents(
+                scope_sql, scope_params, using=using
+            )
         if has_scope_documents:
             embedded = embedder(config, [prepare_query_text(normalized)])
             query_vector = _validated_query_vector(
@@ -1472,6 +1917,8 @@ def semantic_search(
             scope_sql=scope_sql,
             scope_params=scope_params,
             data_version_before=data_version_before,
+            item_scope_sql=item_scope_sql,
+            item_scope_params=item_scope_params,
         )
     except SemanticQueryError:
         raise

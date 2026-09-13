@@ -5,20 +5,41 @@ The one home of the Library search flow: parse → validate → FULL
 health gate EXACTLY once per submitted search (no cache — a cached
 health could serve stale or deleted content and safe invalidation
 across web and CLI mutations is not provable) → the reusable
-``workflow.services.search_query`` engine with a constrained RECORDING
-SCOPE (filters apply to the candidate population BEFORE result limiting
-and pagination) → deterministic sorting → pagination over the returned
-match set → one bounded prefetch-contracted card fetch for the page
-window.
+``workflow.services.search_query`` engine with the normal Library's
+LIBRARY-ITEM SCOPE (the exact one-column ``item_key`` UNION of
+``workflow.query.library_item_key_queryset``; filters apply to the
+candidate population BEFORE result limiting and pagination) →
+deterministic sorting → pagination over the returned match set → one
+bounded Library item hydration of the page window.
 
-Keyword search stays the historical GET flow (``run_web_search``,
-unchanged). Step 5C adds ``run_web_vector_search`` for the dedicated
-POST-only endpoint: mode allowlist → cheap query validation → invalid
-scope filters REJECT (never widened) → the same valid Recording scope →
+Library item scope and hydration (Step 6.3): search results mirror the
+normal Library replacement — every winner is a Library ITEM identified
+by the engine's additive ``item_key`` (``r:<recording_id>`` /
+``s:<section_id>``), so a valid active split layout yields EXACTLY the
+active Section items with the parent Recording SUPPRESSED (never parent
++ section duplicates) while unsplit/crop-only/historical/malformed
+recordings answer their single Recording item. The page window is
+hydrated by ``workflow.query.library_items_by_keys`` into the same
+:class:`~workflow.query.LibraryItemCard` adapters the Library renders
+(one bounded revalidation of every winner key through the exact
+normal-Library identity semantics with the SAME scope filters the
+engine ran with, then the shared batched hydration): a stale engine key
+never resurrects a deleted, replaced or filtered-out item. The
+templates render the SAME item-native presentation as the normal
+Library (derived item title, item duration, item-scoped tags and
+summary languages, Section links to the section detail plus the
+parent/range context) with the search snippet/provenance riding on
+top; Section links carry NO library-return token (search-origin
+return is not supported).
+
+Keyword search stays the historical GET flow (``run_web_search``).
+Step 5C adds ``run_web_vector_search`` for the dedicated POST-only
+endpoint: mode allowlist → cheap query validation → invalid scope
+filters REJECT (never widened) → the same valid Library item scope →
 ``semantic_query.semantic_search`` / ``search_fusion.hybrid_search``
 (each owns exactly one source health sweep, one integrity traversal and
 at most one localhost embedding request; this layer adds none) → the
-SAME shared sorting/pagination/bounded card fetch. Every service failure
+SAME shared sorting/pagination/bounded item hydration. Every service failure
 is one stable ``unavailable`` outcome with a fixed sanitized message and
 the query cleared.
 
@@ -61,8 +82,17 @@ contain the query.
 Sorting contract (search mode): ``relevance`` preserves the engine's
 comparator order over the returned winners and is never translated into
 database ordering; the four Library sorts re-order the SAME returned
-winner set in the database before pagination. Truncation/more-match
-notes are scoped-honest: they describe only what the engine can prove.
+winner set in the database before pagination through the EXACT normal
+Library item sort (item display title under the Unicode collation,
+parent effective date, unique ``item_key`` tie-break) — a Section
+winner sorts by ITS OWN derived title, never by its parent only.
+Truncation/more-match notes are scoped-honest: they describe only what
+the engine can prove, and the beyond-window unit comes from the
+engine's explicit ``item_mode`` flag (Library-item mode says "library
+items" unconditionally, whether or not any visible or matched row is a
+Section; a Recording-mode/hand-built payload without the flag keeps the
+historical "recordings" wording) — never inferred from the rows visible
+on the page.
 """
 
 from __future__ import annotations
@@ -77,11 +107,13 @@ from django.core.paginator import Page, Paginator
 from brainlib.config import ConfigError
 from workflow.models import Transcript
 from workflow.query import (
+    LibraryItemCard,
     ListFilters,
     RecordingCard,
-    apply_sort,
-    recording_list_queryset,
-    search_scope_queryset,
+    apply_item_sort,
+    library_item_key_queryset,
+    library_item_queryset,
+    library_items_by_keys,
 )
 from workflow.services import search_query
 from workflow.templatetags.workflow_extras import mmss
@@ -132,6 +164,20 @@ NOTE_MORE_EXACT = (
 NOTE_MORE_UNKNOWN = (
     "More recordings may match; the total is unknown because the candidate "
     "limit was reached."
+)
+# Library-ITEM-mode variants (Step 6.3): chosen from the engine's
+# explicit ``item_mode`` flag (Library-item mode matched LIBRARY ITEMS,
+# so an item count NEVER claims "recordings" regardless of whether any
+# visible row is a Section). A payload without the flag (recording mode
+# or a hand-built legacy payload) keeps the historical Recording
+# wordings verbatim.
+NOTE_MORE_EXACT_ITEMS = (
+    "{more} more library items also matched these filters (showing the "
+    "{scan} most relevant)."
+)
+NOTE_MORE_UNKNOWN_ITEMS = (
+    "More library items may match; the total is unknown because the "
+    "candidate limit was reached."
 )
 NOTE_SORT_WINDOW = (
     "Sorting applies to the returned most-relevant matches, not to matches "
@@ -290,6 +336,24 @@ def _norm_id(value) -> str:
     return str(UUID(str(value)))
 
 
+def _winner_key(result: dict) -> str:
+    """The stable winner identity for the maps/pagination of one payload.
+
+    Every engine row carries the additive Library item identity
+    ``item_key`` (``r:<recording_id>`` for a Recording item,
+    ``s:<section_id>`` for a topic-Section item), so several Library
+    items of ONE Recording are DISTINCT winners — never dict-collapsed
+    by the parent Recording id. A row without the additive field (the
+    defensive/legacy payload shape) falls back to the whole Recording's
+    canonical ``r:`` key — a recording identity is never forged into a
+    Section identity.
+    """
+    item_key = result.get("item_key")
+    if isinstance(item_key, str) and item_key:
+        return item_key
+    return f"r:{_norm_id(result['recording_id'])}"
+
+
 def _match_label(match: dict) -> str:
     """Plain provenance label for 5A.4.2a (links/highlights are 5A.4.2b)."""
     source = match.get("source")
@@ -330,15 +394,26 @@ def build_notes(payload: dict, sort: str, scan_limit: int = WEB_SCAN_LIMIT) -> l
     asked for a non-relevance order. Pure candidate-bound truncation
     with the FULL winner set present (``more == 0``) does NOT make the
     sort window-limited — the truncation note says all there is to say.
+
+    The UNIT of the beyond-window note is the engine's EXPLICIT
+    ``item_mode`` flag, never the visible rows: Library-item mode
+    matched LIBRARY ITEMS, so the note counts items even when every
+    visible row is a Recording and the omitted matches are Sections. A
+    payload without the flag (recording mode, or a legacy/hand-built
+    payload) keeps the historical Recording wordings verbatim.
     """
     notes: list[str] = []
     more = payload.get("more_recordings_matched")
+    item_units = bool(payload.get("item_mode"))
     if payload.get("truncated"):
         notes.append(NOTE_TRUNCATED)
     if more:
-        notes.append(NOTE_MORE_EXACT.format(more=more, scan=scan_limit))
+        exact = NOTE_MORE_EXACT_ITEMS if item_units else NOTE_MORE_EXACT
+        notes.append(exact.format(more=more, scan=scan_limit))
     elif more is None:
-        notes.append(NOTE_MORE_UNKNOWN)
+        notes.append(
+            NOTE_MORE_UNKNOWN_ITEMS if item_units else NOTE_MORE_UNKNOWN
+        )
     incomplete_window = more is None or bool(more)
     if sort != SORT_RELEVANCE and incomplete_window:
         notes.append(NOTE_SORT_WINDOW)
@@ -347,11 +422,16 @@ def build_notes(payload: dict, sort: str, scan_limit: int = WEB_SCAN_LIMIT) -> l
 
 @dataclass(frozen=True)
 class SearchRow:
-    """One result row: the prefetch-contracted card plus the engine's
+    """One result row: the hydrated Library item card plus the engine's
     plain-text snippet fragments and provenance label/link primitives
-    (already display-safe strings and ints; the template escapes them)."""
+    (already display-safe strings and ints; the template escapes them).
 
-    card: RecordingCard
+    Hydration always hands a :class:`LibraryItemCard` (a Section winner
+    carries its own item identity plus the parent Recording's prefetched
+    :class:`RecordingCard`); the templates render through the item-card
+    contract exactly like the normal Library branches."""
+
+    card: RecordingCard | LibraryItemCard
     snippet_text: str
     match_label: str
     match_source: str
@@ -393,19 +473,44 @@ class SearchOutcome:
         return self.mode in VECTOR_MODES
 
 
-def _ordered_winner_ids(winner_ids: list[str], sort: str) -> list[str]:
+def _ordered_winner_ids(
+    winner_ids: list[str],
+    sort: str,
+    *,
+    filters: ListFilters,
+    timezone_name: str,
+    using: str,
+) -> list[str]:
     """Order the returned winner set BEFORE pagination.
 
     ``relevance`` keeps the engine order untouched (never a database
-    ORDER BY); the Library sorts order the SAME winner ids in the
-    database (title sorts through the annotated display_title and the
-    Unicode collation). One query at most; never applied page-by-page.
+    ORDER BY); the Library sorts order the SAME winner keys through the
+    EXACT normal-Library item sort (:func:`workflow.query.apply_item_sort`
+    over ``library_item_queryset`` restricted to the winners): Title
+    sorts fold the ITEM display title (a Section's own derived topic
+    title, a Recording's fallback chain — never a parent-only order),
+    date sorts use the parent effective date, and the unique
+    ``item_key`` is the shared deterministic tie-breaker, so the search
+    order can never diverge from the normal Library's ordering of the
+    same items. One bounded UNION query at most (the per-branch IN
+    predicate never exceeds the engine result cap); never applied
+    page-by-page. A winner that no longer names a normal Library item
+    (vanished, replaced, filtered out) drops here — the hydration
+    revalidation would drop it anyway.
     """
     if sort == SORT_RELEVANCE:
         return winner_ids
-    ordered = recording_list_queryset().filter(pk__in=winner_ids)
-    ordered = apply_sort(ordered, sort).values_list("pk", flat=True)
-    return [_norm_id(pk) for pk in ordered]
+    ordered = apply_item_sort(
+        library_item_queryset(
+            filters,
+            timezone_name,
+            using=using,
+            item_keys=list(dict.fromkeys(winner_ids)),
+        ),
+        sort,
+    )
+    rank = {row["item_key"]: index for index, row in enumerate(ordered)}
+    return sorted((key for key in winner_ids if key in rank), key=lambda key: rank[key])
 
 
 def _resolve_segment_links(
@@ -413,18 +518,22 @@ def _resolve_segment_links(
 ) -> dict[str, tuple[int, str]]:
     """ONE bounded SELECT validates EVERY segment provenance on the page.
 
-    A chip becomes a link ONLY for a row whose indexed transcript pk
+    A chip becomes a link ONLY for a winner whose indexed transcript pk
     survives strict integer validation, is still ``is_active`` AND
-    belongs to the SAME Recording as the result row — the
-    ``(transcript_id, recording_id)`` pair is validated together, so a
-    forged or stale cross-recording provenance can never produce a link
-    that jumps into another recording. Anything else keeps the plain
-    chip. Segments are immutable per Transcript, so an active same-owner
-    transcript guarantees the ordinal exists; the 0-based ordinal maps
-    deterministically onto the transcript page that renders it.
+    belongs to the SAME parent Recording as the hydrated item card (for
+    a Section winner, the Section's own transcript belongs to that same
+    parent) — the ``(transcript_id, recording_id)`` pair is validated
+    together, so a forged or stale cross-recording provenance can never
+    produce a link that jumps into another recording. Anything else
+    keeps the plain chip. Segments are immutable per Transcript, so an
+    active same-owner transcript guarantees the ordinal exists; the
+    0-based ordinal maps deterministically onto the transcript page that
+    renders it. Links are keyed by the WINNER key (Step 6.3): two
+    Section winners of one Recording carry their own ordinals and can
+    never overwrite each other.
     """
-    validated: dict[str, tuple[int, int]] = {}
-    for recording, result in entries:
+    validated: dict[str, tuple[int, int, str]] = {}
+    for winner_key, card, result in entries:
         match = result["match"]
         if match.get("source") != "segment":
             continue
@@ -432,51 +541,87 @@ def _resolve_segment_links(
         ordinal = _clean_ordinal(match.get("segment_ordinal"))
         if transcript_pk is None or ordinal is None:
             continue
-        validated[_norm_id(recording.pk)] = (transcript_pk, ordinal)
+        validated[winner_key] = (
+            transcript_pk,
+            ordinal,
+            _norm_id(card.recording.pk),
+        )
     if not validated:
         return {}
-    transcript_pks = [pk for pk, _ordinal in validated.values()]
+    transcript_pks = list({pk for pk, _ordinal, _rec in validated.values()})
     active_owner = dict(
         Transcript.objects.filter(pk__in=transcript_pks, is_active=True).values_list(
             "pk", "recording_id"
         )
     )
     links: dict[str, tuple[int, str]] = {}
-    for rec_id, (transcript_pk, ordinal) in validated.items():
+    for winner_key, (transcript_pk, ordinal, rec_id) in validated.items():
         owner = active_owner.get(transcript_pk)
         if owner is None or _norm_id(owner) != rec_id:
             continue
-        links[rec_id] = (ordinal // segments_per_page + 1, f"segment-{ordinal}")
+        links[winner_key] = (
+            ordinal // segments_per_page + 1,
+            f"segment-{ordinal}",
+        )
     return links
 
 
+def _item_key_for_card(card: LibraryItemCard) -> str:
+    """The canonical Library ``item_key`` of one hydrated card.
+
+    Mirrors EXACTLY the two spellings the Library UNION projects
+    (``s:<section pk>`` / ``r:<canonical recording id>``), rebuilt only
+    from the card's own projected row identity — so a hydrated card maps
+    back onto the winner key that requested it without ever touching
+    ``library_items_by_keys``' internals.
+    """
+    if card.is_section:
+        return f"s:{card.section_id}"
+    return f"r:{_norm_id(card.recording_id)}"
+
+
 def _build_rows(
-    page_ids: list[str], result_by_id: dict[str, dict], segments_per_page: int
+    page_keys: list[str],
+    result_by_id: dict[str, dict],
+    segments_per_page: int,
+    *,
+    filters: ListFilters,
+    timezone_name: str,
+    using: str,
 ) -> list[SearchRow]:
-    """ONE prefetch-contracted fetch for the page window (plus the one
-    bounded link-validation SELECT when any segment provenance is
-    present); rows follow the pre-computed page order. A row that
-    vanished between the gate and this read (a racing deletion) is
-    skipped — never a fake row."""
-    if not page_ids:
+    """Hydrate ONLY the page window through ``library_items_by_keys``
+    (one bounded revalidation of every winner key against the EXACT
+    normal-Library identity under the SAME scope filters the engine ran
+    with, plus the shared batched hydration and the one bounded
+    link-validation SELECT when any segment provenance is present);
+    rows follow the pre-computed page order.
+
+    A winner whose item vanished, was replaced by a valid active split
+    layout, moved to a superseded layout or fell out of the filters
+    between the engine and this read is skipped with its key — never a
+    fake row and never a resurrected stale item. Card contract: the
+    templates render through the card's parent-Recording accessors too,
+    so a card whose parent Recording vanished between the revalidation
+    and the hydration read is dropped with it.
+    """
+    if not page_keys:
         return []
-    by_id = {}
-    for recording in recording_list_queryset().filter(pk__in=page_ids):
-        by_id[_norm_id(recording.pk)] = recording
+    cards = library_items_by_keys(page_keys, filters, timezone_name, using=using)
+    card_by_key = {_item_key_for_card(card): card for card in cards}
     entries: list[tuple] = []
-    for pk in page_ids:
-        recording = by_id.get(pk)
-        if recording is None:
+    for winner_key in page_keys:
+        card = card_by_key.get(winner_key)
+        if card is None or card.recording is None:
             continue
-        entries.append((recording, result_by_id[pk]))
-    link_by_id = _resolve_segment_links(entries, segments_per_page)
+        entries.append((winner_key, card, result_by_id[winner_key]))
+    link_by_key = _resolve_segment_links(entries, segments_per_page)
     rows: list[SearchRow] = []
-    for recording, result in entries:
+    for winner_key, card, result in entries:
         fragments = snippet_fragments(result.get("snippet"))
-        link = link_by_id.get(_norm_id(recording.pk))
+        link = link_by_key.get(winner_key)
         rows.append(
             SearchRow(
-                card=RecordingCard(recording),
+                card=card,
                 snippet_text="".join(fragment.text for fragment in fragments),
                 match_label=_match_label(result["match"]),
                 match_source=result["match"].get("source") or "",
@@ -501,8 +646,9 @@ def run_web_search(
 ) -> SearchOutcome:
     """One submitted Library search, strictly read-only, in the approved
     order: cheap validation -> FULL health gate exactly once -> scoped
-    engine -> search-aware sorting -> pagination -> bounded card fetch
-    (with the one bounded segment-link validation SELECT).
+    engine -> search-aware sorting -> pagination -> bounded Library item
+    hydration of the page window (with the one bounded segment-link
+    validation SELECT).
     """
     sort = filters.sort if filters.sort else SORT_RELEVANCE
     try:
@@ -529,18 +675,30 @@ def run_web_search(
             message=str(exc), sort=sort,
         )
 
-    # 3. Scope: valid filters restrict the ENGINE candidate set itself.
+    # 3. Scope: valid filters restrict the ENGINE candidate set itself —
+    #    through the normal Library's ITEM scope (Step 6.3): a valid
+    #    active split layout yields EXACTLY the Section items with the
+    #    parent Recording suppressed, never parent + section duplicates.
     #    Invalid scope filters mirror the Library policy (show errors,
-    #    ignore the filters) and run the search unscoped, honestly
-    #    labelled. An invalid sort never reaches here un-normalized.
+    #    ignore the filters) and run the search over the UNFILTERED
+    #    canonical Library item scope — still ITEM mode (canonical parent
+    #    replacement, Section items, per-item bounds and notes), never
+    #    the historical whole-Recording engine mode — honestly labelled.
+    #    The SAME filters drive the page-window item revalidation, so
+    #    the fallback hydration never drops items the ignored filters
+    #    would have excluded. An invalid sort never reaches here
+    #    un-normalized.
     unscoped = not filters.scope_valid
-    scope = None if unscoped else search_scope_queryset(filters, timezone_name)
+    scope_filters = filters if not unscoped else ListFilters()
+    item_scope = library_item_key_queryset(
+        scope_filters, timezone_name, using=using
+    )
 
     # 4. The engine (structural queryability errors land in the same
     #    friendly index state; neither message ever contains the query).
     try:
         payload = search_query.search_recordings(
-            query, limit=WEB_SCAN_LIMIT, using=using, scope=scope
+            query, limit=WEB_SCAN_LIMIT, using=using, item_scope=item_scope
         )
     except search_query.SearchQueryInputError as exc:
         return SearchOutcome(
@@ -557,7 +715,7 @@ def run_web_search(
     result_by_id: dict[str, dict] = {}
     winner_ids: list[str] = []
     for result in results:
-        key = _norm_id(result["recording_id"])
+        key = _winner_key(result)
         result_by_id[key] = result
         winner_ids.append(key)
 
@@ -570,6 +728,9 @@ def run_web_search(
         page_number=page_number,
         per_page=per_page,
         segments_per_page=segments_per_page,
+        scope_filters=scope_filters,
+        timezone_name=timezone_name,
+        using=using,
     )
 
     return SearchOutcome(
@@ -594,18 +755,38 @@ def _finish_results(
     page_number,
     per_page: int,
     segments_per_page: int,
+    scope_filters: ListFilters,
+    timezone_name: str,
+    using: str,
 ):
     """Shared tail for keyword and vector modes: order the returned winner
-    set, paginate it, then ONE prefetch-contracted card fetch for the page
-    window (plus the one bounded segment-link validation SELECT). Returns
-    ``(rows, page, result_count)``. Relevance order is the engine's
-    comparator output untouched; the Library sorts re-order the SAME
-    returned winner set in the database before pagination."""
-    ordered_ids = _ordered_winner_ids(winner_ids, sort)
+    set, paginate it, then hydrate ONLY the page window through
+    ``library_items_by_keys`` — one bounded item revalidation with the
+    EXACT scope filters the engine ran on plus the shared batched
+    hydration (and the one bounded segment-link validation SELECT).
+    Returns ``(rows, page, result_count)``. Relevance order is the
+    engine's comparator output untouched; the Library sorts re-order the
+    SAME returned winner set with the EXACT normal-Library item sort
+    (item display title / parent effective date / ``item_key``
+    tie-break) before pagination."""
+    ordered_ids = _ordered_winner_ids(
+        winner_ids,
+        sort,
+        filters=scope_filters,
+        timezone_name=timezone_name,
+        using=using,
+    )
     paginator = Paginator(ordered_ids, max(1, int(per_page)))
     page = paginator.get_page(page_number)
-    page_ids = list(page.object_list)
-    rows = _build_rows(page_ids, result_by_id, segments_per_page)
+    page_keys = list(page.object_list)
+    rows = _build_rows(
+        page_keys,
+        result_by_id,
+        segments_per_page,
+        filters=scope_filters,
+        timezone_name=timezone_name,
+        using=using,
+    )
     return rows, page, len(ordered_ids)
 
 
@@ -626,11 +807,11 @@ def run_web_vector_search(
 
     Order (single source of truth): mode allowlist → cheap query
     validation → invalid-scope-filter REJECTION (never widened to an
-    unscoped search) → the same valid Recording scope as keyword search →
-    the mode's service (which owns EXACTLY one source health sweep, one
-    integrity traversal and at most one localhost embedding request; this
-    layer adds NO sweep, NO embedding and NO fallback) → the shared
-    sorting/pagination/bounded card fetch.
+    unscoped search) → the same valid Library item scope as keyword
+    search → the mode's service (which owns EXACTLY one source health
+    sweep, one integrity traversal and at most one localhost embedding
+    request; this layer adds NO sweep, NO embedding and NO fallback) →
+    the shared sorting/pagination/bounded item hydration.
 
     Every service failure (source index, embedding schema/generation,
     endpoint/timeout/http, concurrent change, generic) is ONE stable
@@ -676,8 +857,14 @@ def run_web_vector_search(
             message=INVALID_VECTOR_FILTERS_MESSAGE, sort=sort, mode=mode,
         )
 
-    # 4. The same valid Recording scope the keyword engine uses.
-    scope = search_scope_queryset(filters, timezone_name)
+    # 4. The same valid Library item scope the keyword engine uses: the
+    #    exact one-column item_key UNION of the normal Library identity.
+    #    Handed to the service UNCOMPILED — ``hybrid_search`` owns the
+    #    EXACTLY-ONE compilation through the shared
+    #    ``search_query.compile_item_scope`` and shares that immutable
+    #    value with both components; a second compilation here would
+    #    fork that contract.
+    item_scope = library_item_key_queryset(filters, timezone_name, using=using)
 
     # 5. Delegate: the service owns the one-sweep/one-embed contract.
     try:
@@ -686,7 +873,7 @@ def run_web_vector_search(
                 query,
                 limit=WEB_SCAN_LIMIT,
                 using=using,
-                scope=scope,
+                item_scope=item_scope,
                 config=config,
                 embedder=embedder,
             )
@@ -695,7 +882,7 @@ def run_web_vector_search(
                 query,
                 limit=WEB_SCAN_LIMIT,
                 using=using,
-                scope=scope,
+                item_scope=item_scope,
                 config=config,
                 embedder=embedder,
             )
@@ -712,7 +899,7 @@ def run_web_vector_search(
     result_by_id: dict[str, dict] = {}
     winner_ids: list[str] = []
     for result in results:
-        key = _norm_id(result["recording_id"])
+        key = _winner_key(result)
         result_by_id[key] = result
         winner_ids.append(key)
 
@@ -723,6 +910,11 @@ def run_web_vector_search(
         page_number=page_number,
         per_page=per_page,
         segments_per_page=segments_per_page,
+        # The filters are scope-valid here (invalid ones rejected above),
+        # so the revalidation applies exactly the scope the service ran on.
+        scope_filters=filters,
+        timezone_name=timezone_name,
+        using=using,
     )
 
     return SearchOutcome(

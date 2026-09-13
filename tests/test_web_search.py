@@ -32,7 +32,14 @@ from factories import (
     make_tag_assignment,
     make_transcribed_recording,
 )
-from workflow.query import ListFilters, list_filters
+from workflow.models import Section
+from workflow.query import (
+    LibraryItemCard,
+    ListFilters,
+    library_item_key_queryset,
+    list_filters,
+)
+from workflow.services.segmentation import save_segmented_version
 
 pytestmark = pytest.mark.django_db
 
@@ -110,23 +117,25 @@ def _apply_index_state(mode):
         raise AssertionError(mode)
 
 
-def _fail_recording_scope_compile(monkeypatch, sentinel):
-    """Only RECORDING-model SQL compilation (the scope subquery) fails
-    underneath — the gate's SearchDocument sweep stays intact."""
+def _fail_item_scope_compile(monkeypatch, sentinel):
+    """Only the LIBRARY-ITEM-scope UNION compilation (the one-column
+    ``item_key`` subquery) fails underneath — the gate's SearchDocument
+    sweep and every other query stay intact."""
     from django.db.models.sql.compiler import SQLCompiler
-
-    from workflow.models import Recording
 
     real_as_sql = SQLCompiler.as_sql
 
     def guarded(self, *args, **kwargs):
         query = self.query
-        # ONLY the un-sliced single-column-pk scope projection fails;
-        # the sweep's sliced full-row Recording batches pass through.
+        # ONLY the unsliced one-column item_key UNION fails; the union
+        # branches and every unrelated query pass through.
+        projection = tuple(getattr(query, "values_select", ())) + tuple(
+            getattr(query, "annotation_select", ())
+        )
         if (
-            getattr(query, "model", None) is Recording
-            and tuple(getattr(query, "values_select", ())) == ("pk",)
+            getattr(query, "combinator", None) == "union"
             and not query.is_sliced
+            and projection == ("item_key",)
         ):
             raise ValueError(sentinel)
         return real_as_sql(self, *args, **kwargs)
@@ -237,9 +246,11 @@ class TestStatesAndGate:
         assert "SECRETQUERY2" not in content
         assert "stable fixed message" in content
 
-    def test_scope_compiler_failure_is_a_sanitized_index_state(self, monkeypatch, client):
+    def test_item_scope_compiler_failure_is_a_sanitized_index_state(
+        self, monkeypatch, client
+    ):
         _healthy_corpus(("cboom-1", "budget review"))
-        _fail_recording_scope_compile(monkeypatch, "TOPSECRETPATH-canary-SELECT")
+        _fail_item_scope_compile(monkeypatch, "TOPSECRETPATH-canary-SELECT")
         content = _page(client, "/recordings/?q=CANARYQ&tag=Family")
         assert "TOPSECRETPATH" not in content  # underlying text never echoes
         assert "CANARYQ" not in content  # and the query is cleared too
@@ -277,20 +288,14 @@ class TestSorting:
     def test_relevance_never_becomes_a_database_order(self, monkeypatch, client):
         r_high, _r_mid, _r_low = self._corpus()
 
-        def forbidden_sort(*args, **kwargs):
-            raise AssertionError("relevance must not translate into DB ordering")
-
-        monkeypatch.setattr(
-            search_web, "_ordered_winner_ids_db", forbidden_sort, raising=False
-        )
-        real_apply_sort = search_web.apply_sort
+        real_apply_item_sort = search_web.apply_item_sort
 
         def guarded(qs, sort):
             if sort == "relevance":
-                raise AssertionError("apply_sort must never see relevance")
-            return real_apply_sort(qs, sort)
+                raise AssertionError("apply_item_sort must never see relevance")
+            return real_apply_item_sort(qs, sort)
 
-        monkeypatch.setattr(search_web, "apply_sort", guarded)
+        monkeypatch.setattr(search_web, "apply_item_sort", guarded)
         content = _page(client, "/recordings/?q=sablemark&sort=relevance")
         assert r_high.pk in content
 
@@ -330,6 +335,101 @@ class TestSorting:
         content = _page(client, "/recordings/?q=sablemark&sort=title_az")
         assert "Sorting applies to the returned most-relevant matches" in content
 
+    # -- Step 6.3 item-native sorts -----------------------------------------
+
+    def _item_corpus(self, sha_prefix):
+        """One split recording (Sections "Zeta topic"/"Alpha topic") plus
+        one unsplit recording titled "Mid recording"; every item matches
+        the query, so the winner set IS the Library item set."""
+        base = datetime(2026, 2, 10, 9, 0, tzinfo=TZ)
+        rec, transcript, _fixed = make_transcribed_recording(
+            [f"{sha_prefix} sablemark first", f"{sha_prefix} sablemark second"],
+            sha=f"{sha_prefix}-split",
+        )
+        from workflow.models import Recording
+
+        Recording.objects.filter(pk=rec.pk).update(recorded_at=base)
+        save_segmented_version(
+            rec.pk, transcript.pk, 0, 2, [1], ["Zeta topic", "Alpha topic"]
+        )
+        sections = list(
+            Section.objects.filter(
+                segmented_version__transcript=transcript
+            ).order_by("ordinal")
+        )
+        mid, m_transcript, m_section = make_transcribed_recording(
+            [f"{sha_prefix} sablemark middle"], sha=f"{sha_prefix}-mid"
+        )
+        Recording.objects.filter(pk=mid.pk).update(recorded_at=base + timedelta(days=1))
+        make_summary_version(mid, m_transcript, m_section, title="Mid recording")
+        si.rebuild_index()
+        return rec, mid, sections
+
+    def test_title_sorts_interleave_sections_with_recordings(self, client):
+        """Non-relevance sorts use the EXACT Library ITEM sort semantics:
+        a Section sorts by its OWN derived display title — interleaving
+        with Recording items — never parent-only grouping that keeps one
+        parent's Sections adjacent."""
+        rec, mid, sections = self._item_corpus("isort-title")
+        zeta, alpha = sections  # ordinal 1 is "Zeta topic", 2 is "Alpha topic"
+        az_order = [
+            f"{rec.pk}/sections/{alpha.pk}",
+            f"{mid.pk}",
+            f"{rec.pk}/sections/{zeta.pk}",
+        ]
+        za_order = [
+            f"{rec.pk}/sections/{zeta.pk}",
+            f"{mid.pk}",
+            f"{rec.pk}/sections/{alpha.pk}",
+        ]
+        content = _page(client, "/recordings/?q=sablemark&sort=title_az&view=table")
+        _positions(content, az_order)
+        content = _page(client, "/recordings/?q=sablemark&sort=title_za&view=table")
+        _positions(content, za_order)
+
+    def test_date_sorts_use_parent_effective_date_with_item_key_ties(self, client):
+        """newest/oldest order by the PARENT effective date (shared with
+        the Library) and a same-parent Section tie resolves through the
+        unique item_key tie-breaker — deterministic, never engine order."""
+        rec, mid, sections = self._item_corpus("isort-date")
+        # ``mid`` was recorded one day AFTER the split parent: newest
+        # starts with it, oldest ends with it; the two Sections of the
+        # older parent keep their shared item_key tie order.
+        tie = sorted([f"{rec.pk}/sections/{s.pk}" for s in sections])
+        newest = _page(client, "/recordings/?q=sablemark&sort=newest&view=table")
+        _positions(newest, [f"{mid.pk}", *tie])
+        oldest = _page(client, "/recordings/?q=sablemark&sort=oldest&view=table")
+        _positions(oldest, [*tie, f"{mid.pk}"])
+
+    def test_library_sorts_equal_the_normal_library_item_order(self):
+        """Oracle test: for every non-relevance sort the search winner
+        order EQUALS the normal Library's ``apply_item_sort`` order over
+        the same Library items under the same (empty) filters."""
+        from workflow.query import apply_item_sort, library_item_queryset
+
+        rec, mid, sections = self._item_corpus("isort-oracle")
+        winners = {
+            f"s:{s.pk}" for s in sections
+        } | {f"r:{search_web._norm_id(mid.pk)}"}
+        for sort in ("newest", "oldest", "title_az", "title_za"):
+            outcome = search_web.run_web_search(
+                raw_query="sablemark",
+                filters=ListFilters(sort=sort),
+                timezone_name="Europe/Helsinki",
+                page_number=1,
+                per_page=25,
+            )
+            assert outcome.state == search_web.STATE_OK
+            got = [search_web._item_key_for_card(row.card) for row in outcome.rows]
+            assert set(got) == winners, sort
+            ordered = apply_item_sort(
+                library_item_queryset(ListFilters(), "Europe/Helsinki"), sort
+            )
+            expected = [
+                row["item_key"] for row in ordered if row["item_key"] in winners
+            ]
+            assert got == expected, sort
+
 
 # ---------------------------------------------------------------------------
 # Filtering happens inside the candidate set (before limits and pagination)
@@ -359,12 +459,16 @@ class TestScopedSearch:
         assert f'href="/recordings/{b.pk}/"' in content
         assert f'href="/recordings/{outside.pk}/"' not in content
 
-    def test_engine_receives_a_recording_scope_queryset(self, monkeypatch, client):
+    def test_engine_receives_a_library_item_scope_union(self, monkeypatch, client):
+        """Step 6.3: the web hands the keyword engine the normal Library's
+        item scope — the unsliced one-column ``item_key`` UNION from
+        ``library_item_key_queryset`` — and never the Recording scope."""
         self._corpus()
         seen = {}
         real = search_web.search_query.search_recordings
 
         def spy(query, **kwargs):
+            seen["item_scope"] = kwargs.get("item_scope", "MISSING")
             seen["scope"] = kwargs.get("scope", "MISSING")
             return real(query, **kwargs)
 
@@ -372,20 +476,32 @@ class TestScopedSearch:
         _page(client, "/recordings/?q=sablemark&tag=Project")
         from django.db.models import QuerySet
 
-        from workflow.models import Recording
+        from workflow.services.search_query import _item_projection_names
 
-        assert isinstance(seen["scope"], QuerySet)
-        assert seen["scope"].model is Recording
+        assert seen["scope"] == "MISSING"  # never both eligibility mechanisms
+        scope = seen["item_scope"]
+        assert isinstance(scope, QuerySet)
+        query = scope.query
+        assert not query.is_sliced
+        assert query.combinator == "union"
+        # The exact shape the shared compile_item_scope contract expects.
+        assert _item_projection_names(query) == ("item_key",)
+        assert all(
+            _item_projection_names(branch) == ("item_key",)
+            for branch in query.combined_queries
+        )
 
     def test_empty_scope_answers_zero_results_not_an_error(self, monkeypatch, client):
-        """A scope that provably contains NO recording is a valid zero
+        """A scope that provably contains NO Library item is a valid zero
         answer — never a 500, an index-error state or an invalid query."""
-        from workflow.models import Recording
+        from workflow.query import library_item_key_queryset as real_keys
 
         _healthy_corpus(("escope-1", "budget review"))
-        monkeypatch.setattr(
-            search_web, "search_scope_queryset", lambda f, tz: Recording.objects.none()
-        )
+
+        def _empty_keys(filters, timezone_name, using="default"):
+            return real_keys(filters, timezone_name, using=using).none()
+
+        monkeypatch.setattr(search_web, "library_item_key_queryset", _empty_keys)
         content = _page(client, "/recordings/?q=budget&tag=Project")
         assert "No search results for" in content
         assert "recording-card" not in content
@@ -395,16 +511,42 @@ class TestScopedSearch:
     def test_compiler_empty_scope_answers_zero_results_not_an_error(
         self, monkeypatch, client
     ):
-        """``filter(pk__in=[])`` emptiness is proven only by the compiler
-        (EmptyResultSet): the web layer must still render the ordinary
-        zero-results state, not any error state."""
-        from workflow.models import Recording
+        """Branch-level ``filter(pk__in=[])`` emptiness is proven only by
+        the compiler (``EmptyResultSet`` from the UNION's ``as_sql``): the
+        web layer must still render the ordinary zero-results state, not
+        any error state."""
+        from django.db.models import CharField, F, Value
+        from django.db.models.functions import Concat
+
+        from workflow.models import Recording, Section
 
         _healthy_corpus(("escope-2", "budget review"))
+
+        def _empty_branch_union(*_args, **_kwargs):
+            recording_keys = (
+                Recording.objects.filter(pk__in=[])
+                .annotate(
+                    item_key=Concat(
+                        Value("r:"), F("pk"), output_field=CharField()
+                    )
+                )
+                .order_by()
+                .values("item_key")
+            )
+            section_keys = (
+                Section.objects.filter(pk__in=[])
+                .annotate(
+                    item_key=Concat(
+                        Value("s:"), F("pk"), output_field=CharField()
+                    )
+                )
+                .order_by()
+                .values("item_key")
+            )
+            return recording_keys.union(section_keys)
+
         monkeypatch.setattr(
-            search_web,
-            "search_scope_queryset",
-            lambda f, tz: Recording.objects.filter(pk__in=[]),
+            search_web, "library_item_key_queryset", _empty_branch_union
         )
         content = _page(client, "/recordings/?q=budget&tag=Project")
         assert "No search results for" in content
@@ -419,11 +561,94 @@ class TestScopedSearch:
         # Every match (in AND out of the broken filter) is present.
         assert f'href="/recordings/{outside.pk}/"' in content
 
+    def test_invalid_scope_filter_fallback_uses_unfiltered_item_scope(
+        self, monkeypatch
+    ):
+        """Step 6.3: the invalid-filter keyword fallback runs over the
+        UNFILTERED canonical Library ITEM scope — still item mode, never
+        the historical whole-Recording engine mode — and the page-window
+        item revalidation runs under the SAME unfiltered identity, so a
+        filter the policy just ignored never drops a rendered item."""
+        from workflow.services.search_query import _item_projection_names
+
+        _tag, _in, outside = self._corpus()
+
+        seen = {}
+        real = search_web.search_query.search_recordings
+
+        def spy(query, **kwargs):
+            seen["scope"] = kwargs.get("scope", "MISSING")
+            seen["item_scope"] = kwargs.get("item_scope", "MISSING")
+            return real(query, **kwargs)
+
+        monkeypatch.setattr(search_web.search_query, "search_recordings", spy)
+
+        hydrations = {}
+        real_items = search_web.library_items_by_keys
+
+        def spy_items(item_keys, item_filters, timezone_name, *, using="default"):
+            hydrations["keys"] = list(item_keys)
+            hydrations["filters"] = item_filters
+            return real_items(item_keys, item_filters, timezone_name, using=using)
+
+        monkeypatch.setattr(search_web, "library_items_by_keys", spy_items)
+
+        filters = list_filters(
+            QueryDict("tag=Project&from=notadate&sort=relevance"),
+            "Europe/Helsinki",
+            allow_relevance=True,
+        )
+        assert not filters.scope_valid  # the date error poisons the scope
+        assert filters.tags == ["project"]  # the valid tag was parsed anyway
+
+        outcome = search_web.run_web_search(
+            raw_query="sablemark",
+            filters=filters,
+            timezone_name="Europe/Helsinki",
+            page_number=1,
+            per_page=25,
+        )
+        assert outcome.state == search_web.STATE_OK
+        assert outcome.unscoped_filters is True
+
+        # Item mode, never the Recording scope and never a scope-less
+        # whole-Recording engine call.
+        assert seen["scope"] == "MISSING"
+        scope = seen["item_scope"]
+        assert scope.query.combinator == "union"
+        assert not scope.query.is_sliced
+        assert _item_projection_names(scope.query) == ("item_key",)
+
+        # UNFILTERED: exactly the canonical unfiltered item identity —
+        # the ignored tag/date change neither the SQL nor its parameters.
+        plain_sql, plain_params = (
+            library_item_key_queryset(ListFilters(), "Europe/Helsinki")
+            .query.get_compiler("default")
+            .as_sql()
+        )
+        sql, params = scope.query.get_compiler("default").as_sql()
+        assert (sql, params) == (plain_sql, plain_params)
+
+        # Every match survives (the ignored tag hides nothing), and the
+        # revalidation ran under the UNFILTERED canonical scope.
+        assert outcome.result_count == 4
+        assert len(outcome.rows) == 4
+        assert hydrations["keys"]
+        assert hydrations["filters"] is not filters
+        assert not hydrations["filters"].tags
+        assert hydrations["filters"].date_from is None
+        assert str(outside.pk) in {
+            search_web._norm_id(row.card.recording_id) for row in outcome.rows
+        }
+
     def test_more_matches_note_is_scope_honest(self, monkeypatch, client):
         self._corpus()
         monkeypatch.setattr(search_web, "WEB_SCAN_LIMIT", 2)
         content = _page(client, "/recordings/?q=sablemark")
-        assert "2 more recordings also matched these filters (showing the 2 most relevant)" in content
+        # Item mode ALWAYS counts library items — even though this
+        # unsplit corpus matches only Recording-backed items.
+        assert "2 more library items also matched these filters (showing the 2 " in content
+        assert "more recordings also matched" not in content
         assert "truncated" not in content.lower()
 
     def test_dedup_one_row_per_recording(self, client):
@@ -435,6 +660,446 @@ class TestScopedSearch:
         content = _page(client, "/recordings/?q=sablemark")
         assert content.count(f'href="/recordings/{rec.pk}/"') == 1
         assert "1 search result" in content
+
+
+# ---------------------------------------------------------------------------
+# Step 6.3 item hydration: the page window hydrates through
+# library_items_by_keys into LibraryItemCards (order, provenance and the
+# page bound preserved; stale engine keys never resurrect an item)
+# ---------------------------------------------------------------------------
+
+
+class TestItemHydration:
+    def _split(self, sha, texts, splits, titles):
+        """One transcribed recording split into len(splits)+1 topic
+        Sections plus a healthy index."""
+        rec, transcript, _fixed = make_transcribed_recording(texts, sha=sha)
+        save_segmented_version(
+            rec.pk,
+            transcript.pk,
+            0,
+            len(texts),
+            list(splits),
+            list(titles),
+        )
+        si.rebuild_index()
+        sections = list(
+            Section.objects.filter(segmented_version__transcript=transcript).order_by(
+                "ordinal"
+            )
+        )
+        return rec, transcript, sections
+
+    def _run(self, query):
+        return search_web.run_web_search(
+            raw_query=query,
+            filters=ListFilters(sort="relevance"),
+            timezone_name="Europe/Helsinki",
+            page_number=1,
+            per_page=25,
+        )
+
+    def test_split_recording_answers_section_item_cards(self, client):
+        """A valid active split layout yields the Section items as
+        LibraryItemCards with the parent Recording suppressed — never
+        parent + section duplicates."""
+        rec, _transcript, sections = self._split(
+            "itemh-split-1",
+            [
+                "sablemark opening discussion",
+                "plain second segment",
+                "sablemark closing discussion",
+                "plain fourth segment",
+            ],
+            [2],
+            ["Opening topic", "Closing topic"],
+        )
+        outcome = self._run("sablemark")
+        assert outcome.state == search_web.STATE_OK
+        assert outcome.result_count == 2
+        assert len(outcome.rows) == 2
+        assert all(isinstance(row.card, LibraryItemCard) for row in outcome.rows)
+        assert all(row.card.is_section for row in outcome.rows)
+        assert {row.card.section_id for row in outcome.rows} == {
+            section.pk for section in sections
+        }
+        # The parent Recording answers NO recording-backed item row.
+        assert not any(
+            not row.card.is_section and row.card.recording_id == rec.pk
+            for row in outcome.rows
+        )
+        # Two distinct Section winners of ONE parent stay two distinct
+        # rows (never collapsed by the parent id).
+        content = _page(client, "/recordings/?q=sablemark")
+        assert "2 search results" in content
+        assert "Opening topic" in content and "Closing topic" in content
+
+    def test_rows_follow_the_engine_winner_order(self, monkeypatch):
+        """Hydration reorders back to the engine's exact winner order
+        (the returned cards are never left in hydration order)."""
+        _rec, _transcript, sections = self._split(
+            "itemh-order-1",
+            [
+                "sablemark opening discussion",
+                "plain second segment",
+                "sablemark closing discussion",
+                "plain fourth segment",
+            ],
+            [2],
+            ["Opening topic", "Closing topic"],
+        )
+        captured = {}
+        real = search_web.search_query.search_recordings
+
+        def spy(query, **kwargs):
+            payload = real(query, **kwargs)
+            captured["keys"] = [result["item_key"] for result in payload["results"]]
+            return payload
+
+        monkeypatch.setattr(search_web.search_query, "search_recordings", spy)
+        outcome = self._run("sablemark")
+        assert captured["keys"]  # sanity: both section items matched
+        assert [
+            search_web._item_key_for_card(row.card) for row in outcome.rows
+        ] == captured["keys"]
+        assert {search_web._item_key_for_card(row.card) for row in outcome.rows} == {
+            f"s:{section.pk}" for section in sections
+        }
+
+    def test_segment_provenance_survives_item_hydration(self):
+        """Each Section winner keeps its OWN validated segment link:
+        the batch validation is keyed by the winner key and joins the
+        transcript to the item's parent Recording."""
+        _rec, _transcript, _sections = self._split(
+            "itemh-link-1",
+            [
+                "sablemark opening discussion",
+                "plain second segment",
+                "sablemark closing discussion",
+                "plain fourth segment",
+            ],
+            [2],
+            ["Opening topic", "Closing topic"],
+        )
+        outcome = self._run("sablemark")
+        assert len(outcome.rows) == 2
+        anchors = {row.link_anchor for row in outcome.rows}
+        assert anchors == {"segment-0", "segment-2"}
+        assert all(row.link_page == 1 for row in outcome.rows)
+        assert all(row.match_source == "segment" for row in outcome.rows)
+
+    def test_recording_backed_rows_are_item_cards_too(self):
+        """An unsplit corpus hydrates its Recording items through the
+        SAME item contract: every row carries a LibraryItemCard."""
+        _healthy_corpus(("itemh-plain-1", "sablemark plain recording"))
+        outcome = self._run("sablemark")
+        assert outcome.result_count == 1
+        assert len(outcome.rows) == 1
+        card = outcome.rows[0].card
+        assert isinstance(card, LibraryItemCard)
+        assert not card.is_section
+
+    def test_only_the_page_window_is_hydrated(self, monkeypatch, client, tmp_path):
+        """The hydration input is the bounded page window, never the
+        whole winner set."""
+        _healthy_corpus(
+            *[(f"itemh-bound-{index}", f"sablemark recording {index}") for index in range(4)]
+        )
+        _tiny_pages(monkeypatch, tmp_path, per_page=2)
+        calls = []
+        real_items = search_web.library_items_by_keys
+
+        def spy(item_keys, *args, **kwargs):
+            calls.append(list(item_keys))
+            return real_items(item_keys, *args, **kwargs)
+
+        monkeypatch.setattr(search_web, "library_items_by_keys", spy)
+        content = _page(client, "/recordings/?q=sablemark")
+        assert "4 search results" in content
+        assert len(calls) == 1
+        assert len(calls[0]) == 2
+
+    def test_more_note_counts_library_items_for_a_split_population(
+        self, monkeypatch, client
+    ):
+        """The rendered beyond-window note follows the engine's explicit
+        ``item_mode`` marker: the web search runs in item mode, so a
+        bounded scan window counts LIBRARY ITEMS — never "recordings",
+        whatever rows the page shows."""
+        self._split(
+            "itemh-note-1",
+            [
+                "sablemark opening discussion",
+                "plain second segment",
+                "sablemark closing discussion",
+                "plain fourth segment",
+            ],
+            [2],
+            ["Opening topic", "Closing topic"],
+        )
+        _healthy_corpus(("itemh-note-plain", "sablemark plain recording"))
+        monkeypatch.setattr(search_web, "WEB_SCAN_LIMIT", 2)
+        content = _page(client, "/recordings/?q=sablemark")
+        # THREE matched items (two Sections + the plain Recording) with
+        # a window of two: the honest note names library items.
+        assert (
+            "1 more library items also matched these filters "
+            "(showing the 2 most relevant)." in content
+        )
+        assert "more recordings also matched" not in content
+
+    def _stale_payload(self, monkeypatch, forge):
+        """The real engine runs, then every winner key is FORGED to the
+        simulate-a-stale-engine-truth shape ``forge`` produces."""
+        real = search_web.search_query.search_recordings
+
+        def spy(query, **kwargs):
+            payload = real(query, **kwargs)
+            for result in payload["results"]:
+                result["item_key"] = forge(result)
+            return payload
+
+        monkeypatch.setattr(search_web.search_query, "search_recordings", spy)
+
+    def test_replaced_parent_key_never_resurrects_a_row(self, monkeypatch, client):
+        """A stale engine key naming the parent Recording of a valid
+        active split layout is dropped by the revalidation — the
+        replacement can never be bypassed into a fake parent row."""
+        rec, _transcript, sections = self._split(
+            "itemh-stale-1",
+            ["sablemark opening discussion", "plain second segment"],
+            [1],
+            ["Opening topic", "Closing topic"],
+        )
+        assert len(sections) == 2
+        outcome = self._run("sablemark")
+        assert outcome.result_count == 1  # sanity: the section item matched
+        self._stale_payload(
+            monkeypatch, lambda result: f"r:{result['recording_id']}"
+        )
+        outcome = self._run("sablemark")
+        assert outcome.state == search_web.STATE_OK
+        assert outcome.rows == []
+        response = client.get("/recordings/?q=sablemark")
+        assert response.status_code == 200
+
+    def test_unknown_section_key_never_resurrects_a_row(self, monkeypatch):
+        """A key naming a Section that is not a valid active-layout topic
+        item hydrates nothing — never a fabricated card."""
+        self._split(
+            "itemh-stale-2",
+            ["sablemark opening discussion", "plain second segment"],
+            [1],
+            ["Opening topic", "Closing topic"],
+        )
+        self._stale_payload(monkeypatch, lambda result: "s:999999")
+        outcome = self._run("sablemark")
+        assert outcome.state == search_web.STATE_OK
+        assert outcome.rows == []
+
+
+# ---------------------------------------------------------------------------
+# Step 6.3 item-native search presentation: Section rows mirror the
+# normal Library card/table semantics (section-detail links, derived
+# title, item duration, section-scoped tags/languages, parent/range
+# context) with the snippet/provenance on top and NO library-return
+# token; Recording rows keep their historical search rendering
+# ---------------------------------------------------------------------------
+
+
+def _search_cards(content):
+    """The rendered result cards, in page order (cards view only)."""
+    return re.findall(r'<li class="recording-card.*?</li>', content, re.S)
+
+
+def _search_table_rows(content):
+    """The rendered result rows, in page order (table view only)."""
+    body = content[content.find("<tbody>") :]
+    return re.findall(r"<tr class=.*?</tr>", body, re.S)
+
+
+class TestItemPresentation:
+    """One split recording (two Section items) plus one unsplit
+    Recording item; every item matches ``sablemark``.
+
+    Section layout: ``[0,2)`` "Draft opener" carrying a DEFAULT-variant
+    Summary titled "Summarised opener" (the derived display title that
+    supersedes the stored one) and a Section-scoped "Split Child" tag;
+    ``[2,4)`` "Plain closer" whose DEFAULT variant FAILED. The parent
+    holds an active whole-recording Summary "Parent umbrella" and a
+    recording-scoped "Parent Only" tag the Section items must not show.
+    """
+
+    @staticmethod
+    def _corpus():
+        from workflow.models import SummaryVariantState, TagAssignment
+
+        rec, transcript, fixed = make_transcribed_recording(
+            [
+                "sablemark opening discussion",
+                "plain second segment",
+                "sablemark closing discussion",
+                "plain fourth segment",
+            ],
+            sha="ispres-split",
+        )
+        save_segmented_version(
+            rec.pk, transcript.pk, 0, 4, [2], ["Draft opener", "Plain closer"]
+        )
+        first, second = Section.objects.filter(
+            segmented_version__transcript=transcript
+        ).order_by("ordinal")
+        make_summary_version(rec, transcript, fixed, title="Parent umbrella")
+        make_summary_version(
+            rec,
+            transcript,
+            first,
+            title="Summarised opener",
+            overview="Opening overview.",
+        )
+        SummaryVariantState.objects.create(
+            transcript=transcript,
+            section=second,
+            output_language="en",
+            status="failed",
+        )
+        parent_tag = make_tag("Parent Only")
+        make_tag_assignment(rec, parent_tag, origin="manual")
+        child_tag = make_tag("Split Child")
+        TagAssignment.objects.create(
+            recording=rec, section=first, tag=child_tag, origin="manual", is_active=True
+        )
+        plain, plain_transcript, plain_section = make_transcribed_recording(
+            ["sablemark plain recording"], sha="ispres-plain"
+        )
+        make_summary_version(
+            plain, plain_transcript, plain_section, title="Plain recording"
+        )
+        standalone = make_tag("Standalone")
+        make_tag_assignment(plain, standalone, origin="manual")
+        si.rebuild_index()
+        return rec, first, second, plain
+
+    @staticmethod
+    def _card_for(cards, needle):
+        matches = [card for card in cards if needle in card]
+        assert len(matches) == 1, (needle, len(matches))
+        return matches[0]
+
+    def test_card_view_section_rows_match_the_library(self, client):
+        rec, first, second, plain = self._corpus()
+        content = _page(client, "/recordings/?q=sablemark&view=cards")
+        cards = _search_cards(content)
+        assert len(cards) == 3  # two Section items + one Recording item
+
+        first_card = self._card_for(cards, f"/sections/{first.pk}/")
+        # Section title links to the SECTION DETAIL with the derived
+        # (default-Summary) title, never the stored temporary title.
+        assert f'href="/recordings/{rec.pk}/sections/{first.pk}/"' in first_card
+        assert ">Summarised opener</a>" in first_card
+        assert "Draft opener" not in first_card
+        # Item duration (the two-segment span), NOT the parent's 60s.
+        assert "2s" in first_card and "1m 00s" not in first_card
+        # Section-scoped tags only: the parent's recording tag is absent.
+        assert "Split Child" in first_card
+        assert "Parent Only" not in first_card
+        # Section summary language.
+        assert 'class="lang-code"' in first_card and "en" in first_card
+        # Parent/range context exactly like the normal Library card.
+        assert (
+            f'Topic · segments 0–1 · in <a href="/recordings/{rec.pk}/">'
+            "Parent umbrella</a>" in first_card
+        )
+        # Snippet and validated segment provenance survive.
+        assert "<mark>sablemark</mark>" in first_card
+        assert f'href="/recordings/{rec.pk}/transcript/?page=1#segment-0"' in first_card
+        assert "needs-attention" not in first_card
+
+        second_card = self._card_for(cards, f"/sections/{second.pk}/")
+        assert f'href="/recordings/{rec.pk}/sections/{second.pk}/"' in second_card
+        assert ">Plain closer</a>" in second_card  # stored title without a Summary
+        # The FAILED section-scoped default-variant state surfaces as
+        # item-level needs-attention (the sibling and the parent do not
+        # carry it) — the same row class the normal Library renders.
+        assert "needs-attention" in second_card
+        assert "Topic · segments 2–3" in second_card
+
+        plain_card = self._card_for(cards, f'href="/recordings/{plain.pk}/"')
+        assert f'href="/recordings/{plain.pk}/"' in plain_card
+        assert "Plain recording" in plain_card
+        assert "1m 00s" in plain_card  # the recording's own duration
+        assert "Standalone" in plain_card  # recording-scope tags unchanged
+        assert "section-context" not in plain_card  # recording rows unchanged
+        assert content.count("section-context") == 2  # exactly the two Section rows
+
+    def test_table_view_section_rows_match_the_library(self, client):
+        rec, first, second, plain = self._corpus()
+        content = _page(client, "/recordings/?q=sablemark&view=table")
+        rows = _search_table_rows(content)
+        assert len(rows) == 3
+
+        first_row = self._card_for(rows, f"/sections/{first.pk}/")
+        assert f'href="/recordings/{rec.pk}/sections/{first.pk}/"' in first_row
+        assert ">Summarised opener</a>" in first_row
+        assert "2s" in first_row and "1m 00s" not in first_row
+        assert "Split Child" in first_row
+        assert "Parent Only" not in first_row
+        assert "en" in first_row
+        assert "<mark>sablemark</mark>" in first_row
+
+        second_row = self._card_for(rows, f"/sections/{second.pk}/")
+        assert 'class="needs-attention"' in second_row
+
+        plain_row = self._card_for(rows, f'href="/recordings/{plain.pk}/"')
+        assert f'href="/recordings/{plain.pk}/"' in plain_row
+        assert "1m 00s" in plain_row
+
+    def test_card_and_table_carry_the_same_item_links(self, client):
+        """Card/table parity: both views lead every result unit with the
+        exact same item link (Section → section-detail, Recording →
+        recording-detail) in the same order."""
+        rec, first, second, plain = self._corpus()
+        links = re.compile(r'href="(/recordings/[^"#?]*)"')
+        cards_view = _page(client, "/recordings/?q=sablemark&view=cards")
+        table_view = _page(client, "/recordings/?q=sablemark&view=table")
+
+        def item_links(units):
+            found = []
+            for unit in units:
+                for href in links.findall(unit):
+                    # The title link is the unit's FIRST non-provenance
+                    # recording link in BOTH branches.
+                    if not href.endswith("/transcript/"):
+                        found.append(href)
+                        break
+            return found
+
+        per_card = item_links(_search_cards(cards_view))
+        per_row = item_links(_search_table_rows(table_view))
+        assert per_card == per_row
+        assert set(per_card) == {
+            f"/recordings/{rec.pk}/sections/{first.pk}/",
+            f"/recordings/{rec.pk}/sections/{second.pk}/",
+            f"/recordings/{plain.pk}/",
+        }
+
+    def test_no_library_return_token_on_search_links(self, client):
+        """Search results NEVER carry a lib_return token — but the same
+        Section's normal-Library link does."""
+        rec, first, _second, _plain = self._corpus()
+        library = _page(client, "/recordings/")
+        assert f"/recordings/{rec.pk}/sections/{first.pk}/?lib_return=" in library
+        for view in ("cards", "table"):
+            content = _page(client, f"/recordings/?q=sablemark&view={view}")
+            assert "lib_return" not in content
+
+    def test_unscoped_fallback_carries_no_token(self, client):
+        """The unscoped-fallback render (invalid filter) also carries no
+        token on any link."""
+        self._corpus()
+        content = _page(client, "/recordings/?q=sablemark&from=notadate")
+        assert "Search ran without the invalid filters" in content
+        assert "lib_return" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -713,6 +1378,43 @@ class TestSearchWebUnits:
             search_web.NOTE_MORE_EXACT.format(more=3, scan=2)
         ]
 
+    def test_build_notes_unit_follows_the_item_mode_flag(self):
+        base = {"truncated": False, "more_recordings_matched": 3}
+        # EXPLICIT item mode: both the exact and the unknown
+        # beyond-window notes count LIBRARY ITEMS.
+        exact = search_web.build_notes(
+            dict(base, item_mode=True), "relevance", scan_limit=2
+        )
+        assert exact == [
+            search_web.NOTE_MORE_EXACT_ITEMS.format(more=3, scan=2)
+        ]
+        assert "library items" in exact[0]
+        unknown = search_web.build_notes(
+            dict(base, more_recordings_matched=None, item_mode=True),
+            "relevance",
+        )
+        assert unknown == [search_web.NOTE_MORE_UNKNOWN_ITEMS]
+        assert "library items" in unknown[0]
+        # The non-relevance sort-window note still appends after the
+        # item-unit note.
+        sorted_notes = search_web.build_notes(
+            dict(base, item_mode=True), "newest", scan_limit=2
+        )
+        assert sorted_notes == [
+            search_web.NOTE_MORE_EXACT_ITEMS.format(more=3, scan=2),
+            search_web.NOTE_SORT_WINDOW,
+        ]
+        # A payload WITHOUT the marker — a legacy/hand-built recording
+        # payload (item engines always carry it) — keeps the historical
+        # Recording wordings verbatim.
+        for payload in (dict(base, item_mode=False), base):
+            assert search_web.build_notes(payload, "relevance", scan_limit=2) == [
+                search_web.NOTE_MORE_EXACT.format(more=3, scan=2)
+            ]
+            assert search_web.build_notes(
+                dict(payload, more_recordings_matched=None), "relevance"
+            ) == [search_web.NOTE_MORE_UNKNOWN]
+
     def test_norm_id_accepts_storage_and_canonical_forms(self):
         import uuid
 
@@ -815,7 +1517,7 @@ class TestPrivacyLogging:
     ):
         self._quiet(caplog)
         _healthy_corpus(("plg-3", "budget"))
-        _fail_recording_scope_compile(
+        _fail_item_scope_compile(
             monkeypatch, "ROOTCAUSESENTINEL /Users/secret/leak.path"
         )
         content = _page(client, "/recordings/?q=" + self.CANARY + "&tag=Family")

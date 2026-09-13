@@ -24,6 +24,7 @@ import unicodedata
 from dataclasses import dataclass, field as dc_field
 from datetime import date, datetime, time, timedelta
 from typing import Any
+from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from django.db.models import (
@@ -70,9 +71,10 @@ from workflow.services.library_metadata import (
     TITLE_PLACEHOLDER,
     display_title_from_recording,
 )
+from workflow.services.search_query import MAX_RESULT_LIMIT
 from workflow.services.segmentation import (
-    MAX_TOPIC_SECTIONS,
-    MAX_TOPIC_TITLE_LENGTH,
+    canonical_active_section_ids,
+    canonical_hidden_recording_ids,
 )
 from workflow.sqlite_unicode import COLLATION_NAME, ensure_registered, folded_title_expression
 
@@ -398,156 +400,31 @@ class RecordingCard:
 # expansion.
 #
 # The "which recordings are replaced by their topic Sections" and "which
-# Section pks are valid topic items" questions are answered by ONE shared
-# parameterized read-only SQL predicate over aliases ``v``
-# (``workflow_segmentedversion``) and ``t`` (``workflow_transcript``,
-# ``t.id = v.transcript_id``). Both UNION branches embed the predicate as a
-# RawSQL subquery, so:
+# Section pks are valid topic items" questions are answered by the ONE
+# shared parameterized read-only SQL predicate OWNED by
+# :mod:`workflow.services.segmentation` (``canonical_layout_predicate`` —
+# the SQL twin of the shared Python canonical validator, including the
+# Step 6.2a temporary-title SHAPE rule). The Step 6.3 search index reuses
+# the SAME predicate; it is never forked here. Both UNION branches embed
+# it as a RawSQL subquery, so:
 #
 # - the number of active layouts/sections NEVER materializes in Python and
 #   NEVER grows SQL parameters (the subquery carries exactly two fixed
 #   parameters: MAX_TOPIC_SECTIONS and MAX_TOPIC_TITLE_LENGTH);
 # - count/order/pagination stay exact database-side (the branches are the
 #   same UNION; only the hidden/valid set has become a SQL predicate);
-# - every canonical fail-closed rule is expressed in SQL: ACTIVE
-#   version + ACTIVE transcript; transcript segment ordinals contiguous
-#   0..count-1 with a nonempty transcript; the version range inside
-#   ``[0, count)``; topic Section count in ``2..MAX_TOPIC_SECTIONS``;
-#   cross-parent Sections rejected; section ordinals exactly ``1..N``
-#   (no gaps, via the per-section lower-ordinal count); every range
-#   nonempty and the sections an exhaustive contiguous partition of
-#   ``[v.start, v.end)``; and every title a nonblank (the FULL Python
-#   3.12 ``str.strip()`` whitespace set, not just ASCII space),
-#   length-bounded, control-free exact string.
+# - every canonical fail-closed rule lives in the ONE segmentation
+#   predicate (see its section comment for the full rule list).
 #
-# ``_HIDDEN_RECORDINGS_SQL`` selects the parent Recording pks (the
-# recording branch excludes them); ``_VALID_SECTIONS_SQL`` selects the
+# ``_HIDDEN_RECORDINGS_SQL_RAW`` selects the parent Recording pks (the
+# recording branch excludes them); ``_VALID_SECTIONS_SQL_RAW`` selects the
 # valid topic Section pks (the Section branch filters on them). Both reuse
-# the SAME predicate text and parameter list.
+# the SAME segmentation predicate text and parameter list.
 # ---------------------------------------------------------------------------
 
 
-# Python 3.12 ``str.strip()`` whitespace codepoints, EXCLUDING the C0
-# controls (0x00-0x1F) and DEL (0x7F), which are rejected separately by
-# the control-char check below. SQLite's one-argument ``TRIM`` removes
-# only ASCII space, so the blank-title check passes the FULL Python
-# whitespace set to the two-argument form to stay exactly in parity with
-# ``str.strip()`` (e.g. an all-ideographic-space title must fail closed).
-_STRIP_WS_CODEPOINTS = (
-    0x20, 0x85, 0xA0, 0x1680,
-    *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
-)
-
-
-def _strip_ws_expr() -> str:
-    """A fixed SQL expression concatenating every ``str.strip()``
-    whitespace codepoint via ``CHAR()`` — the two-arg TRIM trim set."""
-    return " || ".join(f"CHAR({cp})" for cp in _STRIP_WS_CODEPOINTS)
-
-
-def _canonical_layout_predicate() -> tuple[str, list]:
-    """The shared validated-layout SQL predicate and its fixed parameters.
-
-    Valid for aliases ``v`` = ``workflow_segmentedversion`` and ``t`` =
-    ``workflow_transcript`` with ``t.id = v.transcript_id``. Mirrors
-    ``workflow.services.segmentation.canonical_layout_from_rows``
-    fail-closed semantics (see the module comment above). Read-only and
-    parameterized: the only bound values are ``MAX_TOPIC_SECTIONS`` and
-    ``MAX_TOPIC_TITLE_LENGTH``.
-    """
-    params = [MAX_TOPIC_SECTIONS, MAX_TOPIC_TITLE_LENGTH]
-    return (
-        f"""
-        v.is_active = 1
-        AND t.is_active = 1
-        AND (
-            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
-        ) > 0
-        AND (
-            SELECT MIN(ts.ordinal) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
-        ) = 0
-        AND (
-            SELECT MAX(ts.ordinal) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
-        ) + 1 = (
-            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
-        )
-        AND v.start_segment_ordinal >= 0
-        AND v.end_segment_ordinal_exclusive > v.start_segment_ordinal
-        AND v.end_segment_ordinal_exclusive <= (
-            SELECT COUNT(*) FROM workflow_transcriptsegment ts WHERE ts.transcript_id = t.id
-        )
-        AND (
-            SELECT COUNT(*) FROM workflow_section s WHERE s.segmented_version_id = v.id
-        ) BETWEEN 2 AND %s
-        AND NOT EXISTS (
-            SELECT 1 FROM workflow_section bad
-            WHERE bad.segmented_version_id = v.id
-            AND (
-                bad.transcript_id != v.transcript_id
-                OR bad.ordinal < 1
-                OR bad.start_segment_ordinal IS NULL
-                OR bad.end_segment_ordinal_exclusive IS NULL
-                OR bad.end_segment_ordinal_exclusive <= bad.start_segment_ordinal
-                OR TRIM(bad.title, {_strip_ws_expr()}) = ''
-                OR LENGTH(bad.title) > %s
-                OR INSTR(bad.title, CHAR(0)) > 0
-                OR bad.title GLOB '*[' || CHAR(1) || '-' || CHAR(31) || CHAR(127) || ']*'
-                -- A True temporary flag requires the EXACT canonical
-                -- shape 'Segment <ordinal> of <12 ASCII digits>' (titles
-                -- are immutable creation-time metadata; the digits are
-                -- never compared to the current timestamp on reads). An
-                -- arbitrary custom title on a temporary row is corrupt
-                -- stored state and fails closed.
-                OR (
-                    bad.title_is_temporary = 1
-                    AND NOT (
-                        bad.title GLOB 'Segment ' || bad.ordinal || ' of '
-                        || '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
-                    )
-                )
-                OR (
-                    SELECT COUNT(*) FROM workflow_section lo
-                    WHERE lo.segmented_version_id = v.id AND lo.ordinal < bad.ordinal
-                ) != bad.ordinal - 1
-                OR bad.start_segment_ordinal != COALESCE(
-                    (
-                        SELECT MAX(hi.end_segment_ordinal_exclusive) FROM workflow_section hi
-                        WHERE hi.segmented_version_id = v.id AND hi.ordinal < bad.ordinal
-                    ),
-                    v.start_segment_ordinal
-                )
-            )
-        )
-        AND (
-            SELECT MAX(s.end_segment_ordinal_exclusive) FROM workflow_section s
-            WHERE s.segmented_version_id = v.id
-        ) = v.end_segment_ordinal_exclusive
-        """,
-        params,
-    )
-
-
-_CANONICAL_PREDICATE_SQL, _CANONICAL_PREDICATE_PARAMS = _canonical_layout_predicate()
-
-# Recording pks replaced by their valid topic Sections in the Library
-# overview (the recording branch excludes these).
-_HIDDEN_RECORDINGS_SQL = (
-    "SELECT t.recording_id FROM workflow_segmentedversion v "
-    "JOIN workflow_transcript t ON t.id = v.transcript_id "
-    "WHERE " + _CANONICAL_PREDICATE_SQL
-)
-
-# Section pks that are canonical topic items of an ACTIVE layout of an
-# ACTIVE transcript (the Section branch filters on these).
-_VALID_SECTIONS_SQL = (
-    "SELECT s.id FROM workflow_section s "
-    "JOIN workflow_segmentedversion v ON v.id = s.segmented_version_id "
-    "JOIN workflow_transcript t ON t.id = v.transcript_id "
-    "WHERE " + _CANONICAL_PREDICATE_SQL
-)
-
-_HIDDEN_RECORDINGS_SQL_RAW = RawSQL(_HIDDEN_RECORDINGS_SQL, list(_CANONICAL_PREDICATE_PARAMS))
-_VALID_SECTIONS_SQL_RAW = RawSQL(_VALID_SECTIONS_SQL, list(_CANONICAL_PREDICATE_PARAMS))
+_HIDDEN_RECORDINGS_SQL_RAW = RawSQL(*canonical_hidden_recording_ids())
+_VALID_SECTIONS_SQL_RAW = RawSQL(*canonical_active_section_ids())
 
 
 # The one shared column list of the Library item UNION (identical names and
@@ -600,7 +477,9 @@ def _route_unverified_expression():
     )
 
 
-def _recording_item_columns(filters: ListFilters, timezone_name: str, *, using: str = "default"):
+def _recording_item_columns(
+    filters: ListFilters, timezone_name: str, *, using: str = "default", item_keys=None
+):
     """The recording branch of the Library item UNION.
 
     Every current Recording EXCEPT those replaced by active valid topic
@@ -609,36 +488,38 @@ def _recording_item_columns(filters: ListFilters, timezone_name: str, *, using: 
     growing ``IN (... )`` parameter list). Applies the EXISTING
     recording-scope filter predicates (:func:`filter_only` — recording
     tags/summary semantics unchanged) BEFORE projecting the shared union
-    columns.
+    columns. ``item_keys`` (optional, bounded caller-provided list)
+    restricts the branch to the projected ``item_key`` identity BEFORE
+    the union — Django forbids ``filter()`` after ``union()``, so the
+    bounded IN predicate must live inside each branch.
     """
     qs = Recording.objects.using(using).annotate(effective_at=effective_at_annotation())
     qs = filter_only(qs, filters, timezone_name)
     qs = qs.exclude(pk__in=_HIDDEN_RECORDINGS_SQL_RAW)
     display_title = _display_title_expression()
-    return (
-        qs.annotate(
-            default_output_language=_default_output_language_subquery(),
-            display_title=display_title,
-            title_fold=_fold_expression(display_title),
-            has_route_unverified=Exists(
-                RoutingDecision.objects.filter(
-                    recording=OuterRef("pk"), is_active=True, routing_verified=False
-                )
-            ),
-            item_kind=Value("recording", output_field=CharField(max_length=16)),
-            item_key=Concat(Value("r:"), F("pk"), output_field=CharField()),
-            recording_id=F("pk"),
-            section_id=Value(None, output_field=CharField(max_length=36)),
-            range_start=Value(None, output_field=IntegerField()),
-            range_end=Value(None, output_field=IntegerField()),
-            # Recording items retain the recording's OWN duration: it is a
-            # real ``Recording`` field, so ``.values(*_ITEM_COLUMNS)``
-            # projects it directly (never an annotation of the same name,
-            # which Django forbids).
-        )
-        .order_by()
-        .values(*_ITEM_COLUMNS)
+    annotated = qs.annotate(
+        default_output_language=_default_output_language_subquery(),
+        display_title=display_title,
+        title_fold=_fold_expression(display_title),
+        has_route_unverified=Exists(
+            RoutingDecision.objects.filter(
+                recording=OuterRef("pk"), is_active=True, routing_verified=False
+            )
+        ),
+        item_kind=Value("recording", output_field=CharField(max_length=16)),
+        item_key=Concat(Value("r:"), F("pk"), output_field=CharField()),
+        recording_id=F("pk"),
+        section_id=Value(None, output_field=CharField(max_length=36)),
+        range_start=Value(None, output_field=IntegerField()),
+        range_end=Value(None, output_field=IntegerField()),
+        # Recording items retain the recording's OWN duration: it is a
+        # real ``Recording`` field, so ``.values(*_ITEM_COLUMNS)``
+        # projects it directly (never an annotation of the same name,
+        # which Django forbids).
     )
+    if item_keys is not None:
+        annotated = annotated.filter(item_key__in=item_keys)
+    return annotated.order_by().values(*_ITEM_COLUMNS)
 
 
 def _section_default_language_expression() -> Subquery:
@@ -890,35 +771,41 @@ def section_duration_seconds(section, *, using: str = "default") -> float | None
     return duration
 
 
-def _section_item_columns(filters: ListFilters, timezone_name: str, *, using: str = "default"):
-    """The Section branch of the Library item UNION."""
+def _section_item_columns(
+    filters: ListFilters, timezone_name: str, *, using: str = "default", item_keys=None
+):
+    """The Section branch of the Library item UNION.
+
+    ``item_keys`` (optional, bounded caller-provided list) restricts the
+    branch to the projected ``item_key`` identity BEFORE the union (the
+    same per-branch bounded IN predicate as the recording branch).
+    """
     qs = _section_base_queryset(using=using)
     qs = _section_filter_only(qs, filters, timezone_name)
     section_title = Coalesce(_section_display_title_expression(), Value(TITLE_PLACEHOLDER))
-    return (
-        qs.annotate(
-            item_kind=Value("section", output_field=CharField(max_length=16)),
-            item_key=Concat(Value("s:"), F("pk"), output_field=CharField()),
-            recording_id=F("transcript__recording_id"),
-            section_id=F("pk"),
-            display_title=section_title,
-            title_fold=_fold_expression(section_title),
-            processing_status=F("transcript__recording__processing_status"),
-            summary_status=Coalesce(
-                "section_default_summary_state", Value(SummaryState.MISSING)
-            ),
-            audio_status=F("transcript__recording__audio_status"),
-            retranscription_failed=F("transcript__recording__retranscription_failed"),
-            resummarization_failed=F("transcript__recording__resummarization_failed"),
-            has_route_unverified=_route_unverified_expression(),
-            recorded_at=F("transcript__recording__recorded_at"),
-            range_start=F("start_segment_ordinal"),
-            range_end=F("end_segment_ordinal_exclusive"),
-            duration_seconds=_section_duration_expression(),
-        )
-        .order_by()
-        .values(*_ITEM_COLUMNS)
+    annotated = qs.annotate(
+        item_kind=Value("section", output_field=CharField(max_length=16)),
+        item_key=Concat(Value("s:"), F("pk"), output_field=CharField()),
+        recording_id=F("transcript__recording_id"),
+        section_id=F("pk"),
+        display_title=section_title,
+        title_fold=_fold_expression(section_title),
+        processing_status=F("transcript__recording__processing_status"),
+        summary_status=Coalesce(
+            "section_default_summary_state", Value(SummaryState.MISSING)
+        ),
+        audio_status=F("transcript__recording__audio_status"),
+        retranscription_failed=F("transcript__recording__retranscription_failed"),
+        resummarization_failed=F("transcript__recording__resummarization_failed"),
+        has_route_unverified=_route_unverified_expression(),
+        recorded_at=F("transcript__recording__recorded_at"),
+        range_start=F("start_segment_ordinal"),
+        range_end=F("end_segment_ordinal_exclusive"),
+        duration_seconds=_section_duration_expression(),
     )
+    if item_keys is not None:
+        annotated = annotated.filter(item_key__in=item_keys)
+    return annotated.order_by().values(*_ITEM_COLUMNS)
 
 
 def library_item_queryset(
@@ -926,6 +813,7 @@ def library_item_queryset(
     timezone_name: str,
     *,
     using: str = "default",
+    item_keys=None,
 ) -> QuerySet:
     """The read-only Library item projection (Step 6.2).
 
@@ -939,9 +827,79 @@ def library_item_queryset(
     SQL parameters. Callers order with :func:`apply_item_sort` and
     paginate with a ``Paginator``, then hydrate each page with
     :func:`hydrate_library_items`.
+
+    ``item_keys`` (Step 6.3, optional bounded list) additionally
+    restricts BOTH branches to the projected ``item_key`` identity with
+    one bounded IN predicate PER branch (applied inside the branches —
+    Django forbids ``filter()`` after ``union()``); the canonical
+    replacement and filter semantics are untouched, so restricting can
+    only REMOVE normal Library items, never add or alter one.
     """
-    recording_qs = _recording_item_columns(filters, timezone_name, using=using)
-    section_qs = _section_item_columns(filters, timezone_name, using=using)
+    recording_qs = _recording_item_columns(
+        filters, timezone_name, using=using, item_keys=item_keys
+    )
+    section_qs = _section_item_columns(
+        filters, timezone_name, using=using, item_keys=item_keys
+    )
+    return recording_qs.union(section_qs)
+
+
+def library_item_key_queryset(
+    filters: ListFilters,
+    timezone_name: str,
+    *,
+    using: str = "default",
+    item_keys=None,
+) -> QuerySet:
+    """The unsliced, unordered one-column ``item_key`` UNION of the normal
+    Library items (Step 6.2).
+
+    This is the shared database-side identity set behind the projection:
+    the EXACT per-branch ``ListFilters`` and the canonical parent-
+    replacement semantics (a valid active split layout hides its recording
+    and yields its topic Sections; crop-only/malformed/historical layouts
+    never hide it) are applied with the SAME branch helpers as
+    :func:`library_item_queryset` — ``filter_only`` + the ``_HIDDEN_RECORDINGS_SQL_RAW``
+    exclusion on the recording branch and ``_section_base_queryset`` +
+    ``_section_filter_only`` on the Section branch — so the key set can
+    never diverge from the projected rows.
+
+    Only the unique ``item_key`` column is projected (no presentation
+    subqueries), the branches are unsliced and unordered, and the result is
+    a database UNION: never a Python expansion of all recordings, never a
+    Python id set. The canonical-layout state stays a bounded two-parameter
+    RawSQL subquery shared by both branches (the layout/section counts
+    never grow the SQL parameters). Honors ``using`` for the target
+    database. Callers count it directly (``.count()``) or collect the keys;
+    :func:`library_item_count` is the count entry point.
+
+    ``item_keys`` (Step 6.3, optional bounded list) additionally restricts
+    BOTH branches to the given ``item_key`` identity with one bounded IN
+    predicate per branch (inside the branches: Django forbids
+    ``filter()`` after ``union()``), so the restricted key set is always a
+    subset of the unrestricted normal Library identity set.
+    """
+    recording_qs = Recording.objects.using(using).annotate(
+        effective_at=effective_at_annotation()
+    )
+    recording_qs = filter_only(recording_qs, filters, timezone_name)
+    recording_qs = recording_qs.exclude(pk__in=_HIDDEN_RECORDINGS_SQL_RAW)
+    recording_qs = recording_qs.annotate(
+        item_key=Concat(Value("r:"), F("pk"), output_field=CharField())
+    )
+    if item_keys is not None:
+        recording_qs = recording_qs.filter(item_key__in=item_keys)
+    recording_qs = recording_qs.order_by().values("item_key")
+
+    section_qs = _section_base_queryset(using=using)
+    section_qs = _section_filter_only(section_qs, filters, timezone_name)
+    section_qs = section_qs.annotate(
+        item_key=Concat(Value("s:"), F("pk"), output_field=CharField())
+    )
+    if item_keys is not None:
+        section_qs = section_qs.filter(item_key__in=item_keys)
+    section_qs = section_qs.order_by().values("item_key")
+
     return recording_qs.union(section_qs)
 
 
@@ -953,26 +911,13 @@ def library_item_count(
 ) -> int:
     """Database-side item count for the Library paginator.
 
-    The full projection carries presentation subqueries (title chain,
-    summary state) that are irrelevant to a COUNT; this dedicated query
-    projects ONLY the unique ``item_key`` per branch so the count is
-    computed over a minimal UNION (same filters, same branches, same
-    semantics — never a Python expansion, never a Python id set).
+    Counts the shared ``item_key`` identity UNION
+    (:func:`library_item_key_queryset`), which projects ONLY the unique key
+    per branch so the count is computed over a minimal UNION (same filters,
+    same branches, same semantics — never a Python expansion, never a
+    Python id set).
     """
-    recording_qs = Recording.objects.using(using).annotate(effective_at=effective_at_annotation())
-    recording_qs = filter_only(recording_qs, filters, timezone_name)
-    recording_qs = recording_qs.exclude(pk__in=_HIDDEN_RECORDINGS_SQL_RAW)
-    recording_qs = recording_qs.annotate(
-        item_key=Concat(Value("r:"), F("pk"), output_field=CharField())
-    ).order_by().values("item_key")
-
-    section_qs = _section_base_queryset(using=using)
-    section_qs = _section_filter_only(section_qs, filters, timezone_name)
-    section_qs = section_qs.annotate(
-        item_key=Concat(Value("s:"), F("pk"), output_field=CharField())
-    ).order_by().values("item_key")
-
-    return recording_qs.union(section_qs).count()
+    return library_item_key_queryset(filters, timezone_name, using=using).count()
 
 
 def apply_item_sort(queryset, sort: str):
@@ -1266,6 +1211,135 @@ class LibraryItemCard:
     @property
     def section_variant_state(self) -> SummaryVariantState | None:
         return self._section_variant_state
+
+
+# ---------------------------------------------------------------------------
+# Bounded search-result item hydration (Step 6.3)
+#
+# The search engines return winners identified by the Library ``item_key``
+# (``r:<recording pk>`` / ``s:<section pk>``). ``library_items_by_keys`` is
+# the ONE read-only entry point that turns such keys back into
+# :class:`LibraryItemCard` adapters. Engine keys are trusted to come FROM
+# the engine but are never trusted to still be CURRENT: every key is
+# revalidated through the EXACT normal-Library semantics — the shared
+# ``library_item_key_queryset`` identity UNION (per-branch ``ListFilters``
+# plus the canonical parent-replacement rule) — so a stale engine result
+# can never resurrect a deleted item, an item a valid active split layout
+# has since replaced, a superseded-layout Section or an item the current
+# filters exclude. Nothing is fabricated and no unbounded per-key work
+# happens: malformed keys are skipped and two bounded reads — each a
+# per-branch IN predicate, never a post-union filter (Django forbids
+# filter() after union()) — plus the existing batched hydration answer
+# the whole request.
+# ---------------------------------------------------------------------------
+
+# Hard input cap: the engine's search result cap (imported, never copied).
+# One call carries at most the full winner set.
+LIBRARY_ITEM_KEY_LIMIT = MAX_RESULT_LIMIT
+
+
+def _canonical_item_key(item_key) -> str | None:
+    """Canonicalize ONE requested item key, or ``None`` when malformed.
+
+    Only the two shapes the Library UNION derives are honoured:
+    ``r:<Recording pk>`` and ``s:<Section pk>``. Recording pks are
+    canonicalized through ``uuid.UUID`` (the same normalization the
+    search web layer applies), Section pks must be positive ASCII
+    decimals; the canonical form is exactly what the UNION projects, so
+    equivalent spellings resolve to the same identity and anything the
+    UNION could never emit is rejected here — never passed to the
+    database.
+    """
+    if not isinstance(item_key, str):
+        return None
+    prefix, separator, remainder = item_key.partition(":")
+    if not separator:
+        return None
+    if prefix == "r":
+        try:
+            return f"r:{UUID(remainder)}"
+        except ValueError:
+            return None
+    if prefix == "s":
+        if not remainder.isascii() or not remainder.isdigit():
+            return None
+        value = int(remainder)
+        if value <= 0:
+            return None
+        return f"s:{value}"
+    return None
+
+
+def library_items_by_keys(
+    item_keys,
+    filters: ListFilters,
+    timezone_name: str,
+    *,
+    using: str = "default",
+) -> list[LibraryItemCard]:
+    """Hydrate bounded search-result item keys into Library item cards.
+
+    Strictly read-only (SELECTs only) and fully bounded:
+
+    - input: an ordered sequence of at most :data:`LIBRARY_ITEM_KEY_LIMIT`
+      engine ``item_key`` strings; a larger sequence (or a bare
+      ``str``/``bytes``) is a caller contract violation raising a fixed
+      ``ValueError`` BEFORE any query;
+    - revalidation: the canonicalized, de-duplicated keys (first
+      occurrence wins, malformed keys skipped, ZERO queries for an empty
+      or all-malformed request) are checked against the EXACT normal
+      Library identity set via :func:`library_item_key_queryset` with the
+      same per-branch ``ListFilters`` and canonical parent-replacement
+      semantics — the key list lands as one bounded IN predicate inside
+      EACH branch (at most the cap parameters per branch). Keys that no
+      longer name a normal Library item (vanished, replaced by a split
+      layout, superseded/historical layout, filtered out) are silently
+      skipped, never fabricated;
+    - fetch: the surviving keys drive ONE full-projection
+      :func:`library_item_queryset` read (same bounded per-branch IN
+      predicate); rows are re-ordered to the REQUESTED key order and
+      hydrated by the existing batched :func:`hydrate_library_items`
+      contract (constant query count, no N+1). A row vanishing between
+      the two reads is skipped with its key.
+
+    The result is one card per requested key that is still a normal
+    Library item, in requested key order.
+    """
+    if item_keys is None or isinstance(item_keys, (str, bytes)):
+        raise ValueError("item_keys must be a sequence of Library item key strings")
+    requested = list(item_keys)
+    if len(requested) > LIBRARY_ITEM_KEY_LIMIT:
+        raise ValueError(
+            f"item_keys must contain at most {LIBRARY_ITEM_KEY_LIMIT} keys"
+        )
+
+    order: list[str] = []
+    seen: set[str] = set()
+    for key in requested:
+        canonical = _canonical_item_key(key)
+        if canonical is None or canonical in seen:
+            continue
+        seen.add(canonical)
+        order.append(canonical)
+    if not order:
+        return []
+
+    survivors = set(
+        library_item_key_queryset(
+            filters, timezone_name, using=using, item_keys=order
+        ).values_list("item_key", flat=True)
+    )
+    if not survivors:
+        return []
+
+    rows_by_key = {
+        row["item_key"]: row
+        for row in library_item_queryset(
+            filters, timezone_name, using=using, item_keys=sorted(survivors)
+        )
+    }
+    rows = [rows_by_key[key] for key in order if key in rows_by_key]
+    return hydrate_library_items(rows, using=using)
 
 
 def month_label_for(dt) -> str:

@@ -15,8 +15,11 @@ Proves the Step 6.1 save contract on the CURRENT schema:
   atomic rollback on a mid-transaction failure;
 - retranscription naturally creates no segmented version and copies
   nothing;
-- no search/embedding sync callbacks, no summaries/tags copied, the
-  fixed ordinal-0 Section is never touched.
+- a REAL change schedules exactly ONE post-commit search sync for the
+  parent Recording (Step 6.3) — scheduling happens INSIDE the save
+  transaction, the no-op schedules nothing, and embedding sync is never
+  invoked directly; no summaries/tags copied, the fixed ordinal-0
+  Section is never touched.
 """
 
 from __future__ import annotations
@@ -700,29 +703,44 @@ class TestAtomicityAndSideEffects:
                 save(recording.pk, transcript.pk, 0, 4, [2], ["A", "B"])
             assert SegmentedVersion.objects.count() == 0
 
-    def test_no_search_or_embedding_sync_callback(self, monkeypatch):
+    def test_real_change_schedules_one_search_sync_noop_none(self, monkeypatch):
+        """Step 6.3: a REAL layout change schedules exactly ONE
+        parent-recording search sync INSIDE the save transaction (the
+        post-commit callback contract belongs to search_sync); a ZERO-DML
+        no-op schedules nothing; embedding sync is never invoked
+        directly by segmentation."""
+        from django.db import connection, transaction
+
         recording, transcript, _ = make_transcript(6)
 
-        def no_sync(*args, **kwargs):
-            raise AssertionError("search sync must not be scheduled")
+        calls: list[tuple] = []
+
+        def capture(ids, *args, **kwargs):
+            calls.append((list(ids), connection.in_atomic_block))
+            # The real function registers the post-commit callback; the
+            # save transaction owns that contract (tested in 5A.3).
+            transaction.on_commit(lambda: None)
+
+        def no_embedding_sync(*args, **kwargs):
+            raise AssertionError("segmentation must not call embedding sync")
 
         monkeypatch.setattr(
-            "workflow.services.search_sync.schedule_recording_sync", no_sync
+            "workflow.services.search_sync.schedule_recording_sync", capture
         )
         monkeypatch.setattr(
-            "workflow.services.embedding_sync.sync_recording_embeddings", no_sync
+            "workflow.services.embedding_sync.sync_recording_embeddings",
+            no_embedding_sync,
         )
-
-        def no_on_commit(*args, **kwargs):
-            raise AssertionError("no post-commit callback may be registered")
-
-        monkeypatch.setattr("django.db.transaction.on_commit", no_on_commit)
 
         result = save(recording.pk, transcript.pk, 0, 6, [3], ["A", "B"])
         assert result.created is True
-        # No-op save also fires no callback.
+        # Exactly one schedule for the parent Recording, inside atomic.
+        assert calls == [([recording.pk], True)]
+
+        # A ZERO-DML no-op save fires no callback.
         again = save(recording.pk, transcript.pk, 0, 6, [3], ["A", "B"])
         assert again.created is False
+        assert calls == [([recording.pk], True)]
 
     def test_no_summaries_or_tags_copied(self):
         recording, transcript, _ = make_transcript(6)

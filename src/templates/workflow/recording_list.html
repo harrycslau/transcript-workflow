@@ -115,12 +115,24 @@
               <tr class="{% if row.card.needs_attention %}needs-attention{% endif %}">
                 <td data-label="Date &amp; time">{{ row.card.effective_at_label }} {{ row.card.effective_at|local_time }}</td>
                 <td data-label="Title">
-                  <a class="col-title" href="{% url 'recording-detail' row.card.recording.pk %}">{{ row.card.title }}</a>
+                  {% if row.card.is_section %}
+                    <a class="col-title" href="{% url 'section-detail' row.card.recording.pk row.card.section_id %}">{{ row.card.title }}</a>
+                  {% else %}
+                    <a class="col-title" href="{% url 'recording-detail' row.card.recording.pk %}">{{ row.card.title }}</a>
+                  {% endif %}
                   {% if row.snippet_text %}<div class="search-snippet">{% include "workflow/_search_snippet.html" %}</div>{% endif %}
                 </td>
-                <td data-label="Duration">{{ row.card.recording.duration_seconds|duration }}</td>
+                <td data-label="Duration">{{ row.card.duration_seconds|duration }}</td>
                 <td data-label="Tags">{% for assignment in row.card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
-                <td data-label="Languages">{% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">—</span>{% endfor %}</td>
+                <td data-label="Languages">
+                  {% if row.card.available_languages %}
+                    {% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% endfor %}
+                  {% elif row.card.is_section and row.card.summary_status == 'failed' %}
+                    <span class="warn-text">summary failed</span>
+                  {% else %}
+                    <span class="muted">—</span>
+                  {% endif %}
+                </td>
                 <td data-label="Match">{% include "workflow/_search_provenance.html" %}{% if row.evidence_label %}<span class="evidence-chip">{{ row.evidence_label }}</span>{% endif %}</td>
               </tr>
             {% endfor %}
@@ -132,19 +144,36 @@
         {% for row in search.rows %}
           <li class="recording-card {% if row.card.needs_attention %}needs-attention{% endif %}">
             <div class="recording-card-header">
-              <div class="recording-card-title"><a href="{% url 'recording-detail' row.card.recording.pk %}">{{ row.card.title }}</a></div>
+              <div class="recording-card-title">
+                {% if row.card.is_section %}
+                  <a href="{% url 'section-detail' row.card.recording.pk row.card.section_id %}">{{ row.card.title }}</a>
+                {% else %}
+                  <a href="{% url 'recording-detail' row.card.recording.pk %}">{{ row.card.title }}</a>
+                {% endif %}
+              </div>
               <span class="status status-{{ row.card.recording.processing_status }}">{{ row.card.recording.get_processing_status_display }}</span>
             </div>
             <div class="recording-card-meta">
               <span>{{ row.card.effective_at_label }} {{ row.card.effective_at|local_time }}</span>
-              <span>{{ row.card.recording.duration_seconds|duration }}</span>
+              <span>{{ row.card.duration_seconds|duration }}</span>
               {% include "workflow/_search_provenance.html" %}
               {% if row.evidence_label %}<span class="evidence-chip">{{ row.evidence_label }}</span>{% endif %}
+              {% if row.card.is_section %}
+                <span class="section-context">Topic · {{ row.card.range_label }} · in <a href="{% url 'recording-detail' row.card.recording.pk %}">{{ row.card.parent_title }}</a></span>
+              {% endif %}
             </div>
             {% if row.snippet_text %}<p class="search-snippet">{% include "workflow/_search_snippet.html" %}</p>{% endif %}
             <div class="recording-card-footer">
               <div class="recording-card-tags">{% for assignment in row.card.active_tags %}<span class="tag">{{ assignment.tag.name }}</span>{% empty %}<span class="muted">no tags</span>{% endfor %}</div>
-              <div class="recording-card-langs" aria-label="Available summary languages">{% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% empty %}<span class="muted">no summaries</span>{% endfor %}</div>
+              <div class="recording-card-langs" aria-label="Available summary languages">
+                {% if row.card.available_languages %}
+                  {% for lang in row.card.available_languages %}<span class="lang-code">{{ lang }}</span>{% endfor %}
+                {% elif row.card.is_section and row.card.summary_status == 'failed' %}
+                  <span class="warn-text">summary failed</span>
+                {% else %}
+                  <span class="muted">no summaries</span>
+                {% endif %}
+              </div>
             </div>
           </li>
         {% endfor %}

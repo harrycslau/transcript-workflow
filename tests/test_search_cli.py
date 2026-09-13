@@ -69,7 +69,9 @@ class TestSearch:
         assert cli.main(["search", "needle", "--limit", "1"]) == 0
         out = capsys.readouterr().out
         assert "1 result(s)" in out
-        assert "more matching recording(s)" in out
+        # Step 6.3: the CLI always searches in item mode, so the note
+        # counts library items (unsplit corpus included).
+        assert "more matching library item(s)" in out
 
     def test_segment_provenance_label(self, capsys):
         _healthy()

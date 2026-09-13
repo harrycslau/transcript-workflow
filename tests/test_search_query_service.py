@@ -415,6 +415,66 @@ class TestRankingDedup:
 
 
 # ---------------------------------------------------------------------------
+# Additive Library item-identity fields (6.3 groundwork): every CURRENT
+# result is the whole Recording — r:<recording_id> / "recording" / None,
+# mirroring the workflow.query Library item-union key contract.
+# ---------------------------------------------------------------------------
+
+
+class TestResultItemIdentity:
+    def test_every_result_maps_to_recording_item_identity(self):
+        rec1 = _seed(["item identity probe alpha"], "ident1")[0]
+        rec2 = _seed(["item identity probe beta"], "ident2")[0]
+        si.rebuild_index()
+        payload = sq.search_recordings("identity")
+        assert payload["result_count"] == 2
+        for result in payload["results"]:
+            assert result["item_kind"] == "recording"
+            assert result["section_id"] is None
+            assert result["item_key"] == f"r:{result['recording_id']}"
+        assert {r["item_key"] for r in payload["results"]} == {
+            f"r:{rec1.pk}",
+            f"r:{rec2.pk}",
+        }
+
+    def test_summary_winner_result_keeps_recording_identity(self):
+        rec, transcript, section = _seed(["identity in a plain segment"], "ident-sum")
+        make_summary_version(
+            rec, transcript, section, title="Identity recap",
+            overview="plain body", output_language="en",
+            key_points=[], action_items=[], people=[], topics=[],
+        )
+        si.rebuild_index()
+        payload = sq.search_recordings("identity")
+        assert payload["result_count"] == 1
+        result = payload["results"][0]
+        assert result["match"]["source"] == "summary"  # winner is the Summary…
+        # …but the ITEM is still the whole Recording.
+        assert result["item_kind"] == "recording"
+        assert result["item_key"] == f"r:{result['recording_id']}"
+        assert result["section_id"] is None
+
+    def test_fields_are_additive_and_the_result_shape_is_exact(self):
+        _built(["identity shape stability probe"], "ident-shape")
+        result = sq.search_recordings("identity")["results"][0]
+        assert set(result) == {
+            "rank",
+            "recording_id",
+            "item_key",
+            "item_kind",
+            "section_id",
+            "title",
+            "match",
+            "snippet",
+        }
+        # The historical fields keep their historical values.
+        assert result["rank"] == 1
+        assert result["title"] != ""
+        assert result["match"]["source"] == "segment"
+        assert result["snippet"]["field"] == "body_text"
+
+
+# ---------------------------------------------------------------------------
 # Snippets (plain text + offsets)
 # ---------------------------------------------------------------------------
 
@@ -1112,3 +1172,684 @@ class TestScopeCompilationFailures:
         assert "SENTINEL" not in rendered
         assert error.__cause__ is None
         assert error.__suppress_context__ is True
+
+
+# ---------------------------------------------------------------------------
+# Library item-scope COMPILER (Step 6.3): compile_item_scope turns the
+# unsliced one-column item_key UNION of
+# workflow.query.library_item_key_queryset into an immutable
+# CompiledItemScope consumed by the engine (see the item-aware keyword
+# search section below).
+# ---------------------------------------------------------------------------
+
+
+def _item_key_union(**filter_kwargs):
+    from workflow.query import ListFilters, library_item_key_queryset
+
+    return library_item_key_queryset(
+        ListFilters(**filter_kwargs), "Europe/Helsinki"
+    )
+
+
+def _split(recording, transcript, splits, titles, start=0, end=None):
+    from workflow.models import Section
+    from workflow.services.segmentation import save_segmented_version
+
+    if end is None:
+        end = transcript.segments.count()
+    result = save_segmented_version(
+        recording.pk, transcript.pk, start, end, list(splits), list(titles)
+    )
+    return list(
+        Section.objects.filter(segmented_version_id=result.version_id).order_by(
+            "ordinal"
+        )
+    )
+
+
+def _compiled_keys(compiled):
+    """Execute the compiled subquery and return its sorted key list."""
+    with connection.cursor() as cursor:
+        cursor.execute(compiled.sql, list(compiled.params))
+        return sorted(row[0] for row in cursor.fetchall())
+
+
+class TestItemScopeCompilation:
+    def test_compiles_the_library_union_to_the_exact_key_set(self):
+        plain, _t, _s = make_transcribed_recording(["solo"], sha="itscope-plain")
+        split, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d", "e"], sha="itscope-split"
+        )
+        sections = _split(split, transcript, [2], ["Topic A", "Topic B"])
+
+        compiled = sq.compile_item_scope(_item_key_union(), using="default")
+
+        assert isinstance(compiled, sq.CompiledItemScope)
+        assert compiled.using == "default"
+        assert isinstance(compiled.params, tuple)
+        # The split parent is REPLACED by its two Sections in the item
+        # identity set — the compiled UNION answers exactly that set.
+        assert _compiled_keys(compiled) == sorted(
+            {f"r:{plain.pk}", f"s:{sections[0].pk}", f"s:{sections[1].pk}"}
+        )
+
+    def test_compiled_keys_match_the_live_union(self):
+        make_transcribed_recording(["alpha one"], sha="itscope-live-1")
+        rec, transcript, _fixed = make_transcribed_recording(
+            ["a", "b", "c", "d"], sha="itscope-live-2"
+        )
+        _split(rec, transcript, [1, 3], ["T1", "T2", "T3"])
+
+        union = _item_key_union()
+        compiled = sq.compile_item_scope(union, using="default")
+        live = sorted(row["item_key"] for row in union)  # the live UNION
+        assert _compiled_keys(compiled) == live
+
+    def test_bound_parameters_match_the_placeholders(self):
+        compiled = sq.compile_item_scope(_item_key_union(), using="default")
+        assert isinstance(compiled.params, tuple)
+        assert compiled.sql.count("%s") == len(compiled.params)
+        assert len(compiled.params) > 0  # the canonical RawSQL contract binds
+
+    def test_compilation_executes_no_queries(self):
+        """The QuerySet is captured, never executed: compile is SQL
+        generation only (no DB round trip, no reads)."""
+        with CaptureQueriesContext(connection) as ctx:
+            sq.compile_item_scope(_item_key_union(), using="default")
+        assert len(ctx.captured_queries) == 0
+
+    def test_compile_is_deterministic_and_stores_the_alias(self):
+        first = sq.compile_item_scope(_item_key_union(), using="default")
+        second = sq.compile_item_scope(_item_key_union(), using="default")
+        assert first.sql == second.sql
+        assert first.params == second.params
+        assert first.using == "default"
+
+    def test_value_is_immutable(self):
+        import dataclasses
+
+        compiled = sq.compile_item_scope(_item_key_union(), using="default")
+        for field, value in (("sql", "SELECT 1"), ("params", ()), ("using", "x")):
+            with pytest.raises(dataclasses.FrozenInstanceError):
+                setattr(compiled, field, value)
+
+    def test_value_is_distinct_from_the_recording_compiled_scope(self):
+        compiled = sq.compile_item_scope(_item_key_union(), using="default")
+        as_recording_scope = sq.CompiledScope(
+            sql=compiled.sql, params=compiled.params, using=compiled.using
+        )
+        assert compiled != as_recording_scope
+        assert not isinstance(compiled, sq.CompiledScope)
+
+    def test_empty_union_answers_the_shared_empty_subquery(self):
+        compiled = sq.compile_item_scope(_item_key_union().none(), using="default")
+        assert compiled.sql == sq._EMPTY_SCOPE_SQL
+        assert compiled.params == ()
+        assert compiled.using == "default"
+        assert _compiled_keys(compiled) == []
+
+
+class TestItemScopeValidation:
+    def test_rejects_non_queryset_inputs(self):
+        for bad in (None, "SELECT item_key FROM x", {"item_key": 1}, 7, ["r:1"]):
+            with pytest.raises(sq.SearchQueryInputError) as excinfo:
+                sq.compile_item_scope(bad, using="default")
+            assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+
+    def test_rejects_precompiled_values(self):
+        compiled = sq.compile_item_scope(_item_key_union(), using="default")
+        for bad in (compiled, sq.CompiledScope("SELECT 1", (), "default")):
+            with pytest.raises(sq.SearchQueryInputError) as excinfo:
+                sq.compile_item_scope(bad, using="default")
+            assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+
+    def test_rejects_plain_recordings_and_wrong_models(self):
+        from workflow.models import Recording, Transcript
+
+        for bad in (
+            Recording.objects.all(),
+            Transcript.objects.all(),
+            Recording.objects.values("pk"),  # not a union at all
+        ):
+            with pytest.raises(sq.SearchQueryInputError) as excinfo:
+                sq.compile_item_scope(bad, using="default")
+            assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+
+    def test_rejects_a_slice_of_the_union(self):
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.compile_item_scope(_item_key_union()[:2], using="default")
+        assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+
+    def test_rejects_a_union_without_an_item_key_column(self):
+        from workflow.models import Recording
+
+        wrong_name = Recording.objects.values("pk").union(
+            Recording.objects.values("pk")
+        )
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.compile_item_scope(wrong_name, using="default")
+        assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+
+    def test_rejects_a_multi_column_union(self):
+        from workflow.models import Recording
+
+        multi = Recording.objects.values("pk", "sha256").union(
+            Recording.objects.values("pk", "sha256")
+        )
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.compile_item_scope(multi, using="default")
+        assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+
+    def test_rejects_a_union_whose_second_branch_projects_another_column(self):
+        """The combined query mirrors the FIRST branch; only the per-branch
+        projection check catches a differently-named later branch."""
+        from django.db.models import CharField, Value
+        from django.db.models.functions import Concat
+
+        from workflow.models import Recording
+
+        keyed = (
+            Recording.objects.annotate(
+                item_key=Concat(Value("r:"), "pk", output_field=CharField())
+            )
+            .order_by()
+            .values("item_key")
+        )
+        mixed = keyed.union(Recording.objects.order_by().values("sha256"))
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.compile_item_scope(mixed, using="default")
+        assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+
+    def test_rejects_a_non_union_combinator(self):
+        from workflow.models import Recording
+
+        intersection = Recording.objects.values("pk").intersection(
+            Recording.objects.values("pk")
+        )
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.compile_item_scope(intersection, using="default")
+        assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+
+
+class TestItemScopeCompilationFailures:
+    """Same sanitization contract as the Recording scope: every non-empty
+    compilation failure is the fixed index failure — SQL, params, paths
+    and the underlying exception text never escape."""
+
+    def test_compiler_failure_is_sanitized(self, monkeypatch):
+        import traceback as traceback_module
+
+        from django.db.models.sql.compiler import SQLCompiler
+
+        sentinel = "SENTINEL-SECRET /Users/owner/private/path SELECT secret_sql"
+        real_as_sql = SQLCompiler.as_sql
+
+        def guarded(self, *args, **kwargs):
+            if getattr(self.query, "combinator", None) == "union":
+                raise ValueError(sentinel)
+            return real_as_sql(self, *args, **kwargs)
+
+        monkeypatch.setattr(SQLCompiler, "as_sql", guarded)
+        with pytest.raises(sq.SearchIndexError) as excinfo:
+            sq.compile_item_scope(_item_key_union(), using="default")
+        error = excinfo.value
+        assert str(error) == sq._QUERY_FAILED_ERROR
+        assert "SENTINEL" not in str(error)
+        rendered = "".join(
+            traceback_module.format_exception(type(error), error, error.__traceback__)
+        )
+        # The underlying failure text is gone: not in the message, not in
+        # any rendered frame, and no chained exception is shown.
+        assert "SENTINEL" not in rendered
+        assert error.__cause__ is None
+        assert error.__suppress_context__ is True
+
+    def test_unknown_alias_failure_is_sanitized(self):
+        """Compiling on an unconfigured alias is the same fixed index
+        failure — the alias never rides along in the message."""
+        with pytest.raises(sq.SearchIndexError) as excinfo:
+            sq.compile_item_scope(_item_key_union(), using="no-such-alias")
+        error = excinfo.value
+        assert str(error) == sq._QUERY_FAILED_ERROR
+        assert "no-such-alias" not in str(error)
+
+
+# ---------------------------------------------------------------------------
+# ITEM-AWARE keyword search (Step 6.3): search_recordings consumes the
+# compiled item scope. A valid active split layout yields EXACTLY the
+# active Section items with the parent Recording SUPPRESSED (never
+# parent + section duplicates); the parent metadata document, the fixed
+# whole-recording Summary and cropped-out Segments derive no item;
+# unsplit/crop-only/historical/malformed recordings fail closed to their
+# single Recording item. Partition, per-item bound, dedup and the counts
+# are item truths; ``more_recordings_matched`` is the SAME-VALUE alias
+# of ``more_items_matched``. Titles stay the parent Recording's display
+# title until the web slice.
+# ---------------------------------------------------------------------------
+
+
+def _item_search(query, filters=None, **kwargs):
+    """Engine call in item mode over the (optionally filtered) normal
+    Library item-key UNION, always through the compiled path."""
+    compiled = sq.compile_item_scope(_item_key_union(**(filters or {})), using="default")
+    return sq.search_recordings(query, compiled_item_scope=compiled, **kwargs)
+
+
+def _item_corpus(sha="itmode-split"):
+    """Split Recording (3 segments, crop [0,2) with one split ⇒ two
+    topic Sections, a section Summary per section, a whole-recording
+    Summary) plus one unsplit plain Recording. The third segment is
+    cropped out of the retained range.
+
+    Matches for the word ``keyword``: segment 0 (→ Section 1), segment
+    1 (→ Section 2), the cropped segment (→ no item), both section
+    Summaries, and the plain Recording's segment — EXACTLY three items.
+    """
+    rec, transcript, fixed = _seed(
+        ["split keyword one", "split keyword two", "cropped keyword three"],
+        sha=sha,
+    )
+    sections = _split(rec, transcript, [1], ["First topic", "Second topic"], end=2)
+    section_summaries = [
+        make_summary_version(
+            rec, transcript, section, title=f"{label} summary",
+            overview=f"keyword section {index}", output_language="en",
+            key_points=[], action_items=[], people=[], topics=[],
+        )
+        for index, (section, label) in enumerate(zip(sections, ["First", "Second"]))
+    ]
+    whole = make_summary_version(
+        rec, transcript, fixed, title="Whole recap",
+        overview="whole parent body", output_language="en",
+        key_points=[], action_items=[], people=[], topics=[],
+    )
+    plain, _pt, _ps = _seed(["plain keyword here"], f"{sha}-plain")
+    si.rebuild_index()
+    return rec, transcript, fixed, sections, section_summaries, whole, plain
+
+
+class TestItemAwareKeywordSearch:
+    def test_split_parent_is_replaced_by_its_section_items(self):
+        from workflow.models import SearchDocument
+
+        rec, _t, _f, sections, section_summaries, _w, plain = _item_corpus()
+        payload = _item_search("keyword")
+
+        by_key = {r["item_key"]: r for r in payload["results"]}
+        assert set(by_key) == {
+            f"s:{sections[0].pk}",
+            f"s:{sections[1].pk}",
+            f"r:{plain.pk}",
+        }
+        # The parent Recording is SUPPRESSED, never duplicated.
+        assert f"r:{rec.pk}" not in by_key
+        assert payload["result_count"] == 3
+        assert payload["truncated"] is False
+        assert payload["more_items_matched"] == 0
+        assert payload["more_recordings_matched"] == payload["more_items_matched"]
+        # Explicit item-mode flag: the matched unit IS a Library item.
+        assert payload["item_mode"] is True
+
+        first = by_key[f"s:{sections[0].pk}"]
+        assert first["item_kind"] == "section"
+        assert first["section_id"] == sections[0].pk
+        # recording_id stays the parent provenance on a section item.
+        assert first["recording_id"] == rec.pk
+        # The per-item winner is the Section's own Summary (doc-type
+        # priority inside the per-item bound).
+        assert first["match"]["source"] == "summary"
+        assert first["match"]["summary_id"] == section_summaries[0].pk
+        assert first["match"]["output_language"] == "en"
+        assert by_key[f"s:{sections[1].pk}"]["match"]["summary_id"] == section_summaries[1].pk
+        assert by_key[f"r:{plain.pk}"]["match"]["source"] == "segment"
+
+        # Titles stay the PARENT recording's Library display title
+        # (until the web slice renders section titles).
+        metadata_title = SearchDocument.objects.get(
+            document_key=f"recording:{rec.pk}"
+        ).title_text
+        assert first["title"] == metadata_title
+        assert first["title"] not in ("First topic", "First summary")
+        # Deterministic comparator: the plain segment-backed item ranks
+        # LAST (both Section items are summary-backed).
+        assert payload["results"][-1]["match"]["source"] == "segment"
+        assert payload["results"][-1]["item_key"] == f"r:{plain.pk}"
+
+    def test_parent_metadata_and_fixed_summary_are_excluded_under_split(self):
+        # The only "recap" carriers are the whole-recording Summary and
+        # the parent metadata document (its display title chain): both
+        # derive NO item under a canonical split.
+        rec, _t, _f, _s, _ss, whole, _p = _item_corpus("itmode-fixed")
+        item_payload = _item_search("recap")
+        assert item_payload["result_count"] == 0
+        assert item_payload["more_items_matched"] == 0
+
+        # Legacy recording mode still finds it (unchanged contract).
+        legacy = sq.search_recordings("recap")
+        assert legacy["result_count"] == 1
+        assert legacy["results"][0]["item_key"] == f"r:{rec.pk}"
+        assert legacy["results"][0]["match"]["source"] == "summary"
+        assert legacy["results"][0]["match"]["summary_id"] == whole.pk
+
+    def test_cropped_out_segment_is_excluded_under_split(self):
+        _item_corpus("itmode-crop")
+        assert _item_search("cropped")["result_count"] == 0
+        legacy = sq.search_recordings("cropped")
+        assert legacy["result_count"] == 1
+        assert legacy["results"][0]["match"]["source"] == "segment"
+
+    def test_unsplit_recording_yields_its_recording_item(self):
+        rec, transcript, fixed = _seed(["solo omega body"], "itmode-unsplit")
+        make_summary_version(
+            rec, transcript, fixed, title="Solo recap",
+            overview="omega summary body", output_language="en",
+            key_points=[], action_items=[], people=[], topics=[],
+        )
+        si.rebuild_index()
+        legacy = sq.search_recordings("omega")
+        item_payload = _item_search("omega")
+        # No split anywhere: every item is the Recording and the FULL
+        # payload is identical to recording mode apart from the simple
+        # item-mode marker the item engine adds (and the legacy payload
+        # never carries).
+        assert item_payload.pop("item_mode") is True
+        assert "item_mode" not in legacy
+        assert item_payload == legacy
+        assert legacy["result_count"] == 1
+        assert legacy["results"][0]["item_key"] == f"r:{rec.pk}"
+        assert legacy["results"][0]["item_kind"] == "recording"
+        assert legacy["results"][0]["section_id"] is None
+
+    def test_crop_only_layout_falls_back_to_recording_item(self):
+        rec, transcript, _fixed = _seed(
+            ["keep omega one", "keep omega two", "cut omega three"],
+            "itmode-croponly",
+        )
+        _split(rec, transcript, [], [], start=1, end=3)  # crop, zero topics
+        si.rebuild_index()
+        for query in ("keep", "cut"):
+            payload = _item_search(query)
+            assert payload["result_count"] == 1, query
+            # A crop-only layout is NOT a canonical split: even the
+            # cropped-out segment keeps the whole-Recording item.
+            assert payload["results"][0]["item_key"] == f"r:{rec.pk}"
+            assert payload["results"][0]["item_kind"] == "recording"
+
+    def test_historical_layout_falls_back_to_recording_item(self):
+        rec, transcript, _fixed = _seed(
+            ["old layout omega one", "old layout omega two"], "itmode-history"
+        )
+        sections = _split(rec, transcript, [1], ["Old A", "Old B"])
+        make_summary_version(
+            rec, transcript, sections[0], title="Old section recap",
+            overview="omega section body", output_language="en",
+            key_points=[], action_items=[], people=[], topics=[],
+        )
+        si.rebuild_index()
+        payload = _item_search("omega")
+        assert {r["item_key"] for r in payload["results"]} == {
+            f"s:{sections[0].pk}",
+            f"s:{sections[1].pk}",
+        }
+
+        # Supersede: the layout becomes history and the parent reappears.
+        _split(rec, transcript, [], [])
+        si.rebuild_index()
+        payload = _item_search("omega")
+        assert payload["result_count"] == 1
+        assert payload["results"][0]["item_key"] == f"r:{rec.pk}"
+        assert payload["results"][0]["item_kind"] == "recording"
+
+    def test_malformed_layout_fails_closed_to_recording_item(self):
+        from workflow.models import Section
+
+        rec, transcript, _fixed = _seed(
+            ["malformed omega one", "malformed omega two"], "itmode-malformed"
+        )
+        sections = _split(rec, transcript, [1], ["Alpha", "Beta"])
+        make_summary_version(
+            rec, transcript, sections[1], title="Beta recap",
+            overview="omega section body", output_language="en",
+            key_points=[], action_items=[], people=[], topics=[],
+        )
+        si.rebuild_index()
+        # Corrupt stored state: an arbitrary custom title on a row
+        # flagged temporary fails the canonical read (fail closed).
+        Section.objects.filter(pk=sections[0].pk).update(
+            title="Ad-hoc custom", title_is_temporary=True
+        )
+        payload = _item_search("omega")
+        # ONE whole-Recording item, never section items or duplicates —
+        # even while the stale section-summary document is still indexed.
+        assert payload["result_count"] == 1
+        assert payload["results"][0]["item_key"] == f"r:{rec.pk}"
+        assert payload["results"][0]["item_kind"] == "recording"
+        assert payload["results"][0]["section_id"] is None
+
+    def test_tag_filters_are_item_exact(self):
+        from workflow.models import TagAssignment
+
+        tag = make_tag("Work")
+        unsplit, ut, _uf = _seed(["quarterly delta unsplit"], "itmode-tag-u")
+        make_tag_assignment(unsplit, tag, origin="manual")
+        parent, pt, _pf = _seed(
+            ["quarterly delta split one", "quarterly delta split two"],
+            "itmode-tag-p",
+        )
+        left, right = _split(parent, pt, [1], ["Left", "Right"])
+        make_summary_version(
+            parent, pt, left, title="Left recap",
+            overview="left part body", output_language="en",
+            key_points=[], action_items=[], people=[], topics=[],
+        )
+        TagAssignment.objects.create(
+            recording=parent, tag=tag, section=left, origin="manual",
+            is_active=True, deactivated_by="",
+        )
+        si.rebuild_index()
+
+        unfiltered = _item_search("delta")
+        assert {r["item_key"] for r in unfiltered["results"]} == {
+            f"r:{unsplit.pk}",
+            f"s:{left.pk}",
+            f"s:{right.pk}",
+        }
+        # The tag filter is ITEM-exact: the tagged Section and the
+        # tagged unsplit Recording stay; the untagged sibling drops.
+        tagged = _item_search("delta", filters={"tags": ["work"]})
+        assert {r["item_key"] for r in tagged["results"]} == {
+            f"r:{unsplit.pk}",
+            f"s:{left.pk}",
+        }
+        # The tag NAME is indexed content: on the recording metadata
+        # (recording-scoped) and the Section Summary's aux (section-
+        # scoped) — it routes to the right ITEMS, never to the parent.
+        named = _item_search("work")
+        assert {r["item_key"] for r in named["results"]} == {
+            f"r:{unsplit.pk}",
+            f"s:{left.pk}",
+        }
+
+    def test_per_item_bound_is_per_item_not_per_recording(self):
+        rec, transcript, _fixed = _seed(
+            [f"kiss flood item {i} tail" for i in range(6)], "itmode-bound"
+        )
+        left, right = _split(rec, transcript, [3], ["Left", "Right"])
+        make_summary_version(
+            rec, transcript, left, title="Left recap",
+            overview="kiss kiss kiss recap", output_language="en",
+            key_points=[], action_items=[], people=[], topics=[],
+        )
+        si.rebuild_index()
+
+        legacy = sq.search_recordings("kiss", per_recording_candidates=1)
+        assert legacy["result_count"] == 1  # ONE Recording
+        assert legacy["truncated"] is True
+
+        item_payload = _item_search("kiss", per_recording_candidates=1)
+        # Each SECTION gets its own candidate budget: both items stay
+        # represented (per-item fairness), while the Recording mode's
+        # single-partition bound keeps only one candidate for the whole
+        # parent.
+        assert item_payload["result_count"] == 2
+        assert item_payload["truncated"] is True
+        assert item_payload["more_items_matched"] == 0
+        winners = {r["item_key"]: r for r in item_payload["results"]}
+        assert set(winners) == {f"s:{left.pk}", f"s:{right.pk}"}
+        # The kept candidate on the Summary-carrying item is the
+        # Summary (doc-type priority inside the per-item bound).
+        assert winners[f"s:{left.pk}"]["match"]["source"] == "summary"
+
+    def test_global_bound_makes_the_item_count_unknown(self):
+        for index in range(4):
+            _seed([f"gamma omega run {index}"], f"itmode-global-{index}")
+        si.rebuild_index()
+        payload = _item_search("gamma omega", max_scored_documents=2)
+        assert payload["result_count"] == 2
+        assert payload["truncated"] is True
+        assert payload["more_items_matched"] is None
+        assert payload["more_recordings_matched"] is None
+        # The item-mode marker is the engine's mode, independent of the
+        # (now unknown) count.
+        assert payload["item_mode"] is True
+
+    def test_item_mode_flag_survives_the_fetch_bound(self):
+        # The flag is a simple mode marker, NOT derived from fetched or
+        # visible rows: it survives the fetch bound unchanged (and no
+        # population scan of any kind backs it).
+        _item_corpus("itmode-signal")
+        bounded = _item_search("keyword", max_scored_documents=1)
+        assert bounded["result_count"] == 1
+        assert bounded["truncated"] is True
+        assert bounded["more_items_matched"] is None
+        assert bounded["item_mode"] is True
+        assert _item_search("keyword")["item_mode"] is True
+        # A legacy (recording-scope) run carries no marker at all.
+        assert "item_mode" not in sq.search_recordings("keyword")
+
+    def test_limit_truncation_counts_items_exactly(self):
+        _item_corpus("itmode-limit")
+        payload = _item_search("keyword", limit=2)
+        assert payload["result_count"] == 2
+        # Three matched ITEMS, two shown: the alias carries the same
+        # item-level truth.
+        assert payload["more_items_matched"] == 1
+        assert payload["more_recordings_matched"] == 1
+        assert payload["truncated"] is False
+
+    def test_empty_item_scope_answers_zero(self):
+        _item_corpus("itmode-empty")
+        empty = sq.search_recordings(
+            "keyword",
+            compiled_item_scope=sq.compile_item_scope(
+                _item_key_union().none(), using="default"
+            ),
+        )
+        assert empty["result_count"] == 0
+        assert empty["more_items_matched"] == 0
+        assert empty["more_recordings_matched"] == 0
+        # A filter that names nobody is a legitimate empty scope.
+        nobody = _item_search("keyword", filters={"tags": ["tag-nobody"]})
+        assert nobody["result_count"] == 0
+
+    def test_raw_item_scope_and_compiled_path_answer_identically(self):
+        _item_corpus("itmode-parity")
+        union = _item_key_union()
+        compiled_path = _item_search("keyword")
+        raw_path = sq.search_recordings("keyword", item_scope=union)
+        assert raw_path == compiled_path
+
+    def test_item_mode_is_read_only_and_never_sweeps(self, monkeypatch):
+        _item_corpus("itmode-readonly")
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("item search must not run the health sweep")
+
+        monkeypatch.setattr(sq, "build_status_report", forbidden)
+        with CaptureQueriesContext(connection) as ctx:
+            payload = _item_search("keyword")
+        assert payload["result_count"] == 3
+        # Same contract as the recording mode: SELECT/PRAGMA only, no
+        # DML/DDL anywhere in the item-mode path.
+        offenders = [
+            query["sql"]
+            for query in ctx.captured_queries
+            if not query["sql"].lstrip().upper().startswith(("SELECT", "PRAGMA"))
+        ]
+        assert offenders == []
+
+
+class TestItemScopeEngineValidation:
+    def test_engine_signature_accepts_the_item_scope_parameters(self):
+        import inspect
+
+        names = inspect.signature(sq.search_recordings).parameters
+        assert {"item_scope", "compiled_item_scope"} <= set(names)
+
+    def test_engine_rejects_a_compiled_item_scope_as_compiled_scope(self):
+        _built(["item scope engine canary probe"], "itscope-engine")
+        compiled = sq.compile_item_scope(_item_key_union(), using="default")
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.search_recordings("canary", compiled_scope=compiled)
+        assert "CompiledScope" in str(excinfo.value)
+
+    def test_item_scope_and_compiled_item_scope_are_mutually_exclusive(self):
+        _built(["item scope exclusive probe"], "itscope-exclusive")
+        union = _item_key_union()
+        compiled = sq.compile_item_scope(union, using="default")
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.search_recordings("probe", item_scope=union, compiled_item_scope=compiled)
+        assert str(excinfo.value) == sq._ITEM_SCOPE_AMBIGUOUS_ERROR
+
+    @pytest.mark.parametrize("mode", ["scope+item", "scope+compiled_item",
+                                      "compiled_scope+item", "both+item"])
+    def test_recording_scope_and_item_scope_cannot_be_combined(self, mode):
+        from workflow.models import Recording
+
+        _built(["scope item conflict probe"], "itscope-conflict")
+        union = _item_key_union()
+        compiled_items = sq.compile_item_scope(union, using="default")
+        compiled_rec = sq.compile_scope(Recording.objects.all(), using="default")
+        combinations = {
+            "scope+item": {"scope": Recording.objects.all(), "item_scope": union},
+            "scope+compiled_item": {
+                "scope": Recording.objects.all(),
+                "compiled_item_scope": compiled_items,
+            },
+            "compiled_scope+item": {
+                "compiled_scope": compiled_rec,
+                "item_scope": union,
+            },
+            "both+item": {
+                "compiled_scope": compiled_rec,
+                "compiled_item_scope": compiled_items,
+            },
+        }
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.search_recordings("probe", **combinations[mode])
+        assert str(excinfo.value) == sq._SCOPE_ITEM_CONFLICT_ERROR
+
+    def test_bad_item_scope_input_is_rejected_by_the_engine(self):
+        from workflow.models import Recording
+
+        _built(["item scope validation probe"], "itscope-validate")
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.search_recordings("probe", item_scope=Recording.objects.all())
+        assert str(excinfo.value) == sq._ITEM_SCOPE_TYPE_ERROR
+        assert "SELECT" not in str(excinfo.value)
+
+    def test_compiled_item_scope_wrong_type_and_alias_rejected(self):
+        _built(["compiled item scope typing probe"], "itscope-typing")
+        bad = sq.CompiledScope(sql="SELECT 1", params=(), using="default")
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.search_recordings("probe", compiled_item_scope=bad)
+        assert str(excinfo.value) == sq._COMPILED_ITEM_SCOPE_TYPE_ERROR
+
+        compiled = sq.compile_item_scope(_item_key_union(), using="default")
+        wrong_alias = sq.CompiledItemScope(
+            sql=compiled.sql, params=compiled.params, using="other"
+        )
+        with pytest.raises(sq.SearchQueryInputError) as excinfo:
+            sq.search_recordings("probe", compiled_item_scope=wrong_alias)
+        assert str(excinfo.value) == sq._ITEM_SCOPE_ALIAS_ERROR
+        assert "other" not in str(excinfo.value)

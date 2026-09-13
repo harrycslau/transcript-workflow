@@ -19,7 +19,9 @@ Proves the section summary contract on the CURRENT schema:
 - failed initial generation creates the section VariantState ``failed``;
   failed regeneration preserves the active section Summary and marks
   only that exact variant ``regeneration_failed``;
-- NO recording search sync is scheduled for section summaries;
+- successful section summaries schedule exactly ONE parent-recording
+  search sync (Step 6.3: canonical section summaries and their tags are
+  indexed documents of the parent Recording); failures schedule nothing;
 - target validation (fixed/historical/cross-parent/malformed-layout
   sections rejected with stable sanitized ``SegmentationError``
   categories) and exact-scope interruption recovery;
@@ -503,12 +505,12 @@ class TestFailureAndRegeneration:
 
 
 # ---------------------------------------------------------------------------
-# No sync / no audio / no files
+# Sync contract / no audio / no files
 # ---------------------------------------------------------------------------
 
 
 class TestNoSync:
-    def test_section_summary_schedules_no_recording_sync(self, tmp_path, monkeypatch):
+    def test_section_summary_schedules_one_recording_sync(self, tmp_path, monkeypatch):
         from workflow.services import summarize as summarize_module
 
         called: list = []
@@ -525,7 +527,9 @@ class TestNoSync:
             config, section, llm_call=ScriptedLLM([final_summary_json()])
         )
         assert result["result"] == "summarized"
-        assert called == []
+        # Step 6.3: the activated section summary is an indexed document
+        # of the PARENT Recording — exactly one parent-recording sync.
+        assert called == [[recording.pk]]
 
     def test_failed_section_summary_schedules_no_sync(self, tmp_path, monkeypatch):
         from workflow.services import summarize as summarize_module
@@ -776,8 +780,9 @@ class TestWholeBehaviorRegressions:
             config, sections[0], llm_call=ScriptedLLM([final_summary_json(title="Section V1")])
         )
         assert section_result["result"] == "summarized"
-        # The section summary schedules nothing.
-        assert called == []
+        # Step 6.3: the section summary schedules exactly ONE
+        # parent-recording sync (its document lives in the parent's set).
+        assert called == [[recording.pk]]
         # The whole-recording current summary is untouched.
         current = recording.current_summary()
         assert isinstance(current, Summary)

@@ -1,7 +1,7 @@
-# Project status — implementation handoff (Step 6.2a safe Library return + temporary split titles delivered)
+# Project status — implementation handoff (Step 6.3 section content in the search/embedding/Ask stack delivered)
 
-This file reflects the repository through the unified production
-search top bar on top of Step 5D: Step 4, the
+This file reflects the repository through the delivered Step 6.3:
+Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
 index foundation (Step 5A.2), incremental index synchronization
@@ -41,28 +41,34 @@ surface in `semantic_query.py`, `brain ask QUESTION [--json]`, and the
 versions** (logical trim + topic layout/history — see the Step 6.1
 section below), the delivered **Step 6.2 section-level summaries
 and tags + derived Library items** (see the Step 6.2 section below),
-and the delivered **Step 6.2a safe Library-return token, temporary
+the delivered **Step 6.2a safe Library-return token, temporary
 split titles, derived display title and section duration** (see the
-Step 6.2a section below).
+Step 6.2a section below), and the delivered **Step 6.3 section content
+in the search/embedding/Ask stack + Library-item search everywhere**
+(index v2, item-key suppression, the item-scope plumbing shared by
+every keyword/semantic/hybrid search surface, the Ask document-level
+section-summary prose-only evidence admission, the sync hooks and the
+rebuild sequence — no new migration; see the Step 6.3 section below).
 The `design/ui-prototype/` directory
 remains the approved v6 design source (fictional data); the production
 Recording Detail, Transcript and History pages now implement that
 design. The
-working tree is independently full-suite verified: **2857 collected
-and 2857 passed** (only the known `audioop` deprecation warning), with
-`manage.py check`, `makemigrations --check` (0013) and
-`git diff --check` clean.
+working tree is independently full-suite verified: **3100 collected
+and 3100 passed** (only the known `audioop` deprecation warning), with
+`manage.py check`, `makemigrations --check` (NO new migration; 0013
+still the head) and `git diff --check` clean.
 No real-database
 migration or user data operation is claimed (the 0011/0012/0013 migrations are
 never applied to a real database by this work). This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
 
-## Handoff audit — 2026-09-12 (updated for the Step 6.2a delivery)
+## Handoff audit — 2026-09-13 (updated for the Step 6.3 delivery)
 
 Updates the previous audits (the Step 5C state, the Step 5D state,
-the v6 detail/transcript/history redesign state and the Step 6.2
-state) in place to record that (1) the Step 5D Ask-with-Citations flow
+the v6 detail/transcript/history redesign state, the Step 6.2 state
+and the Step 6.2a state) in place to record that (1) the Step 5D
+Ask-with-Citations flow
 is now implemented in the working tree, (2) the production Library
 search was unified into a single global top-bar query input: a native
 Keyword/Semantic/Hybrid selector whose POST goes to
@@ -77,10 +83,20 @@ segmented versions (logical trim + topic layout/history) is delivered
 in the working tree** (see the Step 6.1 section below), (5) the
 approved **Step 6.2 section-level summaries and tags + derived Library
 items is delivered in the working tree** (see the Step 6.2 section
-below), and (6) the **Step 6.2a safe Library-return token, temporary
+below), (6) the **Step 6.2a safe Library-return token, temporary
 split titles, derived display title and section duration is delivered
-in the working tree** (see the Step 6.2a section below). The full suite is
-independently verified at the current state (**2857 passed**). No
+in the working tree** (see the Step 6.2a section below), and (7) the
+**Step 6.3 section content in the search/embedding/Ask stack +
+Library-item search everywhere is delivered in the working tree** —
+`search_index.INDEX_VERSION` is `"2"`, every keyword/semantic/hybrid
+search mode (web and CLI) answers normal Library items with the split
+parent suppressed while Ask remains DOCUMENT-LEVEL (it never runs
+item mode: the unchanged segment/ordinal-0-summary evidence plus
+canonical active section-summary prose), section
+content converges through the existing post-commit sync, and **no new
+migration exists** (0013 stays the head) (see the Step 6.3 section
+below). The full suite is
+independently verified at the current state (**3100 passed**). No
 real-database migration or user data operation is claimed (the 0011/0012/0013
 migrations are never applied to a real database by this work); the work
 and its tests are in the working tree.
@@ -89,8 +105,8 @@ and its tests are in the working tree.
 
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
-  configuration; implementation complete through the unified search top
-  bar and Step 5D plus the **v6 Recording Detail / Transcript /
+  configuration; implementation complete through Step 6.3 plus the
+  **v6 Recording Detail / Transcript /
   History production redesign**, the **Step 6.1 segmented
   versions**, the **Step 6.2 section-level summaries/tags +
   derived Library items**, and the **Step 6.2a safe Library-return
@@ -118,67 +134,42 @@ and its tests are in the working tree.
   `summarize_section_one` (explicit active-section multilingual
   summaries with exact-range input, the opaque
   `section_state_fingerprint` and `section_layout_changed`
-  persistence-time revalidation), the section-scoped tag mutations
-  + migration 0012 (mutually exclusive recording/section
-  `TagAssignment` scopes), and the derived `LibraryItemCard` Library
-  projection (read-only DB UNION with the lazy parameterized SQL
-  canonical-layout predicate — no `LibraryItem` model).
+   persistence-time revalidation), the section-scoped tag mutations
+   + migration 0012 (mutually exclusive recording/section
+   `TagAssignment` scopes), and the derived `LibraryItemCard` Library
+   projection (read-only DB UNION with the lazy parameterized SQL
+   canonical-layout predicate — no `LibraryItem` model), and Step 6.3:
+   `search_index.INDEX_VERSION="2"` with the canonical ACTIVE
+   topic-section summaries indexed as documents of the parent
+   Recording (section-summary aux binds the Section's active tag
+   names), the ONE SQL item-key derivation `search_query._item_key_case`
+   over the shared `segmentation.canonical_layout_predicate()` (split
+   parents suppressed, non-ownable documents excluded fail-closed),
+   `library_item_key_queryset`/`compile_item_scope`/`CompiledItemScope`
+    plumbing, item mode across every keyword/semantic/hybrid SEARCH
+    surface (web + CLI), the Ask DOCUMENT-LEVEL section-summary
+    prose-only evidence admission (Ask never runs item mode),
+    the sync hooks on the existing post-commit writer, and NO new
+    migration.
   The `design/ui-prototype/` directory remains the approved v6 design
   source (fictional data); the production Recording Detail, Transcript
   and History pages now implement that design — see the v6 section
   below.
 - Current verification (independently confirmed, CURRENT state): the
-  full suite passes — **2722 collected and
-  2722 passed** (the Step 6.2 delta is **215 tests**: the prior **207**
-  Step 6.2 tests — the eight new
-  Step 6.2 test files — `tests/test_library_items.py` (32),
-  `tests/test_section_summary_service.py` (31),
-  `tests/test_section_tags.py` (30),
-  `tests/test_tag_assignment_migration_0012.py` (7),
-  `tests/test_tag_assignment_models_0012.py` (12),
-  `tests/test_web_section_detail.py` (36),
-  `tests/test_web_section_summarize.py` (39) and
-  `tests/test_web_section_tags.py` (16) = **203 tests** — plus **4
-  additions** across `tests/test_search_index_service.py`,
-  `tests/test_web_detail.py` and `tests/test_web_list.py`, and the 0012
-  leaf in the migration-readiness pending/leaf inventory plus the
-  `TARGET_LEAF` update in `tests/test_search_index_migration.py` — plus
-  **8 UI-refinement tests**: **3 section-confirmation** (the section
-  confirmation's Back link returns to the section — never the parent —
-  preserving a validated Library-return token, recording-level
-  confirmations remain unchanged, and the running-state JavaScript
-  disables the submit button and every confirmation-page navigation
-  anchor while the synchronous POST is in flight — except the ONE
-  narrowly scoped ``Back to section`` escape
-  (``[data-confirm-exempt]``), which stays clickable while the request
-  runs because the user explicitly accepts that navigating away may
-  abort the connection), **4 normal Library-table** (`TestTableViewDateAndSectionLabels`
-  in `tests/test_web_library.py`: bare-timestamp date column, `Discovered`
-  prefix, section rows dropping the secondary provenance line, card view
-  unchanged) and **1 search-table scoping**
-  (`test_search_table_date_cell_keeps_the_label_prefix` in
-  `tests/test_web_search.py`); the
-  prior documented Step 6.1 state was 2507 — historical; the earlier
-  unified-top-bar + Step 5D
-  delta that reached 2203 was
-  **12 tests** — the
-  `TestUnifiedTopBar` class (10) in `tests/test_web_search_modes.py`,
-  `test_topbar_defaults_to_keyword_and_echoes_the_current_query` in
-  `tests/test_web_search.py`, and
-  `test_mobile_css_puts_search_on_its_own_full_width_row` in
-  `tests/test_web_library.py`; the Step 5D delta that reached 2191 is
-  88 tests: the three Step 5D files
-  `tests/test_ask_service.py` (60),
-  `tests/test_ask_cli.py` (9) and
-  `tests/test_web_ask.py` (13) = **82 tests**, plus **5 additions**
-  to `tests/test_semantic_search.py` (the document-level evidence
-  surface) and **1 addition** to `tests/test_migration_readiness.py`
-  (the `ask` command in the ORM-command preflight inventory);
-  `tests/test_web_security.py` gained `/ask/` in its CSP and
-  secret-hygiene sweeps), with the only warning the
+  full suite passes — **3100 collected and
+  3100 passed** (the Step 6.2a bug-fix state was 2857 — historical;
+  the Step 6.3 delta is **243 tests**: the four new Step 6.3 files
+  `tests/test_search_index_section_summaries.py`,
+  `tests/test_semantic_item_search.py`, `tests/test_search_fusion_items.py`
+  and `tests/test_search_cli_items.py` (**134 in the new files**) plus
+  **109 additions** across the search-web/search-modes/search-CLI,
+  ask, library-items, segmentation, section summarize/tags, migration
+  and semantic regressions), with the only warning the
   known `audioop` DeprecationWarning (Python 3.12, removal slated for
-  3.13); `manage.py check`, `makemigrations --check` (0012) and
-  `git diff --check` pass.
+  3.13); `manage.py check`, `makemigrations --check` (NO new
+  migration; 0013 still the head) and `git diff --check` pass.
+  Earlier full-suite states and their per-step deltas are recorded in
+  the Step sections and the "Tests and verification status" section.
 - Step 5C verification (historical state, independently confirmed at
   the time): the full suite then passed — **2103 collected and
   2103 passed** (the Step 5B.4 full-suite state was 1783 — historical;
@@ -204,10 +195,18 @@ and its tests are in the working tree.
   the Step 5D section below), **Step 6.1 (segmented versions:
   logical trim + topic layout/history, structure/history only) is
   delivered** in the working tree (see the Step 6.1 section below),
-  and **Step 6.2 (section-level summaries/tags + derived Library
-  items) is delivered** too (see the Step 6.2 section below);
-  the next planned work is **Step 6.3** — search/embedding/Ask
-  integration for section content (not yet implemented). The overall Step 6 plan has been **accepted as the
+  **Step 6.2 (section-level summaries/tags + derived Library
+  items) is delivered** too (see the Step 6.2 section below),
+  **Step 6.2a (safe Library return, temporary split titles, derived
+  display title, section duration) is delivered** (see the Step 6.2a
+  section below), and **Step 6.3 (section content in the
+  search/embedding/Ask stack + Library-item search everywhere) is
+  delivered** (see the Step 6.3 section below); the next planned work
+  is **Step 6.4** — retention/Keep-Audio/Rescan policies plus
+  missing-file reconciliation (real source-file
+  deletion/move/trash/quarantine remains an explicit approval gate),
+  followed by Step 6.5 (launchd scheduling; installing/enabling any
+  schedule remains a separate explicit approval gate). The overall Step 6 plan has been **accepted as the
   working baseline** and **Step 6.0 is complete**: the approved D1–D12
   decisions and phase acceptance contracts are recorded in
   `docs/step-6-decisions.md`, and the Step 6 screens in
@@ -227,7 +226,7 @@ and its tests are in the working tree.
   deletion/move/trash/quarantine and installing/enabling any schedule
   remain separate explicit approval gates.
 - No claim is made here about the real user database's migration state
-  (`0007`–`0012` application is not reported). Local config values and
+  (`0007`–`0013` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
 
 ## Step 4 v6 — Recording Detail / Transcript / History redesign (delivered in the working tree)
@@ -283,8 +282,8 @@ was 2203 — historical; the v6 delta is 35 tests across
 (25 additions)), only the known `audioop` warning; `manage.py check`
 and `makemigrations --check` (NO migration) and `git diff --check`
 clean. No real-database migration or real network call is claimed; no
-new commit/HEAD. The CURRENT working-tree state is **2722 collected
-and 2722 passed** — see the current audit at the top of this file.
+new commit/HEAD. The CURRENT working-tree state is **3100 collected
+and 3100 passed** — see the current audit at the top of this file.
 
 ## Step 6.1 — Segmented versions: logical trim + topic layout/history (delivered in the working tree)
 
@@ -293,8 +292,8 @@ Step 6.1 structure/history phase — immutable transcript-bound
 `SegmentedVersion` working-layout revisions plus topic `Section` rows,
 the active Transcript page crop/split editor, and the bounded History
 revision list. Step 6.1 itself introduced no section summaries/tags
-(those arrived in Step 6.2), no search/embedding index change (Step
-6.3), and no CLI.
+(those arrived in Step 6.2), no search/embedding index change (that
+came with Step 6.3, now delivered), and no CLI.
 
 - **Models / migration 0011**
   (`workflow.models.SegmentedVersion` + nullable
@@ -325,9 +324,12 @@ revision list. Step 6.1 itself introduced no section summaries/tags
   new one, a ZERO-DML no-op for unchanged payloads (including the
   initial full+zero state), fail-closed `layout_invalid` on malformed
   stored state, the OPAQUE read-only `segmentation_fingerprint`
-  (SELECTs only), and fixed sanitized `SegmentationError` categories.
-  It never acquires the pipeline lock, schedules no search/embedding
-  sync, logs nothing, and touches no network/files.
+   (SELECTs only), and fixed sanitized `SegmentationError` categories.
+   It never acquires the pipeline lock, logs nothing and touches no
+   network/files; at the 6.1 delivery it scheduled no sync, and since
+   Step 6.3 an actual REAL layout change schedules exactly ONE
+   post-commit parent-recording search sync (see the Step 6.3 section
+   below).
 - **Web**: the editor lives ONLY on the active Transcript page ("Edit
   trim & splits"): pressing Edit reveals scissors on the inter-segment
   divider lines; staged changes stay page-local and must be saved before
@@ -344,8 +346,12 @@ revision list. Step 6.1 itself introduced no section summaries/tags
   shared bounded canonical validator (malformed stored state is a
   controlled 404 / unavailable notice). History owns a bounded revision
   list (`HISTORY_LIMIT = 100`, limit+1 sentinel).
-- **No-op / purity**: no search or embedding sync is scheduled on save
-  (6.1 changes no indexed content); existing ordinal-0 queries gained
+- **No-op / purity**: the zero-DML no-op path schedules nothing; at the
+  6.1 delivery no save scheduled a sync (6.1 changed no indexed
+  content), and since Step 6.3 a real layout change schedules exactly
+  ONE post-commit parent-recording search sync inside the save
+  transaction (see the Step 6.3 section below); existing ordinal-0
+  queries gained
   `segmented_version IS NULL` defense-in-depth filters
   (`workflow/query.py`, `services/summarize.py`,
   `services/variant_view.py`, `services/search_index.py`,
@@ -367,17 +373,19 @@ only the known `audioop` warning; `manage.py check`,
 `makemigrations --check` (0011) and `git diff --check` clean. No
 real-database migration or user data operation is claimed; no new
 commit/HEAD — the work and its tests are in the working tree. The
-CURRENT working-tree state is **2722 collected and 2722 passed** — see
-the Step 6.2 section below.
+CURRENT working-tree state is **3100 collected and 3100 passed** — see
+the current audit at the top of this file.
 
 ## Step 6.2 — Section-level summaries and tags + derived Library items (delivered in the working tree)
 
 **Scope delivered** (durable contract in `AGENTS.md`): the approved
 Step 6.2 phase — topic `Section` rows of an active split layout are now
 first-class Library items and carry their own multilingual summaries
-and tags. Step 6.3 (search/embedding/Ask integration for section
-content) is NOT implemented: keyword/semantic/hybrid/Ask stay
-whole-recording-only and unchanged. 6.4 (retention/Rescan) and 6.5
+and tags. At the 6.2 delivery the keyword/semantic/hybrid/Ask stack was
+still whole-recording-only; Step 6.3 (section content in the
+search/embedding/Ask stack + Library-item search everywhere) has since
+been delivered (see the Step 6.3 section below). 6.4
+(retention/Rescan) and 6.5
 (launchd) remain later approval gates.
 
 - **Derived Library item projection** (`workflow/query.py`): the
@@ -393,12 +401,15 @@ whole-recording-only and unchanged. 6.4 (retention/Rescan) and 6.5
   recording/section branches (`library_item_queryset` /
   `library_item_count`): filters, count, ordering (`apply_item_sort`)
   and pagination all happen database-side BEFORE hydration — never a
-  Python expansion of all recordings. The "which recordings are
-  replaced / which Sections are valid" state is ONE lazy parameterized
-  read-only SQL canonical-layout predicate (a RawSQL subquery
-  `_canonical_layout_predicate` shared by both branches — exactly two
-  fixed parameters, never a growing `IN (...)` list, never a Python id
-  set) that fail-closes on every canonical rule (ACTIVE version +
+   Python expansion of all recordings. The "which recordings are
+   replaced / which Sections are valid" state is ONE lazy parameterized
+   read-only SQL canonical-layout predicate — since Step 6.3 it has
+   ONE home, `segmentation.canonical_layout_predicate()` (the SQL twin
+   of the shared Python validator; a RawSQL subquery shared by both
+   branches — exactly two fixed parameters, never a growing
+   `IN (...)` list, never a Python id set — also consumed by the
+   search-index mapping, the engines' item-key SQL and Ask, never
+   forked anywhere) that fail-closes on every canonical rule (ACTIVE version +
   transcript, contiguous segment ordinals 0..count-1 with a nonempty
   transcript, range inside `[0, count)`, topic count in
   2..`MAX_TOPIC_SECTIONS`, cross-parent rejection, section ordinals
@@ -409,13 +420,18 @@ whole-recording-only and unchanged. 6.4 (retention/Rescan) and 6.5
   active tags, default-variant Summary, variant state and language set;
   the Card template renders section provenance — topic, range,
   parent recording — while the Table view shows only the section title
-  link (each topic reads like an independent Library item), and both
-  views link to the new section detail page). The
-  search/embedding/Ask stack is UNCHANGED and whole-recording-only:
-  defense-in-depth, `search_index`, `ask` and the metadata-aux tag
-  projection all filter `section__isnull=True` /
-  `segmented_version__isnull=True` (the Library tag chips and the
-  recording metadata aux text never include section-scoped tags).
+   link (each topic reads like an independent Library item), and both
+   views link to the new section detail page). At the 6.2 delivery the
+   search/embedding/Ask stack was still whole-recording-only
+   (`search_index`/`ask` filtered `section__isnull=True` /
+    `segmented_version__isnull=True`) — superseded by Step 6.3, which
+    indexes canonical topic-section summaries, switches the
+    keyword/semantic/hybrid search surfaces to Library-item mode and
+    admits canonical section summaries into Ask's DOCUMENT-LEVEL
+    evidence (Ask itself never runs item mode). What remains true: the recording metadata-aux
+   tag projection still filters recording-scope assignments only
+   (the Library tag chips and the
+   recording metadata aux text never include section-scoped tags).
 - **Section summaries** (`workflow/services/summarize.py:
   summarize_section_one`): an EXPLICIT per-section action — POST-only
   two-step confirmation (`/recordings/<id>/sections/<sid>/summarize/`,
@@ -442,10 +458,13 @@ whole-recording-only and unchanged. 6.4 (retention/Rescan) and 6.5
   persistence (`section_layout_changed` failure — never a write to
   read-only history). A section summary NEVER changes the
   Recording-level default tuple (`summary_status`,
-  `resummarization_failed`, `last_failed_attempt`), processing status or
-  the whole-recording summary, and schedules NO recording
-  search/embedding sync (not indexed until 6.3). Only the DEFAULT
-  variant materializes section-scoped tag suggestions.
+   `resummarization_failed`, `last_failed_attempt`), processing status or
+   the whole-recording summary; at the 6.2 delivery it scheduled no
+   sync, and since Step 6.3 every successful activation schedules
+   exactly ONE post-commit parent-recording search sync (the canonical
+   topic-section summaries are indexed documents of the parent
+   Recording — see the Step 6.3 section below). Only the DEFAULT
+   variant materializes section-scoped tag suggestions.
 - **Section tags** (`workflow/services/tags.py` section-scoped mutations
   + migration 0012): nullable `TagAssignment.section` ownership FK
   (PROTECT) with MUTUALLY EXCLUSIVE conditional uniques — recording
@@ -458,10 +477,15 @@ whole-recording-only and unchanged. 6.4 (retention/Rescan) and 6.5
   `remove_section_tag`, `apply_section_tag_selection` — the atomic
   complete-selection Done — and `create_custom_tag_and_assign_section`),
   sharing the exact validation/retired-opt-in/origin/suppression/
-  custom-collision semantics, running under the local SQLite BUSY/LOCKED
-  retry (outside atomic), taking no pipeline lock and scheduling NO
-  recording search sync (section tags are not indexed until 6.3);
-  historical sections are read-only. Web: the section detail page
+   custom-collision semantics, running under the local SQLite BUSY/LOCKED
+   retry (outside atomic) and taking no pipeline lock; at the 6.2
+   delivery they scheduled no sync, and since Step 6.3 a mutation
+   schedules exactly ONE parent-recording search sync inside its
+   transaction ONLY when the Section's ACTIVE tag-name set actually
+   changes (create/reactivate/remove; an origin-only
+   `confirm_section_suggestion`, an unchanged Done and every failure
+   schedule nothing);
+   historical sections are read-only. Web: the section detail page
   (`/recordings/<id>/sections/<sid>/`, read-only GET) renders the
   section's own tags and, for ACTIVE sections only, the tag editor and
   the per-variant summary action; POST-only endpoints
@@ -475,7 +499,8 @@ whole-recording-only and unchanged. 6.4 (retention/Rescan) and 6.5
   recording assignments. Covered by genuine MigrationExecutor tests
   (`tests/test_tag_assignment_migration_0012.py`, forward + reverse).
 
-**Verification (independently confirmed, current state)**: full suite
+**Verification (historical Step 6.2 delivery state, independently
+confirmed)**: the full suite then passed —
 **2722 collected and 2722 passed** (the Step 6.1 state was 2507 —
 historical; the Step 6.2 delta is **215 tests**: the prior **207**
 Step 6.2 tests — the eight new Step 6.2
@@ -496,16 +521,19 @@ UI-refinement tests** (3 section-confirmation, 4 normal Library-table,
 `audioop` warning; `manage.py check`, `makemigrations --check` (0012)
 and `git diff --check` clean. The focused Step 6.1/6.2 section set
 (**326 tests** — the seven Step 6.2 section/web test files plus the
-four Step 6.1 segmentation test files) passes. No real-database
+four Step 6.1 segmentation test files) passed. No real-database
 migration or user data operation is claimed; no new commit/HEAD — the
-work and its tests are in the working tree, uncommitted.
+work and its tests are in the working tree, uncommitted. The
+CURRENT working-tree state is **3100 collected and 3100 passed** — see
+the Step 6.3 section below.
 
 ## Step 6.2a — Safe Library return, temporary split titles, derived display title, section duration (delivered in the working tree)
 
 **Scope delivered** (durable contract in `AGENTS.md`): a bounded
 follow-up to 6.2 that improves the section Library/detail UX without
-changing the search/index/Ask contract. **Step 6.3 remains
-unimplemented** (see the explicit 6.3 requirement below). Migration
+changing the search/index/Ask contract (the state at that round). The
+explicit 6.3 requirement recorded below has since been FULFILLED by
+the delivered Step 6.3 (see the Step 6.3 section below). Migration
 **0013** is additive and fully reversible.
 
 - **Safe Library return** (`workflow/services/library_return.py`): ONE
@@ -605,15 +633,18 @@ unimplemented** (see the explicit 6.3 requirement below). Migration
   when unavailable or nonpositive and renders in the normal
   card/table; the section detail page always shows the same bounded
   aggregate (rendering the literal ``unknown`` when unavailable).
-- **Explicit 6.3 requirement (recorded, NOT implemented)**: the normal
+- **Explicit 6.3 requirement (recorded at 6.2a — FULFILLED by the
+  delivered Step 6.3)**: the normal
   Library tag filters ALREADY suppress a valid split parent and use the
-  active Section items (the derived projection). The user requires
+  active Section items (the derived projection). The user required
   **Step 6.3 to mirror that Library replacement**: a valid active split
   layout must yield the active Section search/filter results with the
   parent recording result SUPPRESSED — never parent + section
-  duplicates — while historical/malformed layouts fail closed. The
-  current keyword/semantic/hybrid/Ask stack remains whole-recording-only
-  and unchanged; 6.3 is not implemented.
+  duplicates — while historical/malformed layouts fail closed. At the
+  6.2a delivery the keyword/semantic/hybrid/Ask stack was still
+  whole-recording-only; Step 6.3 has since mirrored that replacement
+  across the keyword/semantic/hybrid search surfaces while Ask remains
+  DOCUMENT-LEVEL evidence retrieval (see the Step 6.3 section below).
 - **Section-scoped summary status + Section-origin returns (bug-fix
   delivery)**: the Section detail status panel is Section-scoped
   (``_section_summary_panel`` over the selected ``VariantView``) —
@@ -637,7 +668,8 @@ unimplemented** (see the explicit 6.3 requirement below). Migration
   History internal ``v``/``layout`` links, recording-origin pages, action
   flows and search are NOT broadened; GETs stay strictly read-only.
 
-**Verification (current state)**: full suite **2857 collected and 2857
+**Verification (historical Step 6.2a delivery state, independently
+confirmed)**: the full suite then passed — **2857 collected and 2857
 passed** (the Step 6.2a state was 2819 — historical; the bug-fix delta
 is **38 tests** added across `tests/test_web_section_detail.py` (14),
 `tests/test_web_history.py` (8), `tests/test_web_segmentation.py` (13),
@@ -647,11 +679,150 @@ web set is **255 passed**
 (`test_library_return_token.py`, `test_temporary_section_titles.py`,
 `test_section_title_migration_0013.py`, `test_web_segmentation.py`,
 `test_web_library.py`)),
-only the known `audioop` warning; `manage.py check`,
+ only the known `audioop` warning; `manage.py check`,
 `makemigrations --check` (0013) and `git diff --check` clean. No
 real-database migration or user data operation is claimed; no new
 commit/HEAD — the work and its tests are in the working tree,
-uncommitted.
+uncommitted. The CURRENT working-tree state is **3100 collected and
+3100 passed** — see the Step 6.3 section below.
+
+## Step 6.3 — Section content in the search/embedding/Ask stack, Library-item search everywhere (delivered in the working tree)
+
+**Scope delivered** (durable contract in `AGENTS.md`): every search
+surface (keyword/semantic/hybrid, web AND CLI) now operates over the
+NORMAL Library items, so a valid active split layout answers its
+Section items with the parent Recording SUPPRESSED (never parent +
+section duplicates) while unsplit/crop-only/historical/malformed
+recordings fail closed to their single Recording item. Ask is NOT
+part of that item-mode replacement: it stays DOCUMENT-LEVEL (never
+item mode, never a per-item suppression), keeping the whole-recording
+segment/fixed-summary evidence and additionally admitting canonical
+ACTIVE topic-section summaries as prose-only evidence through the
+SHARED canonical-layout predicate. **NO new
+migration** — 0013 stays the head; the version bump is code-only.
+
+- **Index v2** (`search_index.INDEX_VERSION="2"`, verified in code):
+  the canonical summary set is the whole-recording ordinal-0 variants
+  PLUS every ACTIVE variant of a topic Section of the fully canonical
+  ACTIVE layout of the ACTIVE Transcript (the SHARED
+  `segmentation.canonical_layout_predicate()` SQL plus the
+  `section__transcript=F("transcript")` cross-parent defense; keyed
+  `summary:<id>` like any variant, owned by the PARENT Recording).
+  A layout that became historical/malformed de-eligibles its rows,
+  which converge to orphans through the existing status/reconcile
+  machinery. Migration 0008's backfill deliberately still mirrors the
+  historical version-1 whole-recording-only mapping — after an upgrade
+  the index is DETECTABLY stale (`version_mismatch`, never rebuilt
+  implicitly) until an explicit `brain search-index rebuild`.
+- **Summary docs bind tags aux**: a section-summary document's
+  `aux_text` is the shared people/organizations/topics parts followed
+  by the Section's ACTIVE tag names (`library_metadata.active_tag_names`)
+  — so a section tag change flows through the normal content-hash
+  `content_mismatch`/`stale_content` detection with NO separate tag
+  bookkeeping; the Recording metadata document still carries ONLY
+  recording-scope tag names.
+- **Segment mapping / suppression (ONE SQL derivation)**:
+  `search_query._item_key_case` mirrors the Library item-union contract
+  over the SHARED canonical-layout SQL — no canonical split ⇒ every
+  document maps to `r:<recording_id>`; a canonical split ⇒ an ACTIVE
+  topic-section Summary maps to `s:<section_id>`, a Segment maps to the
+  valid Section owning its half-open ordinal range, and anything the
+  layout cannot own (parent metadata document, fixed whole-recording
+  Summary, cropped-out Segments, stale/malformed/cross-parent rows)
+  derives `NULL` and is EXCLUDED (fail closed; the suppressed parent
+  never appears beside its Sections).
+- **Item-scope plumbing**: `workflow.query.library_item_key_queryset`
+  is the one-column, unsliced, unordered `item_key` UNION of the normal
+  Library identity (same branch helpers/filters — it can never diverge
+  from the projected rows); `search_query.compile_item_scope` validates
+  the exact built shape into an immutable `CompiledItemScope` (a
+  compiler-proven empty UNION answers the same provably-empty
+  subquery; every other failure is the fixed sanitized index failure;
+  hybrid compiles EXACTLY ONCE and shares the SAME value with both
+  components). The engines take `item_scope=`/`compiled_item_scope=`,
+  mutually exclusive with the UNCHANGED Recording
+  `scope=`/`CompiledScope` API (fixed usage errors otherwise); the
+  derived key is restricted in the middle WHERE BEFORE the window
+  functions so bounds/counts stay scope-honest. Payloads gain the
+  ADDITIVE `item_key`/`item_kind`/`section_id`/`more_items_matched`
+  fields and the explicit `item_mode: true` flag (OMITTED outside item
+  mode, so the legacy payload stays byte-identical; presentation takes
+  its unit from THAT FLAG, never inferred from rows).
+- **Web/CLI replacement**: `search_web` keyword GET and
+  semantic/hybrid POST run item mode with the filtered Library item
+  scope; an invalid keyword filter set falls back to the UNFILTERED
+  canonical item scope (still item mode — never widened to
+  whole-Recording/unscoped), invalid vector filters still REJECT.
+  Winners are keyed by `item_key` (two Sections of one Recording are
+  distinct winners; segment jump links resolve per winner key), the
+  four Library sorts re-order the winner set with the EXACT normal-
+  Library `apply_item_sort`, relevance stays engine order, and the
+  page window hydrates ONLY through `workflow.query.
+  library_items_by_keys` (revalidates every engine key against the
+  normal-Library identity under the same scope filters; stale/replaced/
+  deleted/filtered-out keys silently dropped — a stale result can never
+  resurrect an item). Templates render the SAME item card/table as the
+  normal Library (search-origin Section links carry NO `lib_return`
+  token). `brain search` runs EVERY mode over the UNFILTERED canonical
+  item scope with ONE bounded additive Section hydration; exit codes,
+  read-only guarantees and the historical unsplit output line stay
+  unchanged. The Step 5C one-sweep/one-integrity-traversal/
+  one-embedding contracts and the contiguous
+  `(recording_id, document_key)` traversal are preserved in item mode;
+  hybrid fuses/dedups/tie-breaks on the item identity with a strict
+  fusion-boundary canonicalizer (only canonical `r:<UUID>`/positive
+  `s:<id>` honoured; anything else falls back to the parent `r:`
+  identity — never a crash or a fabricated Section id).
+- **Sync hooks (NO new mechanism)**: section content converges as
+  documents of the PARENT Recording through the sole
+  `search_sync.schedule_recording_sync` post-commit writer (the 5B.4
+  embedding sync rides the same callback, so section-summary vectors
+  follow). The changed hooks: a REAL segmentation layout change
+  schedules exactly ONE parent-recording sync INSIDE the save
+  transaction (the zero-DML no-op and a rollback schedule nothing;
+  `search_sync` is imported lazily inside `segmentation` to keep the
+  import DAG acyclic: `search_sync → search_index → segmentation`);
+  every successful section-summary activation (`persist_summary`, BOTH
+  shapes) schedules exactly ONE parent-recording sync; section tag
+  writes schedule one parent sync ONLY when the Section's ACTIVE
+  tag-name set actually changes. No per-Section callback, writer,
+  queue or daemon exists anywhere.
+- **Ask — section summaries as PROSE-ONLY evidence**: Ask admits ACTIVE
+  variants of canonical topic Sections (same SHARED predicate plus the
+  cross-parent defense) alongside the unchanged ordinal-0 variants,
+  with the same one-sweep/one-embedding/one-integrity-traversal and
+  document-level bounds (metadata still never evidence). Post-chat
+  revalidation includes the canonical ACTIVE section/layout ownership,
+  so a concurrent layout change is the fixed sanitized concurrent-
+  change failure, never an answer. A section summary's PROMPT evidence
+  is summary PROSE only (body, else title) — it never falls back to
+  `aux_text`, so its indexed tag names, layout titles and segment
+  boundaries are never prompt evidence. Citations carry the server-
+  owned `section_id` (null otherwise) and reuse the EXACT existing
+  summary-version route; the rest of the Ask contract is unchanged.
+- **Rebuild sequence after the upgrade**: `brain search-index rebuild`
+  FIRST (materializes the version-2 mapping), THEN `brain
+  embedding-index rebuild` — the old active generation carries
+  `source_index_version` "1" (status reports
+  `source_index_version_mismatch`; `repair` requires an EXACT
+  INDEX_VERSION match, so a mismatch means rebuild) and
+  semantic/hybrid/Ask fail closed until a compatible active generation
+  exists. Incremental sync keeps both indexes current afterwards.
+
+**Verification (independently confirmed, CURRENT state)**: full suite
+**3100 collected and 3100 passed** (the Step 6.2a bug-fix state was
+2857 — historical; the Step 6.3 delta is **243 tests**: the four new
+Step 6.3 files `tests/test_search_index_section_summaries.py`,
+`tests/test_semantic_item_search.py`, `tests/test_search_fusion_items.py`
+and `tests/test_search_cli_items.py` (134 in the new files) plus 109
+additions across the search-web/search-modes/search-CLI, ask,
+library-items, segmentation, section summarize/tags, migration and
+semantic regressions), only the known `audioop` warning;
+`manage.py check`, `makemigrations --check` (NO new migration; 0013
+still the head) and `git diff --check` clean. No real database
+migration, no commit, and no real embedding/chat network call is
+claimed — all tests are mocked/network-free and the work and its tests
+are in the working tree, uncommitted.
 
 ## Step 5D — Ask with Citations (delivered in the working tree)
 
@@ -662,8 +833,12 @@ document-level semantic evidence surface lives in
 `workflow/services/semantic_query.py`
 (`retrieve_semantic_evidence` / `select_semantic_evidence`) and reuses
 the EXACT Step 5C contracts — it is deliberately NOT implemented by
-consuming `semantic_search()` (which dedups one winner per Recording and
-permits metadata).
+consuming `semantic_search()` (which dedups to one winner per unit —
+per Recording in the legacy mode, per Library item in Step 6.3 item
+mode — and permits metadata). Step 6.3 later admitted ACTIVE variants
+of canonical topic Sections as PROSE-ONLY evidence with server-owned
+`section_id` citations (see the Step 6.3 section above); the rest of
+this contract is unchanged.
 
 - **Evidence retrieval**: admits only `segment` and `summary`
   SearchDocuments (metadata is never evidence), allows several
@@ -746,11 +921,13 @@ warning; `manage.py check`, `makemigrations --check` (NO migration) and
 `git diff --check` clean. No real network, no real MacWhisper/oMLX, no
 user data, no real embedding/chat network calls; the real
 `config/config.yaml` untouched; no real-database migration is claimed.
-The CURRENT working-tree state is **2722 collected and 2722 passed** —
+The CURRENT working-tree state is **3100 collected and 3100 passed** —
 see the current audit at the top of this file.
-Step 6.1 (segmented versions) and Step 6.2 (section-level
-summaries/tags + Library items) are delivered — see the Step 6.1 and
-Step 6.2 sections above.
+Step 6.1 (segmented versions), Step 6.2 (section-level
+summaries/tags + Library items), Step 6.2a and Step 6.3 (section
+content in the search/embedding/Ask stack — Ask now also admits
+canonical topic-section summaries as prose-only evidence) are
+delivered — see the Step 6.1/6.2/6.2a/6.3 sections above.
 
 ## Step 5C — Semantic and Hybrid Search (delivered in the working tree)
 
@@ -864,7 +1041,11 @@ user data, no real embedding network calls; the real
 migration is claimed — the work and its tests are in the working tree.
 Step 5D (Ask with Citations) is now delivered — see the Step 5D section
 at the top of this file — and the unified global search top bar is
-delivered too — see the current audit at the top of this file.
+delivered too — see the current audit at the top of this file. Step
+6.3 later added LIBRARY-ITEM mode over these engines (split parents
+suppressed by their Sections); the unscoped/per-Recording legacy engine
+and the historical parity output remain available and UNCHANGED — see
+the Step 6.3 section above.
 
 ## Step 5B.3 — Embedding index status/rebuild/repair (delivered in the working tree)
 
@@ -2391,30 +2572,27 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current (Step 6.2 section summaries/tags + Library items tree,
-  independently full-suite verified): the full suite passes — **2722
-  collected and 2722 passed**
-  (the Step 6.2 delta is **215 tests**: the prior **207** Step 6.2 tests
-  — the eight new Step 6.2 test
-  files — `tests/test_library_items.py` (32),
-  `tests/test_section_summary_service.py` (31),
-  `tests/test_section_tags.py` (30),
-  `tests/test_tag_assignment_migration_0012.py` (7),
-  `tests/test_tag_assignment_models_0012.py` (12),
-  `tests/test_web_section_detail.py` (36),
-  `tests/test_web_section_summarize.py` (39) and
-  `tests/test_web_section_tags.py` (16) = **203 tests** — plus **4
-  additions** across `tests/test_search_index_service.py`,
-  `tests/test_web_detail.py` and `tests/test_web_list.py`, the 0012
-  leaf in `tests/test_migration_readiness.py`, and the `TARGET_LEAF`
-  update in `tests/test_search_index_migration.py` — plus **8
-  UI-refinement tests** (3 section-confirmation, 4 normal
-  Library-table, 1 search-table scoping)),
+- Current (Step 6.3 search/embedding/Ask stack tree,
+  independently full-suite verified): the full suite passes — **3100
+  collected and 3100 passed**
+  (the Step 6.3 delta is **243 tests**: 134 across the four new Step
+  6.3 files `tests/test_search_index_section_summaries.py`,
+  `tests/test_semantic_item_search.py`, `tests/test_search_fusion_items.py`
+  and `tests/test_search_cli_items.py`, plus 109 additions across the
+  search-web/search-modes/search-CLI, ask, library-items,
+  segmentation, section summarize/tags, migration and semantic
+  regressions),
   with the only warning the known `audioop` DeprecationWarning (Python
   3.12, removal slated for 3.13); `manage.py check`,
-  `makemigrations --check` (0012) and `git diff --check` pass. No
+  `makemigrations --check` (NO new migration; 0013 still the head) and
+  `git diff --check` pass. No
   real-database migration or user data operation is claimed; no new
   commit/HEAD.
+- Historical (Step 6.2a tree, independently full-suite verified at the
+  time): **2857 collected and 2857 passed** after the 38-test bug-fix
+  delta (2819 before it; per-file breakdown in the Step 6.2a section);
+  the Step 6.2 tree reached **2722** (initial Step 6.2 delivery 2714;
+  the 215-test delta is recorded in the Step 6.2 section).
 - Historical (Step 6.1 segmented-versions tree, independently
   full-suite verified at the time): the full suite then passed —
   **2507 collected and 2507 passed**
@@ -2459,10 +2637,12 @@ Production Library UI are delivered.
   secret-hygiene sweeps), with the only warning the known
   `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
   `manage.py check`, `makemigrations --check` (NO migration) and
-  `git diff --check` pass. The historical full-suite states are 2722
-  (Step 6.2 — current state after the UI refinement; the initial Step
-  6.2 delivery was 2714), 2507
-  (Step 6.1), 2235
+   `git diff --check` pass. The full-suite states (CURRENT first) are
+   **3100** (Step 6.3 — current), 2857
+   (Step 6.2a bug-fix; 2819 before it), 2722
+   (Step 6.2 after the UI refinement; the initial Step
+   6.2 delivery was 2714), 2507
+   (Step 6.1), 2235
   (v6 corrections round — intermediate before the heading-hierarchy
   tests), 2203
   (unified top bar + Step 5D), 2191
@@ -2549,7 +2729,14 @@ Production Library UI are delivered.
   5B.3) and incremental embedding synchronization (Step 5B.4) are
   delivered; **Step 5D Ask with
   Citations is delivered** (`brain ask QUESTION [--json]` plus the
-  `/ask/` page).
+  `/ask/` page). Since Step 6.3 EVERY search mode (keyword/semantic/
+  hybrid, web and CLI) answers NORMAL Library items: a valid active
+  split layout is answered by its Sections with the parent Recording
+  suppressed, while Ask stays DOCUMENT-LEVEL (segment/ordinal-0-summary
+  evidence plus canonical section-summary prose — never item mode),
+  and after the index-v2 upgrade the
+  `search-index rebuild` → `embedding-index rebuild` sequence is
+  required before semantic/hybrid/Ask serve again.
   Keyword matching is substring-style (trigrams +
   Unicode-folded LIKE fallback), not stemmed. Index staleness after
   abnormal process death between commit and callback is repaired by
@@ -2590,8 +2777,11 @@ Production Library UI are delivered.
   (incremental embedding synchronization), Step 5C
   (semantic/hybrid search) and Step 5D (Ask with Citations) are all
   delivered** (see the sections at the top of this file). **Step 5 is
-  complete; Step 6.0, Step 6.1 and Step 6.2 are delivered; Step 6.3 is
-  next.**
+  complete; Step 6.0, Step 6.1, Step 6.2, Step 6.2a and Step 6.3 are
+  delivered; the next planned phase is Step 6.4**
+  (retention/Keep-Audio/Rescan and missing-file reconciliation; real
+  source-file deletion/move and any schedule enablement remain
+  explicit approval gates).
 - **Step 5B — Local Embeddings Foundation**: **5B.1 delivered** — the
   bounded local /embeddings client
   (`workflow/services/embedding_client.py`) plus the embedding config
@@ -2606,9 +2796,11 @@ Production Library UI are delivered.
 - **Step 5C — Semantic and Hybrid Search**: delivered in the working
   tree — bounded semantic retrieval and deterministic keyword+semantic
   fusion preserving recording deduplication, tag/date scope,
-  provenance and stale/index-unavailable states, exposed as
-  Keyword/Semantic/Hybrid modes in the CLI and the POST-only Library
-  web endpoint (see the Step 5C section at the top of this file).
+   provenance and stale/index-unavailable states, exposed as
+   Keyword/Semantic/Hybrid modes in the CLI and the POST-only Library
+   web endpoint (see the Step 5C section at the top of this file;
+   Step 6.3 added LIBRARY-ITEM mode over the UNCHANGED per-Recording
+   legacy API — every production surface now runs item mode).
 - **Step 5D — Ask with Citations (delivered)**: a read-only Ask flow
   that retrieves bounded local evidence (segments/summaries only, never
   metadata), calls only the local LLM, and produces answers whose
@@ -2628,12 +2820,17 @@ Production Library UI are delivered.
   UI, launchd scheduling. **The overall Step 6 plan is accepted as the
   working baseline, Step 6.0 is complete, Step 6.1 (segmented
   versions: logical trim + topic layout/history, structure/history only)
-  is DELIVERED in the working tree** (see the Step 6.1 section at the
-  top of this file), **and Step 6.2 (section-level summaries/tags +
-  derived Library items) is DELIVERED too** (see the Step 6.2 section
-  at the top of this file); the next planned phase is **Step 6.3**
-  (search/embedding/Ask integration for section content), not yet
-  implemented. The approved decisions D1–D12 and the phase
+   is DELIVERED in the working tree** (see the Step 6.1 section at the
+   top of this file), **Step 6.2 (section-level summaries/tags +
+   derived Library items) is DELIVERED too** (see the Step 6.2 section
+   at the top of this file), **Step 6.2a** (safe Library return,
+   temporary split titles, derived display title, section duration)
+   **and Step 6.3** (section content in the search/embedding/Ask stack
+   + Library-item search everywhere — index v2, item-key suppression,
+   Ask section-summary evidence, sync hooks; NO new migration) **are
+   DELIVERED**; the next planned phase is **Step 6.4**
+   (retention/Keep-Audio/Rescan policies + missing-file
+   reconciliation, then Step 6.5 launchd scheduling). The approved decisions D1–D12 and the phase
   acceptance contracts are in `docs/step-6-decisions.md`, including the
   final approved feedback refinement (edit toggle reveals scissors only;
   scissors open a small action dialog — Split here / Crop from here /

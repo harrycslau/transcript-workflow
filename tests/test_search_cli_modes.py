@@ -284,7 +284,8 @@ class TestSemanticMode:
         assert cli.main(["search", "alpha", "--mode", "semantic", "--limit", "1"]) == 0
         out = capsys.readouterr().out
         assert "1 result(s)" in out
-        assert "1 more matching recording(s)" in out
+        # CLI vector modes always search the Library item scope.
+        assert "1 more matching library item(s)" in out
 
     def test_semantic_exactly_one_health_integrity_embed(
         self, tmp_path, monkeypatch, capsys
@@ -410,7 +411,8 @@ class TestHybridMode:
         assert cli.main(["search", "alpha", "--mode", "hybrid", "--limit", "1"]) == 0
         out = capsys.readouterr().out
         assert "1 result(s)" in out
-        assert "1 more matching recording(s)" in out
+        # CLI vector modes always search the Library item scope.
+        assert "1 more matching library item(s)" in out
 
 
 # ---------------------------------------------------------------------------

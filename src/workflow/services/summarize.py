@@ -969,22 +969,28 @@ def persist_summary(
       are deactivated atomically before the new one activates. Summaries
       of older transcripts or different output_languages are untouched.
 
-    The tag scope and post-commit sync are DERIVED from the Section
-    shape (never caller switches):
+    The tag scope is DERIVED from the Section shape (never caller
+    switches):
 
     - a FIXED whole-recording section (``segmented_version IS NULL`` and
       ordinal 0): default-variant suggestions materialize as
-      recording-scoped ``TagAssignment`` rows and exactly one recording
-      search sync is scheduled (existing whole-recording behavior);
+      recording-scoped ``TagAssignment`` rows (existing whole-recording
+      behavior);
     - a TOPIC section (``segmented_version`` non-NULL): the section is
       RE-VALIDATED inside this transaction, immediately after the
       Recording row is locked/reloaded and before any Summary/tag write
       (``segmentation.require_active_topic_section`` — a layout that
       became historical is rejected with its stable sanitized
       category). Default-variant suggestions materialize as SECTION-
-      scoped ``TagAssignment`` rows and NO recording search sync is
-      scheduled (section content is not indexed until Step 6.3);
+      scoped ``TagAssignment`` rows;
     - any other shape is rejected (``SummaryRelationError``).
+
+    Either shape schedules exactly ONE post-commit recording search sync
+    (Step 6.3: canonical topic-section summaries are now indexed
+    documents of the parent Recording, so a section-summary activation
+    changes the parent's expected index content; the section tags
+    materialized with the default variant are part of that document's
+    aux text).
     """
     if section.transcript_id != transcript.pk:
         raise SummaryRelationError("section does not belong to the summary's transcript")
@@ -1005,10 +1011,8 @@ def persist_summary(
             # Summary/tag write.
             segmentation_service.require_active_topic_section(section)
             tags_scope: Section | None = section
-            schedule_sync = False
         elif section.ordinal == 0:
             tags_scope = None
-            schedule_sync = True
         else:
             raise SummaryRelationError("summary section shape is invalid")
 
@@ -1075,12 +1079,12 @@ def persist_summary(
         attempt.error_message = ""
         attempt.finished_at = now
         attempt.save()
-        # Step 5A.3: the new variant (+ materialized default-variant tags
-        # and possible title/default-language changes) syncs after commit.
-        # Topic-section summaries are not indexed until Step 6.3 and
-        # never schedule a recording sync here.
-        if schedule_sync:
-            schedule_recording_sync([rec.pk])
+        # Step 5A.3 + 6.3: the new variant (+ materialized default-variant
+        # tags and possible title/default-language changes) syncs the
+        # parent Recording's index after commit — whole-recording variants
+        # directly, canonical topic-section variants as indexed
+        # section-summary documents of the SAME parent Recording.
+        schedule_recording_sync([rec.pk])
     return summary
 
 
@@ -1431,8 +1435,10 @@ def summarize_pending(config: AppConfig) -> dict:
 #   Section's canonical segment range (never source audio, never
 #   ``text_normalized``);
 # - default-variant suggestions materialize as SECTION-scoped
-#   ``TagAssignment`` rows and no recording search/embedding sync is
-#   scheduled (section content is not indexed until Step 6.3);
+#   ``TagAssignment`` rows; a successful activation schedules exactly one
+#   post-commit PARENT-recording search sync (Step 6.3: canonical topic-
+#   section summaries and their tags are indexed documents of the parent
+#   Recording);
 # - section summaries NEVER change the Recording-level default tuple
 #   (``summary_status``, ``resummarization_failed``,
 #   ``last_failed_attempt``), processing status, or whole summary: the

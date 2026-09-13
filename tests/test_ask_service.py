@@ -1,4 +1,5 @@
-"""Service tests for Step 5D Ask-with-citations.
+"""Service tests for Step 5D Ask-with-citations (+ Step 6.3 section
+summaries).
 
 All network is mocked (fake embedder + fake chat functions); no real
 HTTP, oMLX, user audio or persistence. Covers the public evidence
@@ -8,7 +9,11 @@ Ask pipeline (citation URLs, fixed insufficiency with zero chat calls,
 strict JSON/citation validation, retry-only-on-invalid-output, endpoint
 validation, bounds, prompt-injection-as-data, post-chat revalidation),
 read-only purity and the exact one-sweep/one-embedding/one-traversal
-contract.
+contract. The Step 6.3 section covers canonical ACTIVE topic-section
+summary admission (citation section_id + summary-version route), the
+summary-prose-only prompt policy, the fail-closed rejection of
+historical/malformed/cross-parent section summaries and the post-chat
+concurrent-layout-change contract.
 """
 
 from __future__ import annotations
@@ -20,8 +25,19 @@ from django.db import connection
 from django.test.utils import CaptureQueriesContext
 
 from brainlib.config import EmbeddingConfig
-from factories import make_config, make_summary_version, make_transcribed_recording
-from workflow.models import EmbeddingGeneration, EmbeddingGenerationState
+from factories import (
+    make_config,
+    make_summary_version,
+    make_tag,
+    make_transcribed_recording,
+)
+from workflow.models import (
+    EmbeddingGeneration,
+    EmbeddingGenerationState,
+    SearchDocument,
+    Section,
+    SegmentedVersion,
+)
 from workflow.services import ask as ask_service
 from workflow.services import embedding_index as ei
 from workflow.services import search_index as si
@@ -33,6 +49,8 @@ from workflow.services.llm import (
     LLMTimeout,
     LLMUnavailable,
 )
+from workflow.services.segmentation import save_segmented_version
+from workflow.services.tags import add_manual_tag_section
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -935,3 +953,327 @@ class TestPurity:
             "alpha", config=config, embedder=guard_embed, chat=guard_chat
         )
         assert result.state == ask_service.STATE_ANSWERED
+
+
+# ---------------------------------------------------------------------------
+# 10. Step 6.3: canonical ACTIVE topic-section summaries as evidence
+# ---------------------------------------------------------------------------
+
+
+def split_corpus(
+    tmp_path,
+    *,
+    sha: str,
+    with_section_tag: bool = False,
+    segments_carry_alpha: bool = False,
+):
+    """One transcribed recording with four segments, a fully canonical
+    ACTIVE split layout (``Alpha Topic`` / ``Beta Topic`` at marker 2),
+    ACTIVE summaries on BOTH topic Sections and on the fixed ordinal-0
+    section, and healthy search+embedding indexes.
+
+    Segment texts carry the ``alpha`` keyword only when asked, so the
+    three summaries deterministically win the per-Recording evidence
+    slots. ``with_section_tag`` binds a distinctive ACTIVE tag name to
+    the first Section (index aux only — never prompt evidence)."""
+    marker = "alpha" if segments_carry_alpha else "solo"
+    rec, transcript, fixed = make_transcribed_recording(
+        [
+            f"{marker} segment zero",
+            f"{marker} segment one",
+            f"{marker} segment two",
+            f"{marker} segment three",
+        ],
+        sha=sha,
+    )
+    save_segmented_version(
+        rec.pk, transcript.pk, 0, 4, [2], ["Alpha Topic", "Beta Topic"]
+    )
+    layout = SegmentedVersion.objects.get(transcript=transcript, is_active=True)
+    sections = list(
+        Section.objects.filter(segmented_version=layout).order_by("ordinal")
+    )
+    section_summaries = (
+        make_summary_version(
+            rec,
+            transcript,
+            sections[0],
+            title="alpha section title one",
+            overview="alpha section overview one",
+        ),
+        make_summary_version(
+            rec,
+            transcript,
+            sections[1],
+            title="alpha section title two",
+            overview="alpha section overview two",
+        ),
+    )
+    whole = make_summary_version(
+        rec,
+        transcript,
+        fixed,
+        title="alpha whole title",
+        overview="alpha whole overview",
+    )
+    if with_section_tag:
+        add_manual_tag_section(sections[0], make_tag("Zebra Confidential"))
+    si.rebuild_index()
+    config = ask_config(tmp_path)
+    ei.rebuild_embedding_index(config, embedder=keyword_embedder(["alpha"]))
+    return {
+        "config": config,
+        "rec": rec,
+        "transcript": transcript,
+        "fixed": fixed,
+        "sections": sections,
+        "section_summaries": section_summaries,
+        "whole": whole,
+    }
+
+
+def _section_evidence_item(row, *, rec, transcript, summary, section):
+    """An internal materialized item claiming the given section-summary
+    provenance (whitebox helper for the live-ownership fail-closed
+    checks)."""
+    return ask_service._Evidence(
+        citation_id="C1",
+        document_key=row.document_key,
+        doc_type="summary",
+        recording_id=rec.pk,
+        transcript_id=transcript.pk,
+        summary_id=summary.pk,
+        section_id=section.pk,
+        segment_ordinal=None,
+        output_language=summary.output_language,
+        content_hash=row.content_hash,
+        title="",
+        text="claim",
+        excerpted=False,
+        url="/",
+    )
+
+
+class TestSectionSummaryEvidence:
+    def test_canonical_section_summaries_admitted_with_section_id_and_summary_route(
+        self, tmp_path
+    ):
+        corpus = split_corpus(tmp_path, sha="asksec-admit")
+        rec = corpus["rec"]
+        result = ask_service.ask_question(
+            "alpha",
+            config=corpus["config"],
+            embedder=keyword_embedder(["alpha"]),
+            chat=chat_json("Combined [C1][C2][C3].", ["C1", "C2", "C3"]),
+        )
+        assert result.state == ask_service.STATE_ANSWERED
+        assert result.evidence_count == 3  # per-Recording cap; all summaries
+        by_url = {citation.url: citation for citation in result.citations}
+        for section, summary in zip(
+            corpus["sections"], corpus["section_summaries"]
+        ):
+            url = f"/recordings/{rec.pk}/summaries/{summary.pk}/"
+            citation = by_url[url]  # the EXACT existing summary-version route
+            assert citation.source == "summary"
+            assert citation.section_id == section.pk
+        whole_url = f"/recordings/{rec.pk}/summaries/{corpus['whole'].pk}/"
+        assert by_url[whole_url].section_id is None  # whole-recording variant
+        assert not any("/transcript/" in url for url in by_url)
+
+    def test_section_prompt_evidence_is_summary_prose_only(self, tmp_path):
+        corpus = split_corpus(tmp_path, sha="asksec-prose", with_section_tag=True)
+        calls = []
+        result = ask_service.ask_question(
+            "alpha",
+            config=corpus["config"],
+            embedder=keyword_embedder(["alpha"]),
+            chat=chat_json(
+                "Combined [C1][C2][C3].", ["C1", "C2", "C3"], calls=calls
+            ),
+        )
+        assert result.state == ask_service.STATE_ANSWERED
+        # The section tag really is in the index aux text of the section
+        # doc (the mapping binds it) — and still never in the prompt.
+        row = SearchDocument.objects.get(
+            document_key=f"summary:{corpus['section_summaries'][0].pk}"
+        )
+        assert "Zebra Confidential" in row.aux_text
+        user_prompt = calls[0]["user"]
+        assert "alpha section overview one" in user_prompt
+        assert "alpha section overview two" in user_prompt
+        assert "Zebra Confidential" not in user_prompt  # never prompt evidence
+        assert "Alpha Topic" not in user_prompt  # layout title, not prose
+        assert "Beta Topic" not in user_prompt
+        assert user_prompt.count("source=summary") == 3
+
+    def test_evidence_text_policy_falls_back_never_to_aux_for_sections(self):
+        import types
+
+        row = types.SimpleNamespace(
+            doc_type="summary", body_text="", title_text="", aux_text="Work"
+        )
+        assert (
+            ask_service._evidence_text(row, section_summary=True) == ""
+        )  # never aux for a section summary
+        assert (
+            ask_service._evidence_text(row, section_summary=False) == "Work"
+        )  # whole-recording behavior unchanged
+
+    def test_per_recording_quota_shared_across_sections_and_segments(
+        self, tmp_path
+    ):
+        corpus = split_corpus(
+            tmp_path, sha="asksec-quota", segments_carry_alpha=True
+        )
+        evidence = sq.retrieve_semantic_evidence(
+            "alpha",
+            config=corpus["config"],
+            embedder=keyword_embedder(["alpha"]),
+        )
+        types_ = [winner.match.doc_type for winner in evidence.matches]
+        # Seven matching docs on one Recording, cap 3: summaries win the
+        # slots; the section docs share the SAME quota (no new limit).
+        assert len(evidence.matches) == sq.EVIDENCE_PER_RECORDING_LIMIT
+        assert types_ == ["summary", "summary", "summary"]
+
+    def test_concurrent_layout_change_during_chat_fails_closed(
+        self, tmp_path, django_capture_on_commit_callbacks
+    ):
+        corpus = split_corpus(tmp_path, sha="asksec-race")
+        rec, transcript = corpus["rec"], corpus["transcript"]
+
+        def mutate_then_answer(config, *, system_prompt, user_prompt, temperature, max_tokens):
+            # A real layout change commits while the model call is in
+            # flight (the post-commit index sync is captured, not run, so
+            # the ownership layer itself must fail closed).
+            save_segmented_version(
+                rec.pk, transcript.pk, 0, 4, [1], ["Gamma", "Delta"]
+            )
+            return json.dumps(
+                {
+                    "answer": "Combined [C1][C2][C3].",
+                    "citations": ["C1", "C2", "C3"],
+                    "insufficient": False,
+                }
+            )
+
+        with django_capture_on_commit_callbacks():
+            with pytest.raises(ask_service.AskError) as excinfo:
+                ask_service.ask_question(
+                    "alpha",
+                    config=corpus["config"],
+                    embedder=keyword_embedder(["alpha"]),
+                    chat=mutate_then_answer,
+                )
+        assert excinfo.value.code == ask_service.ASK_CONCURRENT_CHANGE
+
+    def test_superseded_section_summary_fails_closed_on_live_validation(
+        self, tmp_path, django_capture_on_commit_callbacks
+    ):
+        corpus = split_corpus(tmp_path, sha="asksec-hist")
+        rec, transcript = corpus["rec"], corpus["transcript"]
+        section = corpus["sections"][0]
+        summary = corpus["section_summaries"][0]
+        row = SearchDocument.objects.get(document_key=f"summary:{summary.pk}")
+        with django_capture_on_commit_callbacks():
+            save_segmented_version(
+                rec.pk, transcript.pk, 0, 4, [1], ["Gamma", "Delta"]
+            )
+        item = _section_evidence_item(
+            row, rec=rec, transcript=transcript, summary=summary, section=section
+        )
+        # The registry row still exists (sync captured) but the owning
+        # layout is now historical: the canonical predicate excludes it.
+        with pytest.raises(ask_service.AskError) as excinfo:
+            ask_service._validate_live_evidence(
+                [item], {row.document_key: row}, using="default"
+            )
+        assert excinfo.value.code == ask_service.ASK_CONCURRENT_CHANGE
+
+    def test_malformed_layout_section_summary_fails_closed(self, tmp_path):
+        corpus = split_corpus(tmp_path, sha="asksec-malformed")
+        rec, transcript = corpus["rec"], corpus["transcript"]
+        section = corpus["sections"][0]
+        summary = corpus["section_summaries"][0]
+        row = SearchDocument.objects.get(document_key=f"summary:{summary.pk}")
+        # Corrupt stored state: a temporary flag carrying an arbitrary
+        # custom title violates the canonical SHAPE rule — the whole
+        # layout fails closed on every canonical read.
+        Section.objects.filter(pk=section.pk).update(
+            title="Totally custom", title_is_temporary=True
+        )
+        item = _section_evidence_item(
+            row, rec=rec, transcript=transcript, summary=summary, section=section
+        )
+        with pytest.raises(ask_service.AskError) as excinfo:
+            ask_service._validate_live_evidence(
+                [item], {row.document_key: row}, using="default"
+            )
+        assert excinfo.value.code == ask_service.ASK_CONCURRENT_CHANGE
+
+    def test_cross_parent_section_summary_fails_closed(self, tmp_path):
+        corpus = split_corpus(tmp_path, sha="asksec-xp-a")
+        other = split_corpus(tmp_path, sha="asksec-xp-b")
+        # A forged Summary naming the FIRST recording's canonical section
+        # but the SECOND recording's active transcript (the exact shape
+        # the search-index cross-parent defense excludes).
+        forged = make_summary_version(
+            corpus["rec"],
+            other["transcript"],
+            corpus["sections"][0],
+            title="Forged",
+        )
+        spec = si.make_spec(
+            doc_type="summary",
+            document_key=f"summary:{forged.pk}",
+            recording_id=forged.recording_id,
+            transcript_id=forged.transcript_id,
+            summary_id=forged.pk,
+            output_language=forged.output_language,
+            title_text="Forged",
+            body_text="body",
+            aux_text="",
+        )
+        row = SearchDocument.objects.create(
+            document_key=spec.document_key,
+            doc_type=spec.doc_type,
+            recording_id=spec.recording_id,
+            transcript_id=spec.transcript_id,
+            summary_id=spec.summary_id,
+            output_language=spec.output_language,
+            title_text=spec.title_text,
+            body_text=spec.body_text,
+            aux_text=spec.aux_text,
+            content_hash=spec.content_hash,
+            index_version=si.INDEX_VERSION,
+        )
+        item = _section_evidence_item(
+            row,
+            rec=corpus["rec"],
+            transcript=other["transcript"],
+            summary=forged,
+            section=corpus["sections"][0],
+        )
+        with pytest.raises(ask_service.AskError) as excinfo:
+            ask_service._validate_live_evidence(
+                [item], {row.document_key: row}, using="default"
+            )
+        assert excinfo.value.code == ask_service.ASK_CONCURRENT_CHANGE
+
+    def test_section_evidence_path_is_read_only(self, tmp_path):
+        corpus = split_corpus(tmp_path, sha="asksec-readonly")
+        with CaptureQueriesContext(connection) as ctx:
+            ask_service.ask_question(
+                "alpha",
+                config=corpus["config"],
+                embedder=keyword_embedder(["alpha"]),
+                chat=chat_json("Combined [C1][C2][C3].", ["C1", "C2", "C3"]),
+            )
+        writes = [
+            query["sql"]
+            for query in ctx.captured_queries
+            if query["sql"].lstrip().upper().startswith(
+                ("INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "REPLACE")
+            )
+        ]
+        assert writes == []  # the canonical predicate adds SELECTs only

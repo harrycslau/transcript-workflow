@@ -1,4 +1,4 @@
-"""Ask with citations (Step 5D).
+"""Ask with citations (Step 5D, Step 6.3 section-summary extension).
 
 Retrieves a bounded set of DOCUMENT-LEVEL semantic evidence (transcript
 segments and summaries only, never metadata) through the existing Step 5C
@@ -6,6 +6,18 @@ contracts, materializes it from the authoritative ``SearchDocument`` rows
 while validating provenance/ownership against the live source objects,
 then asks the configured local oMLX chat endpoint for a strict JSON
 answer whose citations resolve ONLY to the retrieved evidence.
+
+Step 6.3 admitted summary evidence is EITHER the fixed whole-recording
+(ordinal-0) variant OR an ACTIVE variant of a topic Section of the fully
+canonical ACTIVE layout of the ACTIVE Transcript — admission runs through
+the SHARED canonical-layout predicate (``segmentation`` — the same SQL
+the Library projection and the search index consume, never a fork) plus
+the cross-parent defense. Historical, malformed-layout and cross-parent
+section summaries fail closed as the same fixed concurrent-change
+failure. Section-summary PROMPT evidence carries summary prose ONLY
+(body, else title): the Section's tag names (which the index aux text
+additionally binds), layout titles and segment boundaries are never
+prompt evidence.
 
 Safety properties:
 
@@ -34,7 +46,9 @@ Safety properties:
   never retry;
 - after the chat call the selected evidence is revalidated (document
   key/content_hash/provenance plus transcript/segment or summary
-  ownership/existence); any change is a fixed sanitized concurrent-change
+  ownership/existence, including the canonical ACTIVE section/layout
+  ownership of a section-summary item); any change — including a
+  concurrent layout change — is a fixed sanitized concurrent-change
   failure and never an answer;
 - errors and logs never contain the question, evidence text, model
   output, URLs, secrets, SQL or paths.
@@ -48,7 +62,8 @@ import urllib.parse
 from dataclasses import dataclass
 from ipaddress import ip_address
 
-from django.db.models import Q
+from django.db.models import F, Q
+from django.db.models.expressions import RawSQL
 from django.urls import reverse
 
 from brainlib.config import ConfigError
@@ -60,6 +75,11 @@ from workflow.models import (
 )
 from workflow.services import semantic_query
 from workflow.services.search_query import _lookup_titles
+# The canonical-layout SQL predicate has ONE home: the shared
+# ``segmentation`` service (the Step 6.2 Library projection and the
+# Step 6.3 search-index filter consume the SAME text) — Ask admits and
+# revalidates section-summary evidence through it, never a fork.
+from workflow.services.segmentation import canonical_active_section_ids
 
 # ---------------------------------------------------------------------------
 # Policy constants (all fixed, hardcoded, never configurable)
@@ -156,7 +176,14 @@ class AskInputError(AskError):
 
 @dataclass(frozen=True)
 class AskCitation:
-    """One server-owned citation reference to a retrieved evidence item."""
+    """One server-owned citation reference to a retrieved evidence item.
+
+    ``section_id`` is the owning topic Section pk when the citation is a
+    Section-summary variant (Step 6.3); ``None`` for a segment or a
+    whole-recording summary. The ``url`` is the summary-version route in
+    BOTH summary cases (a section summary's summary-detail page is the
+    exact existing route and renders its owning Section).
+    """
 
     citation_id: str
     source: str
@@ -164,6 +191,7 @@ class AskCitation:
     title: str
     url: str
     document_key: str
+    section_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -197,7 +225,12 @@ class AskResult:
 
 @dataclass(frozen=True)
 class _Evidence:
-    """Internal materialized evidence item (never exposed raw)."""
+    """Internal materialized evidence item (never exposed raw).
+
+    ``section_id`` is the canonical ACTIVE topic Section pk when the
+    document is a Section-summary variant (Step 6.3); ``None`` for a
+    segment or a whole-recording summary.
+    """
 
     citation_id: str
     document_key: str
@@ -205,6 +238,7 @@ class _Evidence:
     recording_id: str
     transcript_id: int | None
     summary_id: str | None
+    section_id: int | None
     segment_ordinal: int | None
     output_language: str
     content_hash: str
@@ -328,7 +362,17 @@ def _validate_live_evidence(
     exact SearchDocument key/content_hash/provenance plus Transcript/
     Segment or Summary ownership/existence. Any doubt raises the fixed
     sanitized concurrent-change failure. All lookups are bounded (one
-    query per family, never per item)."""
+    query per family, never per item).
+
+    Summary evidence is eligible ONLY as the fixed whole-recording
+    (ordinal-0, layout-less) variant OR — Step 6.3 — as an ACTIVE variant
+    of a topic Section of the fully canonical ACTIVE layout of the
+    ACTIVE Transcript with the cross-parent defense (the SHARED
+    canonical-layout predicate, never a fork). Historical,
+    malformed-layout and cross-parent section summaries are therefore
+    never eligible: a layout that changed after materialization (or a
+    forged provenance) fails closed here, identically on the pre-chat
+    materialization check and the post-chat revalidation."""
     segment_items = [item for item in items if item.doc_type == "segment"]
     summary_items = [item for item in items if item.doc_type == "summary"]
 
@@ -375,27 +419,93 @@ def _validate_live_evidence(
     eligible_summaries: dict = {}
     summary_ids = sorted({item.summary_id for item in summary_items})
     if summary_ids:
+        base = Summary.objects.using(using).filter(
+            pk__in=summary_ids,
+            is_active=True,
+            transcript__is_active=True,
+        )
+        # Whole-recording (fixed ordinal-0, layout-less) variants — the
+        # unchanged Step 5D eligibility, section identity never claimed.
         for pk, recording_id, transcript_id, output_language in (
-            Summary.objects.using(using)
-            .filter(
-                pk__in=summary_ids,
-                is_active=True,
-                transcript__is_active=True,
+            base.filter(
                 section__ordinal=0,
                 section__segmented_version__isnull=True,
-            )
-            .values_list("pk", "recording_id", "transcript_id", "output_language")
+            ).values_list("pk", "recording_id", "transcript_id", "output_language")
         ):
-            eligible_summaries[pk] = (recording_id, transcript_id, output_language)
+            eligible_summaries[pk] = (
+                recording_id,
+                transcript_id,
+                output_language,
+                None,
+            )
+        # Canonical ACTIVE topic-section variants (Step 6.3) — the SAME
+        # shared canonical-layout predicate as the search index and the
+        # Library projection, plus the cross-parent defense. A summary
+        # whose layout became historical/malformed or whose section does
+        # not belong to its own transcript is never eligible.
+        section_sql, section_params = canonical_active_section_ids()
+        for pk, recording_id, transcript_id, output_language, section_id in (
+            base.filter(
+                section__isnull=False,
+                section__in=RawSQL(section_sql, list(section_params)),
+                section__transcript=F("transcript"),
+            ).values_list(
+                "pk", "recording_id", "transcript_id", "output_language", "section_id"
+            )
+        ):
+            eligible_summaries[pk] = (
+                recording_id,
+                transcript_id,
+                output_language,
+                section_id,
+            )
     for item in summary_items:
         eligible = eligible_summaries.get(item.summary_id)
-        if eligible != (item.recording_id, item.transcript_id, item.output_language):
+        if eligible != (
+            item.recording_id,
+            item.transcript_id,
+            item.output_language,
+            item.section_id,
+        ):
             raise _concurrent_change()
 
 
-def _evidence_text(row) -> str:
+def _canonical_section_id_map(summary_ids, *, using: str) -> dict:
+    """Bounded one-query map from Summary pk to the canonical ACTIVE
+    topic Section pk for the summaries that are ACTIVE variants of a
+    topic Section of the fully canonical ACTIVE layout of the ACTIVE
+    Transcript (SHARED canonical-layout predicate plus the cross-parent
+    defense — the exact admission of :func:`_validate_live_evidence`).
+    Summaries that are not canonical section summaries are absent."""
+    wanted = sorted({pk for pk in summary_ids if pk is not None})
+    if not wanted:
+        return {}
+    section_sql, section_params = canonical_active_section_ids()
+    return {
+        pk: section_id
+        for pk, section_id in Summary.objects.using(using)
+        .filter(
+            pk__in=wanted,
+            is_active=True,
+            transcript__is_active=True,
+            section__isnull=False,
+            section__in=RawSQL(section_sql, list(section_params)),
+            section__transcript=F("transcript"),
+        )
+        .values_list("pk", "section_id")
+    }
+
+
+def _evidence_text(row, *, section_summary: bool = False) -> str:
     if row.doc_type == "segment":
         return row.body_text
+    if section_summary:
+        # Step 6.3: a section summary's prompt evidence is summary prose
+        # ONLY. Its index aux text additionally binds the Section's
+        # active tag names, and tag names / layout metadata / segment
+        # boundaries are NEVER prompt evidence — so unlike a
+        # whole-recording summary this NEVER falls back to aux_text.
+        return row.body_text or row.title_text
     return row.body_text or row.title_text or row.aux_text
 
 
@@ -403,12 +513,21 @@ def _materialize_evidence(matches, *, using: str, config) -> list[_Evidence]:
     """Materialize the winning evidence from ``SearchDocument`` and
     validate exact provenance/ownership against the current active
     source objects. Bounded queries only (one document fetch, one title
-    lookup and one query per ownership family)."""
+    lookup, one section-identity map and one query per ownership
+    family)."""
     if not matches:
         return []
     rows = _fetch_document_rows([match.match.document_key for match in matches], using=using)
     titles = _lookup_titles(
         sorted({match.match.recording_id for match in matches}), using=using
+    )
+    section_ids = _canonical_section_id_map(
+        [
+            match.match.summary_id
+            for match in matches
+            if match.match.doc_type == "summary"
+        ],
+        using=using,
     )
     segments_per_page = max(1, int(config.web.transcript_segments_per_page))
     items: list[_Evidence] = []
@@ -417,6 +536,7 @@ def _materialize_evidence(matches, *, using: str, config) -> list[_Evidence]:
         row = rows.get(match.document_key)
         if row is None:
             raise _concurrent_change()
+        section_id = None
         if match.doc_type == "segment":
             url = _segment_url(
                 match.recording_id,
@@ -425,12 +545,17 @@ def _materialize_evidence(matches, *, using: str, config) -> list[_Evidence]:
                 segments_per_page=segments_per_page,
             )
         elif match.doc_type == "summary":
+            # The EXACT existing summary-version route serves BOTH the
+            # whole-recording variant and a canonical Section variant
+            # (the section-summary detail page renders its owning
+            # Section and links back to it).
             url = _summary_url(match.recording_id, match.summary_id)
+            section_id = section_ids.get(match.summary_id)
         else:
             # Metadata can never be evidence; the pure selector already
             # excluded it. Defensive: skip anything unexpected.
             continue
-        text = _evidence_text(row)
+        text = _evidence_text(row, section_summary=section_id is not None)
         if not text:
             continue
         excerpted = len(text) > EVIDENCE_EXCERPT_MAX_CHARS
@@ -444,6 +569,7 @@ def _materialize_evidence(matches, *, using: str, config) -> list[_Evidence]:
                 recording_id=match.recording_id,
                 transcript_id=match.transcript_id,
                 summary_id=match.summary_id,
+                section_id=section_id,
                 segment_ordinal=match.segment_ordinal,
                 output_language=match.output_language,
                 content_hash=row.content_hash,
@@ -673,6 +799,7 @@ def _build_citations(citation_ids, items) -> tuple[AskCitation, ...]:
                 title=item.title,
                 url=item.url,
                 document_key=item.document_key,
+                section_id=item.section_id,
             )
         )
     return tuple(citations)

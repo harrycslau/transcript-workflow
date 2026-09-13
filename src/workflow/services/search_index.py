@@ -22,8 +22,13 @@ Canonical document set:
   but never searchable FTS text.
 - ``summary``   every current whole-recording variant
   (``Summary.is_active`` AND ``transcript.is_active`` AND
-  ``section__ordinal=0``). Legacy ``output_language="und"`` rows inside
-  the current transcript stay as stored and are reported as legacy.
+  ``section__ordinal=0``) AND — Step 6.3 — every ACTIVE variant of a
+  topic Section of the fully canonical ACTIVE layout of the ACTIVE
+  Transcript (the shared ``segmentation`` canonical-layout SQL predicate;
+  cross-parent rows are excluded; malformed/historical layouts contribute
+  nothing). Legacy ``output_language="und"`` rows inside the current
+  transcript stay as stored and are reported as legacy. Section-summary
+  ``aux_text`` additionally carries the Section's active tag names.
 - ``recording`` one deterministic metadata document: Library display
   title (shared ``library_metadata`` contract), deterministic source
   FILENAMES only (never paths), sorted active/effective tag names.
@@ -51,7 +56,8 @@ from dataclasses import dataclass
 from typing import Iterator, Sequence
 
 from django.db import connections, transaction
-from django.db.models import Q
+from django.db.models import F, Q
+from django.db.models.expressions import RawSQL
 
 from brainlib.config import ConfigError
 from workflow.models import (
@@ -72,8 +78,29 @@ from workflow.services.library_metadata import (
     preferred_source_filename,
     summary_title_parts,
 )
+# ``segmentation`` is imported at module level: it depends only on the
+# models (plus a lazy inside-function search_sync import), so no import
+# cycle exists (search_sync -> search_index -> segmentation is a DAG).
+# The canonical-layout SQL predicate has ONE home: that shared service
+# module — consumed here (Step 6.3 section summaries) and by
+# workflow.query (Step 6.2 Library projection), never forked.
+from workflow.services.segmentation import canonical_active_section_ids
 
-INDEX_VERSION = "1"
+_SECTION_IDS_SQL, _SECTION_IDS_PARAMS = canonical_active_section_ids()
+
+
+def _canonical_section_ids_rawsql() -> RawSQL:
+    """A fresh RawSQL expression over the SHARED canonical-layout
+    predicate selecting valid ACTIVE topic Section pks."""
+    return RawSQL(_SECTION_IDS_SQL, list(_SECTION_IDS_PARAMS))
+
+
+# Bumped to "2" in Step 6.3: canonical summary documents now include the
+# ACTIVE topic-section summaries of the canonical ACTIVE layout (and the
+# migration-0008 backfill stays at the historical version-"1" whole-
+# recording-only mapping — it is detectably stale until an explicit
+# ``brain search-index rebuild``, exactly like any other mapping change).
+INDEX_VERSION = "2"
 
 FTS_TABLE = "workflow_search_fts"
 FTS_COLUMNS = ("title_text", "body_text", "aux_text")
@@ -251,7 +278,9 @@ def make_spec(
 
 
 # ---------------------------------------------------------------------------
-# Canonical per-type field mappings (mirrored in migration 0008)
+# Canonical per-type field mappings (the version-1 mappings are mirrored
+# in migration 0008's local backfill; the Step 6.3 section-summary
+# extension below is version "2" and deliberately NOT mirrored there)
 # ---------------------------------------------------------------------------
 
 
@@ -290,6 +319,30 @@ def summary_aux_text(summary) -> str:
     return "\n".join(parts)
 
 
+def section_summary_aux_text(summary, tag_names: Sequence[str]) -> str:
+    """Topic-section summary aux text: the shared
+    :func:`summary_aux_text` people/organizations/topics parts followed
+    by the Section's ACTIVE tag names.
+
+    ``tag_names`` must already be in the deterministic shared order —
+    ``library_metadata.active_tag_names`` (sorted ``name_key`` then
+    ``name``, never creation order); it is appended verbatim after the
+    model-list parts, each NFC'd. Empty/whitespace-only names are
+    dropped. Joined by newlines. This binding means a section tag
+    membership change flows through the normal ``content_mismatch`` /
+    ``stale_content`` detection — no separate tag bookkeeping.
+    """
+    parts: list[str] = []
+    base = summary_aux_text(summary)
+    if base:
+        parts.append(base)
+    for name in tag_names:
+        value = nfc(name).strip()
+        if value:
+            parts.append(value)
+    return "\n".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Expected-document generation (deterministic, chunk-streamed, read-only)
 # ---------------------------------------------------------------------------
@@ -303,14 +356,28 @@ def _expected_documents_for_rows(
 ) -> Iterator[DocumentSpec]:
     """Yield every expected ``DocumentSpec`` for the given Recording rows
     in canonical order: segments by (transcript, ordinal), then the
-    Recording metadata docs, then Summary variants.
+    Recording metadata docs, then whole-recording Summary variants, then
+    ACTIVE topic-section Summary variants (Step 6.3).
 
-    Bounded queries per call (transcripts, segments, summaries, sources,
-    tags — one query each), never per row; segments stream through an
-    iterator so a single recording with millions of segments never
-    materializes an unbounded list. This is THE single canonical mapping
-    used by the global sweep, per-recording synchronization (Step 5A.3)
-    and, byte-identically mirrored, migration 0008's backfill.
+    Section summaries are eligible ONLY through the SHARED canonical
+    layout predicate (``segmentation.canonical_active_section_ids`` —
+    identical SQL to the Step 6.2 Library projection): active Summary of
+    a topic Section of the fully canonical ACTIVE layout of the ACTIVE
+    Transcript, with a ``section__transcript=F("transcript")``
+    cross-parent defense. Sections of no/historical/malformed layouts
+    contribute nothing (their old docs converge to orphans via
+    reconcile/status). Section-summary aux additionally carries the
+    Section's active tag names (deterministic shared order).
+
+    Bounded queries per call (transcripts, segments, whole-recording
+    summaries, section summaries, sources, recording-scoped tags,
+    section-scoped tags — one query each), never per row; segments stream
+    through an iterator so a single recording with millions of segments
+    never materializes an unbounded list. This is THE single canonical
+    mapping used by the global sweep and per-recording synchronization
+    (Step 5A.3); migration 0008's backfill mirrors the HISTORICAL
+    version-1 mapping only (never updated — the version bump makes it
+    detectably stale until an explicit rebuild).
     """
     rec_ids = [rec.pk for rec in recordings]
     if not rec_ids:
@@ -349,14 +416,53 @@ def _expected_documents_for_rows(
     tags_by_rec: dict[str, list[TagAssignment]] = {}
     assignments = (
         TagAssignment.objects.using(using)
-        # Defense-in-depth: the search index stays whole-recording only
-        # (Step 6.2 section tags are not indexed until Step 6.3), so only
-        # recording-scoped assignments contribute the metadata aux text.
+        # Recording-scoped assignments only: section-scoped tags never
+        # enter the Recording metadata aux text (they are indexed solely
+        # in their own section-summary documents' aux text — Step 6.3).
         .filter(recording__in=rec_ids, is_active=True, section__isnull=True)
         .select_related("tag")
     )
     for assignment in assignments:
         tags_by_rec.setdefault(assignment.recording_id, []).append(assignment)
+
+    # Step 6.3: ACTIVE Summary variants of canonical topic Sections.
+    # Eligibility is decided ONLY by the SHARED canonical-layout SQL
+    # predicate (same text the Library projection compiles) plus the
+    # active-transcript / active-summary conditions; the cross-parent
+    # defense binds the Section to the Summary's own transcript.
+    section_summaries = list(
+        Summary.objects.using(using)
+        .filter(
+            recording__in=rec_ids,
+            is_active=True,
+            transcript__is_active=True,
+            section__isnull=False,
+            section__in=_canonical_section_ids_rawsql(),
+            section__transcript=F("transcript"),
+        )
+        .order_by("section_id", "ordinal", "pk")
+    )
+    section_tag_assignments_by_section: dict[int, list[TagAssignment]] = {}
+    section_ids = sorted({summary.section_id for summary in section_summaries})
+    for chunk in _chunks(section_ids, INSERT_CHUNK_SIZE):
+        section_assignments = (
+            TagAssignment.objects.using(using)
+            .filter(
+                section__in=chunk,
+                is_active=True,
+                # Cross-parent defense (fail closed): ``recording`` is a
+                # denormalized parent, so a malformed row naming another
+                # Recording's section never contributes — only
+                # assignments whose recording equals the Section
+                # transcript's OWN recording are consumed.
+                recording_id=F("section__transcript__recording_id"),
+            )
+            .select_related("tag")
+        )
+        for assignment in section_assignments:
+            section_tag_assignments_by_section.setdefault(
+                assignment.section_id, []
+            ).append(assignment)
 
     transcript_ids = list(transcript_id_by_rec.values())
     rec_id_by_transcript = {tid: rid for rid, tid in transcript_id_by_rec.items()}
@@ -412,6 +518,27 @@ def _expected_documents_for_rows(
             title_text=nfc(summary.title),
             body_text=summary_body_text(summary),
             aux_text=summary_aux_text(summary),
+        )
+
+    # Canonical topic-section summaries last, deterministic
+    # (section_id, ordinal, pk) order; aux binds the Section's active
+    # tag names through the shared deterministic ordering contract.
+    for summary in section_summaries:
+        yield make_spec(
+            doc_type=SearchDocType.SUMMARY,
+            document_key=f"summary:{summary.pk}",
+            recording_id=summary.recording_id,
+            transcript_id=summary.transcript_id,
+            summary_id=summary.pk,
+            output_language=summary.output_language,
+            title_text=nfc(summary.title),
+            body_text=summary_body_text(summary),
+            aux_text=section_summary_aux_text(
+                summary,
+                active_tag_names(
+                    section_tag_assignments_by_section.get(summary.section_id, [])
+                ),
+            ),
         )
 
 
@@ -889,9 +1016,13 @@ def _expected_registry_page_is_canonical(using: str, rows: list[SearchDocument])
       is non-empty (``strip()`` eligibility), AND that transcript
       belongs to the DOCUMENT's recording (cross-recording forgeries are
       orphans, not expected rows);
-    - ``summary``: the Summary is active, on the active Transcript, in
-      the ordinal-0 section, AND its recording, transcript and
-      output_language all equal the document's own values.
+    - ``summary``: the Summary is active, on the active Transcript, AND
+      its recording, transcript and output_language all equal the
+      document's own values; the Section is EITHER the ordinal-0
+      whole-recording section (no layout) OR a topic Section passing the
+      SHARED canonical-layout predicate with the cross-parent defense
+      (Step 6.3). A section-summary row whose layout became historical
+      or malformed is therefore NOT expected and converges to an orphan.
     """
     expected_ids: set[int] = set()
     rows_by_pk: dict[int, SearchDocument] = {}
@@ -935,14 +1066,33 @@ def _expected_registry_page_is_canonical(using: str, rows: list[SearchDocument])
 
     if summary_candidates:
         eligible: dict[int, tuple] = {}
+        summary_pks = list(set(summary_candidates.values()))
+        # Whole-recording (fixed ordinal-0) variants.
         for pk, recording_id, transcript_id, output_language in (
             Summary.objects.using(using)
             .filter(
-                pk__in=list(set(summary_candidates.values())),
+                pk__in=summary_pks,
                 is_active=True,
                 transcript__is_active=True,
                 section__ordinal=0,
                 section__segmented_version__isnull=True,
+            )
+            .values_list("pk", "recording_id", "transcript_id", "output_language")
+        ):
+            eligible[pk] = (recording_id, transcript_id, output_language)
+        # Canonical topic-section variants (Step 6.3) — the SAME shared
+        # canonical-layout predicate as the expected-document mapping and
+        # the Library projection; a stale registry row for a historical
+        # or malformed layout is never eligible here.
+        for pk, recording_id, transcript_id, output_language in (
+            Summary.objects.using(using)
+            .filter(
+                pk__in=summary_pks,
+                is_active=True,
+                transcript__is_active=True,
+                section__isnull=False,
+                section__in=_canonical_section_ids_rawsql(),
+                section__transcript=F("transcript"),
             )
             .values_list("pk", "recording_id", "transcript_id", "output_language")
         ):
