@@ -2426,6 +2426,11 @@ required.)
   automatic summarization only for `missing` (never-attempted) — no
   auto-retry loop. `brain summarize ID` / `brain retry ID` are explicit;
   `brain summarize ID --regenerate` forces a new version.
+  `brain run --now` is one full pass that bypasses ONLY the configured
+  `macwhisper.file_stable_seconds` eligibility check (newly placed or
+  changed inbox files hash on the first invocation); `brain ingest` and
+  the service default (`respect_stability_window=True`) stay
+  stability-aware.
 - `recover_interruptions` closes unfinished summarization attempts and
   reconciles summary state idempotently and by stage. An interrupted
   first attempt becomes `failed`; an interrupted regeneration remains
@@ -2500,7 +2505,9 @@ keeps the active transcript and sets `retranscription_failed`.
   hashing), content-identity dedup (one Recording, many AudioSources),
   canonical-source selection (deterministic), missing/reappeared
   reconciliation, content replacement at an existing path → detach +
-  rehash; out-of-inbox sources parked `outside_current_inbox`.
+  rehash; out-of-inbox sources parked `outside_current_inbox`. The
+  stability-window eligibility check is the ONLY thing bypassed by
+  `ingest(..., respect_stability_window=False)` / `brain run --now`.
 - `audiosamples.py` — duration via stdlib `wave`/`afinfo` (plain text,
   not JSON), `afconvert` to 16 kHz mono PCM, beginning/middle/end
   windows (15 s) merged chronologically into one composite WAV, per

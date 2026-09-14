@@ -312,8 +312,18 @@ def _hash_source(source: AudioSource, config: AppConfig, report: IngestReport) -
     _attach_hashed_source(source, sha256, config, report)
 
 
-def ingest(config: AppConfig, now=None) -> IngestReport:
-    """Scan the inbox once: discover, observe stability, hash, dedupe."""
+def ingest(config: AppConfig, now=None, *, respect_stability_window: bool = True) -> IngestReport:
+    """Scan the inbox once: discover, observe stability, hash, dedupe.
+
+    ``respect_stability_window=False`` (``brain run --now``) bypasses ONLY
+    the persisted file-stability-window eligibility check for this single
+    pass: newly discovered, already-observing and retry-failed unattached
+    sources, plus an attached path whose changed content is detached
+    during the pass, are hashed immediately. Every other safety rule is
+    unchanged: inbox/symlink boundaries, the before/after stat validation
+    around hashing, SHA-256 identity/deduplication and the pre-routing/
+    transcription source validators.
+    """
     report = IngestReport()
     now = now or timezone.now()
     inbox = Path(config.storage.inbox)
@@ -403,7 +413,14 @@ def ingest(config: AppConfig, now=None) -> IngestReport:
             # Attached source: detect content replacement at this path.
             if source.file_size != st.st_size or source.file_mtime != st.st_mtime:
                 reconcile_changed_source(source, st)
-                report.skipped_unstable.append(source.path)
+                if respect_stability_window:
+                    report.skipped_unstable.append(source.path)
+                else:
+                    # --now: hash the freshly detached source in this same
+                    # pass instead of deferring it to a later run.
+                    source.discovery_state = DiscoveryState.HASHING
+                    source.save()
+                    _hash_source(source, config, report)
             else:
                 source.last_seen_at = now
                 source.save()
@@ -414,7 +431,7 @@ def ingest(config: AppConfig, now=None) -> IngestReport:
             continue
 
         stable_for = (now - source.stable_since).total_seconds() if source.stable_since else 0.0
-        if stable_for >= stable_seconds:
+        if not respect_stability_window or stable_for >= stable_seconds:
             source.discovery_state = DiscoveryState.HASHING
             source.save()
             _hash_source(source, config, report)

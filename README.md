@@ -156,11 +156,24 @@ uv run brain ingest          # discover stable WAV, MP3, and M4A files
 uv run brain route           # auto-route pending recordings
 uv run brain transcribe      # transcribe recordings with an approved profile
 uv run brain run             # ingest -> route -> transcribe -> summarize
+uv run brain run --now       # same pass, bypassing the stability window
 uv run brain status --json   # counts and failures
 uv run brain review --json   # recordings needing human attention
 uv run brain retry <id>      # explicitly retry a failed recording
 uv run brain transcripts <id>
 ```
+
+A newly discovered or changed inbox file normally has to stay unchanged
+for `macwhisper.file_stable_seconds` (default 30) before it is hashed, so
+the first `brain run` may only report `skipped_unstable`. `brain run --now`
+performs one full pass that bypasses ONLY that persisted stability-window
+eligibility check, so a deliberately placed (or replaced) file is
+hashed and processed on the first invocation. It never weakens the inbox
+and symlink boundaries, the before/after stat validation around hashing,
+SHA-256 identity/deduplication, or the
+`validate_source_for_processing` checks; a file still changing while it
+is hashed is deferred as usual. `brain ingest` always honours the
+stability window.
 
 ### Search index (Step 5A.2 foundation)
 

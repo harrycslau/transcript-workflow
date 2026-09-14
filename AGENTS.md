@@ -311,6 +311,18 @@ Non-negotiable principles:
 
 - Only ever READ user audio. Never move, rename, delete, truncate, or
   transcribe-with-side-effects files in `data/inbox`.
+- `brain run` honors `macwhisper.file_stable_seconds`: a newly
+  discovered or changed source must stay unchanged for that window
+  before it is hashed. `brain run --now` is the explicit one-pass
+  operator escape hatch that bypasses ONLY that persisted
+  stability-window eligibility check (newly discovered, already
+  observing, retry-failed and freshly detached changed sources hash
+  immediately). It never weakens the inbox/symlink boundary, the
+  `_hash_source` before/after stat validation, SHA-256
+  identity/deduplication, or `validate_source_for_processing`; a file
+  changing during hashing is still deferred. `brain ingest` remains
+  stability-aware and the service defaults are
+  `respect_stability_window=True`.
 - Scanning and processing are restricted to the configured inbox;
   symlinks resolving outside it are never followed. Sources outside
   the current inbox are parked (`outside_current_inbox`) without file

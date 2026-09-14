@@ -86,9 +86,14 @@ def _set_duration_from_file(recording: Recording, source_path: Path, config: App
         recording.recorded_at = recorded
 
 
-def run_ingest(config: AppConfig) -> dict:
-    """One ingest pass. Returns the machine-readable report."""
-    report = ingest_service.ingest(config)
+def run_ingest(config: AppConfig, *, respect_stability_window: bool = True) -> dict:
+    """One ingest pass. Returns the machine-readable report.
+
+    ``respect_stability_window=False`` (``brain run --now``) bypasses only
+    the persisted file-stability-window eligibility check for this pass;
+    all other ingest safety rules are unchanged.
+    """
+    report = ingest_service.ingest(config, respect_stability_window=respect_stability_window)
     # Enrich newly created recordings with duration/recorded_at.
     for path in report.hashed:
         source = ingest_service.AudioSource.objects.filter(path=path).select_related("recording").first()
@@ -754,17 +759,20 @@ def retry(config: AppConfig, recording: Recording, transport=None) -> dict:
     }
 
 
-def run_pipeline(config: AppConfig) -> dict:
+def run_pipeline(config: AppConfig, *, respect_stability_window: bool = True) -> dict:
     """Compose recover -> ingest -> route -> transcribe -> summarize.
 
     Caller holds the lock. The summarization stage only processes
     never-attempted recordings (``summary_status=missing``); it never
     retries failed summaries or regenerates current ones.
+    ``respect_stability_window=False`` (``brain run --now``) applies only
+    to this pass's ingest, bypassing solely the persisted file-stability-
+    window eligibility check.
     """
     from workflow.services.summarize import summarize_pending
 
     recovery = recover_interruptions(config)
-    ingest_report = run_ingest(config)
+    ingest_report = run_ingest(config, respect_stability_window=respect_stability_window)
     # Newly hashed recordings enter the routing stage.
     for recording in Recording.objects.filter(processing_status=ProcessingStatus.DISCOVERED):
         with transaction.atomic():

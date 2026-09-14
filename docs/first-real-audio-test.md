@@ -67,6 +67,14 @@ uv run brain run
 uv run brain run
 ```
 
+如果係刻意放入、已經肯定檔案唔會再變嘅錄音，可以用 `brain run --now`
+喺第一次執行就跳過呢個穩定期檢查（只限呢一次、只限呢個檢查；inbox／symlink
+邊界、hash 前後 stat 驗證同 SHA-256 去重一律照舊）：
+
+```sh
+uv run brain run --now
+```
+
 一次 `brain run` 會依序做：
 
 ```text

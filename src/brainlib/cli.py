@@ -7,6 +7,10 @@ Commands:
                              (default http://127.0.0.1:8787, no browser).
   brain ingest|route|transcribe|run|retry|status|review|transcripts
                              Pipeline commands (Step 2), each with --json.
+  brain run [--now]          One full recovery -> ingest -> route ->
+                             transcribe -> summarize pass; --now bypasses
+                             ONLY the configured file-stability window for
+                             this pass (brain ingest stays stability-aware).
   brain summarize [ID] [--regenerate]
   brain summaries ID | brain summary ID [--format markdown|text|json]
   brain tags [--sync]        Summarization, rendering, and tag commands (Step 3).
@@ -376,7 +380,7 @@ def cmd_run(args) -> int:
     def work(config):
         from workflow.services.pipeline import run_pipeline
 
-        return run_pipeline(config)
+        return run_pipeline(config, respect_stability_window=not args.now)
 
     return _pipeline_command(args, work)
 
@@ -1152,7 +1156,15 @@ def main(argv: list[str] | None = None) -> int:
     transcribe = add_pipeline_command("transcribe", "Transcribe recordings with an approved routing profile")
     transcribe.add_argument("recording_id", nargs="?", help="Transcribe a single recording")
 
-    add_pipeline_command("run", "Compose ingest -> route -> transcribe")
+    run_cmd = add_pipeline_command("run", "Compose ingest -> route -> transcribe")
+    run_cmd.add_argument(
+        "--now",
+        action="store_true",
+        help=(
+            "Bypass the configured file-stability window for this pass "
+            "(hash newly placed/changed inbox files immediately)"
+        ),
+    )
     add_pipeline_command("status", "Summarize counts and failures")
     add_pipeline_command("review", "List recordings needing human attention")
 

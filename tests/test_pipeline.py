@@ -16,6 +16,7 @@ import brainlib.cli as cli
 from workflow.models import (
     AttemptOutcome,
     AudioSource,
+    DiscoveryState,
     ProcessingAttempt,
     ProcessingStatus,
     Recording,
@@ -432,3 +433,85 @@ class TestCliManualRoute:
         assert recording.processing_status == ProcessingStatus.TRANSCRIBED
         decision = RoutingDecision.objects.get(recording=recording, is_active=True)
         assert decision.model_id == "apple:zh-CN"
+
+
+class TestRunPipelineNow:
+    def test_default_run_pipeline_waits_for_stability(self, tmp_path):
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        config.storage.inbox.mkdir(parents=True, exist_ok=True)
+        write_wav(config.storage.inbox / "2024-03-01_120000.wav")
+
+        payload = run_pipeline(config)
+
+        assert payload["ingest"]["hashed"] == []
+        assert payload["ingest"]["skipped_unstable"]
+        assert Recording.objects.count() == 0
+        assert AudioSource.objects.get().discovery_state == DiscoveryState.OBSERVING
+
+    def test_now_run_pipeline_hashes_and_processes_first_pass(self, tmp_path, monkeypatch):
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        config.storage.inbox.mkdir(parents=True, exist_ok=True)
+        write_wav(config.storage.inbox / "2024-03-01_120000.wav")
+        mock_routing(monkeypatch, classifier_route="cantonese", confidence=0.95)
+        mock_full_transcription(monkeypatch)
+
+        payload = run_pipeline(config, respect_stability_window=False)
+
+        assert payload["ingest"]["hashed"]
+        assert payload["routing"] and payload["routing"][0]["result"] == "routed"
+        assert payload["transcription"] and payload["transcription"][0]["result"] == "transcribed"
+        assert Recording.objects.get().processing_status == ProcessingStatus.TRANSCRIBED
+
+    def test_now_run_ingest_bypasses_only_stability(self, tmp_path):
+        from workflow.services.pipeline import run_ingest
+
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        path = write_wav(config.storage.inbox / "rec.wav")
+
+        report = run_ingest(config, respect_stability_window=False)
+
+        assert report["hashed"] == [str(path.resolve())]
+        assert set(report) == {
+            "new_sources", "hashed", "duplicates", "skipped_unstable",
+            "reconciled_missing", "reconciled_present", "ignored_paths",
+        }
+
+
+class TestCliRunNow:
+    def _capture_pipeline(self, monkeypatch):
+        calls: dict = {}
+
+        def fake_run_pipeline(config, *, respect_stability_window=True):
+            calls["respect_stability_window"] = respect_stability_window
+            return {"ingest": {"hashed": []}, "routing": [], "transcription": [], "summarization": []}
+
+        monkeypatch.setattr("workflow.services.pipeline.run_pipeline", fake_run_pipeline)
+        return calls
+
+    def test_run_default_respects_stability_window(self, tmp_path, monkeypatch):
+        from factories import write_cli_config
+
+        write_cli_config(tmp_path, monkeypatch)
+        calls = self._capture_pipeline(monkeypatch)
+
+        assert cli.main(["run", "--json"]) == 0
+        assert calls["respect_stability_window"] is True
+
+    def test_run_now_bypasses_stability_window(self, tmp_path, monkeypatch, capsys):
+        from factories import write_cli_config
+
+        write_cli_config(tmp_path, monkeypatch)
+        calls = self._capture_pipeline(monkeypatch)
+
+        assert cli.main(["run", "--now", "--json"]) == 0
+        assert calls["respect_stability_window"] is False
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["ingest"] == {"hashed": []}
+
+    def test_run_lock_contention_exits_3(self, tmp_path, monkeypatch, capsys):
+        from factories import write_cli_config
+
+        config = write_cli_config(tmp_path, monkeypatch)
+        with pipeline_lock(config):
+            assert cli.main(["run"]) == 3
+        assert "another pipeline process" in capsys.readouterr().err

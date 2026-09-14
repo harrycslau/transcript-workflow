@@ -367,3 +367,114 @@ class TestAudioSafety:
             ingest(config)
         after = (path.stat().st_size, path.stat().st_mtime, sha256_file(path))
         assert before == after
+
+
+class TestImmediateStabilityWindow:
+    """``respect_stability_window=False`` (``brain run --now``): one pass
+    hashes deliberately placed or changed sources immediately, while every
+    other ingest safety rule stays intact."""
+
+    def test_default_waits_but_now_hashes_new_file_first_pass(self, tmp_path):
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        path = write_wav(config.storage.inbox / "rec.wav")
+
+        # Default (and explicit True) keeps the persisted stability wait.
+        default_report = ingest(config)
+        assert default_report.hashed == []
+        assert default_report.skipped_unstable == [str(path.resolve())]
+        assert AudioSource.objects.get().discovery_state == DiscoveryState.OBSERVING
+
+        # --now bypasses ONLY the stability window on the first pass.
+        immediate = ingest(config, respect_stability_window=False)
+        assert immediate.hashed == [str(path.resolve())]
+        assert Recording.objects.count() == 1
+        source = AudioSource.objects.get()
+        assert source.discovery_state == DiscoveryState.HASHED
+        assert source.recording_id is not None
+
+    def test_now_hashes_already_observing_file_immediately(self, tmp_path):
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        path = write_wav(config.storage.inbox / "rec.wav")
+        ingest(config)  # observe only
+
+        report = ingest(config, respect_stability_window=False)
+        assert report.hashed == [str(path.resolve())]
+        assert AudioSource.objects.get().recording_id is not None
+
+    def test_now_retries_failed_hash_in_same_pass(self, tmp_path, monkeypatch):
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        path = write_wav(config.storage.inbox / "rec.wav")
+
+        def broken_sha(path_arg):
+            raise OSError("disk error")
+
+        monkeypatch.setattr("workflow.services.ingest.sha256_file", broken_sha)
+        failed = ingest(config, respect_stability_window=False)
+        assert failed.hashed == []
+        assert AudioSource.objects.get().discovery_state == DiscoveryState.FAILED
+
+        monkeypatch.setattr("workflow.services.ingest.sha256_file", sha256_file)
+        recovered = ingest(config, respect_stability_window=False)
+        assert recovered.hashed == [str(path.resolve())]
+        source = AudioSource.objects.get()
+        assert source.discovery_state == DiscoveryState.HASHED
+        assert source.recording_id is not None
+
+    def test_now_hashes_changed_attached_source_in_same_pass(self, tmp_path):
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        inbox = config.storage.inbox
+        path = write_wav(inbox / "rec.wav", seconds=1.0)
+        ingest(config, respect_stability_window=False)
+        source = AudioSource.objects.get()
+        original_recording_id = source.recording_id
+        assert original_recording_id is not None
+
+        # Replace the path's content (new size+mtime and new SHA-256).
+        write_wav(path, seconds=2.0, amplitude=1234)
+        report = ingest(config, respect_stability_window=False)
+
+        source = AudioSource.objects.get()
+        assert source.recording_id is not None
+        assert source.recording_id != original_recording_id
+        assert Recording.objects.count() == 2
+        # Processed now, never reported as stability-skipped.
+        assert report.skipped_unstable == []
+        assert source.path in (report.hashed + report.duplicates)
+
+    def test_now_still_discards_a_file_changing_during_hashing(self, tmp_path, monkeypatch):
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        path = write_wav(config.storage.inbox / "rec.wav")
+        real_sha = sha256_file(path)
+        calls = {"n": 0}
+
+        def changing_sha256(path_arg):
+            calls["n"] += 1
+            # Simulate the file growing during hashing.
+            if calls["n"] == 1:
+                with open(path_arg, "ab") as handle:
+                    handle.write(b"extra data")
+            return real_sha
+
+        monkeypatch.setattr("workflow.services.ingest.sha256_file", changing_sha256)
+        report = ingest(config, respect_stability_window=False)
+        assert report.hashed == []
+        source = AudioSource.objects.get()
+        assert source.recording_id is None
+        assert source.discovery_state == DiscoveryState.OBSERVING
+        assert Recording.objects.count() == 0
+
+    def test_now_does_not_bypass_hash_identity_dedup(self, tmp_path):
+        config = make_config(tmp_path, file_stable_seconds=3600)
+        config.storage.inbox.mkdir(parents=True, exist_ok=True)
+        content = write_wav(tmp_path / "master.wav")
+        shutil.copyfile(content, config.storage.inbox / "one.wav")
+        shutil.copyfile(content, config.storage.inbox / "two.wav")
+
+        report = ingest(config, respect_stability_window=False)
+
+        one = str((config.storage.inbox / "one.wav").resolve())
+        two = str((config.storage.inbox / "two.wav").resolve())
+        assert set(report.hashed) | set(report.duplicates) == {one, two}
+        assert len(report.hashed) == 1 and len(report.duplicates) == 1
+        assert Recording.objects.count() == 1
+        assert AudioSource.objects.count() == 2
