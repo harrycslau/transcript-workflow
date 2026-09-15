@@ -331,8 +331,12 @@ is removed everywhere.
   state now shows the immediate manual-route form as THE recommended
   primary action (no collapsed duplicate routing disclosure, no
   audit-only Confirm routing step blocking it — choosing the current
-  profile in that same form confirms the routing); one-click Confirm
-  routing remains for the transcribed-but-unverified state.
+  profile in that same form confirms the routing). A transcribed
+  recording with an unverified automatic routing decision likewise
+  shows no recommended-action section: one-click Confirm routing is
+  audit-only, while the collapsed Routing disclosure keeps the routing
+  metadata/history and the manual route form (choosing the current
+  profile there confirms the routing).
 - **Ownership boundaries preserved**: `segmentation.save_segmented_version`
   remains the ONLY layout writer; `execute_web_action`/
   `execute_section_summarize` remain the ONLY action executors; all

@@ -403,8 +403,6 @@ def _action_availability(config, recording) -> dict:
     )
 
     profiles = sorted(config.macwhisper.routing.profiles.values(), key=lambda p: p.name)
-    decision = recording.routing_decisions.filter(is_active=True).first()
-    confirm_routing_available = decision is not None and not decision.routing_verified
     # The compact Routing trigger appears only where OPTIONAL route UI
     # belongs: on a needs-review recording the manual profile form is
     # ALWAYS the immediate recommended action, so the collapsed
@@ -424,7 +422,6 @@ def _action_availability(config, recording) -> dict:
             }
             for profile in profiles
         ],
-        "confirm_routing_available": confirm_routing_available,
         "transcribe_available": recording.processing_status == ProcessingStatus.READY_TO_TRANSCRIBE,
         "summarize_mode": summarize_mode(recording),
         "retry_available": retry_eligible(recording),
@@ -432,7 +429,7 @@ def _action_availability(config, recording) -> dict:
     }
 
 
-def _status_panel(recording: Recording, routing_decision) -> dict:
+def _status_panel(recording: Recording) -> dict:
     """Composite read-only status/next-action presentation (v6).
 
     Pure function over persisted state — SELECTs only, never writes,
@@ -513,16 +510,6 @@ def _status_panel(recording: Recording, routing_decision) -> dict:
             "level": "warn",
             "label": "Summary not generated",
             "detail": "An active transcript exists but the current summary is missing.",
-        }
-    if (
-        recording.processing_status == ProcessingStatus.TRANSCRIBED
-        and routing_decision is not None
-        and not routing_decision.routing_verified
-    ):
-        return {
-            "level": "warn",
-            "label": "Transcribed — routing unverified",
-            "detail": "Confirm the automatic routing decision.",
         }
     return {
         "level": "ok",
@@ -809,7 +796,7 @@ def recording_detail(request, recording_id):
         "default_summary": variant.default_summary,
         "actions": _action_availability(config, recording),
         "routing_decision": card.active_route,
-        "status": _status_panel(recording, card.active_route),
+        "status": _status_panel(recording),
         "tag_options": tag_options,
         "retired_tag_options": retired_tag_options,
         "default_output_language": variant.default_language,

@@ -933,13 +933,18 @@ class TestPendingStateFormHooks:
         assert 'data-action-form="confirm-routing"' not in content
         assert "/confirm-routing/" not in content
 
-    def test_transcribed_unverified_confirm_routing_form_carries_hooks(self, client):
-        """Direct confirm-routing stays in its independently meaningful
-        state: transcribed with an unverified active decision."""
+    def test_transcribed_unverified_has_no_confirm_routing_form(self, client):
+        """One-click Confirm routing is audit-only and is never rendered
+        as a recommended action: a transcribed recording with an
+        unverified active decision shows no confirm-routing form, only
+        the manual route form inside the collapsed Routing disclosure
+        (choosing the current profile there confirms the routing)."""
         recording, _t, _s = make_transcribed_recording(["x"], sha="hooks-confirm")
         _routing_decision(recording, verified=False)
         content = client.get(f"/recordings/{recording.pk}/").content.decode()
-        assert 'data-action-form="confirm-routing"' in content
+        assert 'data-action-form="confirm-routing"' not in content
+        assert "/confirm-routing/" not in content
+        assert 'data-action-form="route"' in content
 
     def test_failed_retry_form_carries_hook(self, client):
         recording, _t, _s = make_transcribed_recording(["x"], sha="hooks-failed")

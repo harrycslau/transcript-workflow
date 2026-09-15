@@ -714,7 +714,7 @@ class TestStatusPanel:
     """The single composite status/next-action panel covers the real
     state matrix: healthy, failed/retry, retranscription-failed,
     ready-to-transcribe, needs-review, summary failed / regeneration
-    failed / missing, missing audio, running, and unverified routing."""
+    failed / missing, missing audio, and running."""
 
     def _status(self, client, recording):
         response = client.get(f"/recordings/{recording.pk}/")
@@ -809,7 +809,7 @@ class TestStatusPanel:
         assert level == "running"
         assert "currently running" in detail
 
-    def test_unverified_routing_warns(self, client):
+    def test_unverified_routing_keeps_completed_status(self, client):
         recording, _t, _s, _summary = _summary_recording()
         RoutingDecision.objects.create(
             recording=recording, ordinal=1, route_suggestion="european",
@@ -817,8 +817,8 @@ class TestStatusPanel:
             routing_verified=False, is_active=True,
         )
         level, detail = self._status(client, recording)
-        assert level == "warn"
-        assert "routing unverified" in detail
+        assert level == "ok"
+        assert "no action required" in detail
 
 
 class TestDetailActionsPresentation:
@@ -936,7 +936,13 @@ class TestDetailActionsPresentation:
         assert 'aria-label="Recommended action"' in content
         assert "Retry failed stage" in content
 
-    def test_transcribed_unverified_routing_prominent_confirm(self, client):
+    def test_transcribed_unverified_routing_no_prominent_confirm(self, client):
+        """A transcribed recording with an unverified automatic routing
+        decision surfaces NO Recommended action section: one-click
+        Confirm routing is audit-only and is never a recommended action.
+        The routing metadata/history and the manual route form stay
+        available through the collapsed Routing disclosure, where
+        choosing the current profile confirms the routing."""
         recording, _t, _s = make_transcribed_recording(["a"], sha="pa-unv")
         RoutingDecision.objects.create(
             recording=recording, ordinal=1, route_suggestion="european",
@@ -944,9 +950,15 @@ class TestDetailActionsPresentation:
             routing_verified=False, is_active=True,
         )
         content = client.get(f"/recordings/{recording.pk}/").content.decode()
-        assert 'aria-label="Recommended action"' in content
-        assert "Confirm routing" in content
+        assert 'aria-label="Recommended action"' not in content
+        assert "Confirm routing" not in content
+        assert "/confirm-routing/" not in content
         assert "Transcribe now" not in content
+        # Routing metadata and the manual routing control remain in the
+        # collapsed disclosure.
+        assert 'id="routing-editor"' in content
+        assert "unverified" in content
+        assert 'id="id_route_profile_routing"' in content
 
     def test_running_state_no_prominent_action(self, client):
         recording, _t, _s = make_transcribed_recording(["a"], sha="pa-run")

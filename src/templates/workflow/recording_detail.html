@@ -55,7 +55,7 @@
   <span class="status-panel-main">{{ status.label }} — {{ status.detail }}</span>
 </div>
 
-{% if recording.processing_status == 'failed' or recording.retranscription_failed or recording.processing_status == 'needs_review' or recording.processing_status == 'ready_to_transcribe' or recording.processing_status == 'transcribed' and routing_decision and not routing_decision.routing_verified %}
+{% if recording.processing_status == 'failed' or recording.retranscription_failed or recording.processing_status == 'needs_review' or recording.processing_status == 'ready_to_transcribe' %}
 <section class="recommended-action" aria-label="Recommended action">
   <div class="overview-block-head">
     <h2 class="overview-block-title">Recommended action</h2>
@@ -75,8 +75,7 @@
       recommended action. A separate audit-only "Confirm routing" action
       is deliberately not offered here — choosing the current profile in
       this same form already confirms the routing (see the routing
-      note); one-click Confirm routing belongs to the transcribed
-      unverified state below.{% endcomment %}
+      note).{% endcomment %}
       {% if actions.route_eligible %}
         <p class="action-note muted">Choose the profile to use for transcription. If an existing route changes, the current transcript stays active until you run and complete retranscription.</p>
         <form method="post" action="{% url 'action-route' recording.pk %}" data-action-form="route">
@@ -100,15 +99,6 @@
           {% csrf_token %}
           <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
           <button type="submit" class="confirm-button">Transcribe now</button>
-          <span class="action-live" data-action-live aria-live="polite"></span>
-        </form>
-      {% endif %}
-    {% elif recording.processing_status == 'transcribed' and routing_decision and not routing_decision.routing_verified %}
-      {% if actions.confirm_routing_available %}
-        <form method="post" action="{% url 'action-confirm-routing' recording.pk %}" data-action-form="confirm-routing">
-          {% csrf_token %}
-          <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
-          <button type="submit" class="confirm-button">Confirm routing</button>
           <span class="action-live" data-action-live aria-live="polite"></span>
         </form>
       {% endif %}

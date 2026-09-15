@@ -142,9 +142,13 @@ Non-negotiable principles:
   field), and there is no second POST. In the `needs_review` web state
   the immediate manual-route form IS the recommended primary action —
   never blocked behind an audit-only "Confirm routing" step (choosing
-  the current profile in that same form confirms the routing); the
-  one-click Confirm routing remains only for the
-  transcribed-but-unverified state.
+  the current profile in that same form confirms the routing). A
+  transcribed recording with an unverified automatic routing decision
+  likewise surfaces NO recommended-action section: one-click Confirm
+  routing is audit-only and is never rendered as a recommended action,
+  while the routing metadata/history and the manual routing controls
+  stay available through the collapsed Routing disclosure (choosing the
+  current profile there confirms the routing).
 - The client-side pending UI is progressive enhancement in
   `src/static/workflow/app.js` (`form[data-action-form]`): the FIRST
   submit is never cancelled (an ordinary native POST navigation),
