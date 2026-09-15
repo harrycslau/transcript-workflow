@@ -10,7 +10,14 @@ here for summarization):
 - Every response body is read through a hard byte cap; oversized bodies
   raise :class:`LLMResponseTooLarge` before parsing.
 - The OpenAI-compatible envelope is validated strictly; malformed
-  envelopes raise :class:`LLMInvalid`.
+  envelopes raise :class:`LLMInvalid`. ``finish_reason`` is validated
+  too: ``length`` means the model output was truncated
+  (``output_truncated``) and any other unrecognized reason is rejected
+  without echoing its value.
+- An optional OpenAI-compatible ``response_format`` may be supplied and
+  is serialized deterministically inside the measured request; local
+  validation remains authoritative whether or not the server enforces
+  the format.
 - Exception messages contain only static descriptions, exception type
   names, and HTTP status codes — never bodies, headers, prompts, or
   secrets.
@@ -27,6 +34,34 @@ from brainlib.config import AppConfig
 
 # Hard cap on a single HTTP response body, regardless of configuration.
 RESPONSE_CAP_BYTES = 2 * 1024 * 1024
+
+# Hard cap on the bounded error-body sample inspected ONLY to classify an
+# explicit response_format/json_schema capability rejection. The sample
+# is never stored, returned, or logged.
+ERROR_BODY_SAMPLE_BYTES = 4096
+
+# Allowlisted finish_reason semantics. ``stop`` is the normal completion;
+# ``length`` means the response was truncated; anything else is rejected
+# with a fixed sanitized message (never the raw value).
+FINISH_REASON_STOP = "stop"
+FINISH_REASON_LENGTH = "length"
+OUTPUT_TRUNCATED_MESSAGE = "model output was truncated before completion"
+
+# Explicit response_format/json_schema capability rejection: HTTP 400/422
+# with an explicit mention of the parameter AND explicit
+# unsupported/unknown/unexpected-parameter semantics. Mirrors the routing
+# classifier's independent allowlist; generic "unknown parameter" text
+# alone is insufficient.
+_CAPABILITY_STATUS_CODES = (400, 422)
+_CAPABILITY_PARAM_PATTERNS = ("response_format", "responseformat", "json_schema")
+_CAPABILITY_SEMANTIC_PATTERNS = (
+    "unsupported",
+    "unknown parameter",
+    "unexpected parameter",
+    "unrecognized parameter",
+    "not supported",
+    "invalid parameter",
+)
 
 
 class LLMError(Exception):
@@ -46,8 +81,12 @@ class LLMTimeout(LLMError):
 class LLMHTTPError(LLMError):
     code = "http_error"
 
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, *, capability_rejection: bool = False) -> None:
         self.status_code = status_code
+        # True ONLY for an explicit HTTP 400/422 response_format/
+        # json_schema capability rejection (classified from a bounded,
+        # discarded error-body sample). No body text is retained.
+        self.capability_rejection = capability_rejection
         super().__init__(f"endpoint returned HTTP {status_code}")
 
 
@@ -73,8 +112,9 @@ def build_chat_payload(
     user_prompt: str,
     temperature: float,
     max_tokens: int,
+    response_format: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "model": config.llm.model,
         "messages": [
             {"role": "system", "content": system_prompt},
@@ -83,14 +123,18 @@ def build_chat_payload(
         "temperature": temperature,
         "max_tokens": max_tokens,
     }
+    if response_format is not None:
+        payload["response_format"] = response_format
+    return payload
 
 
 def request_payload_characters(payload: dict[str, Any]) -> int:
     """Character length of the fully serialized request body.
 
     The per-request safety check measures the actual serialized payload
-    (static scaffolding, dynamic input, and JSON escaping included),
-    never a pre-serialization estimate.
+    (static scaffolding, an optional ``response_format`` schema, dynamic
+    input, and JSON escaping included), never a pre-serialization
+    estimate.
     """
     return len(json.dumps(payload, ensure_ascii=False))
 
@@ -105,6 +149,18 @@ def parse_envelope(body: Any) -> str:
     first = choices[0]
     if not isinstance(first, dict):
         raise LLMInvalid("invalid_envelope", "invalid choice")
+    finish_reason = first.get("finish_reason")
+    if finish_reason is not None:
+        if not isinstance(finish_reason, str):
+            raise LLMInvalid("invalid_envelope", "choice has an invalid finish reason")
+        if finish_reason == FINISH_REASON_LENGTH:
+            # Truncation is its own stable category and must be detected
+            # BEFORE any content parsing: a partial/empty content string
+            # would otherwise be misclassified as malformed output.
+            raise LLMInvalid("output_truncated", OUTPUT_TRUNCATED_MESSAGE)
+        if finish_reason != FINISH_REASON_STOP:
+            # Unknown values are never echoed back.
+            raise LLMInvalid("invalid_envelope", "choice has an unsupported finish reason")
     message = first.get("message")
     if not isinstance(message, dict):
         raise LLMInvalid("invalid_envelope", "choice has no message object")
@@ -121,13 +177,15 @@ def chat_completion(
     user_prompt: str,
     temperature: float,
     max_tokens: int,
+    response_format: dict[str, Any] | None = None,
     timeout: float | None = None,
     transport=None,
 ) -> str:
     """POST one chat completion and return the validated message content.
 
     Raises the :class:`LLMError` taxonomy on every failure mode; the
-    caller decides how failures map onto attempt state.
+    caller decides how failures map onto attempt state. ``response_format``
+    is an optional OpenAI-compatible structured-output request.
     """
     payload = build_chat_payload(
         config,
@@ -135,6 +193,7 @@ def chat_completion(
         user_prompt=user_prompt,
         temperature=temperature,
         max_tokens=max_tokens,
+        response_format=response_format,
     )
     api_key = config.api_key_for(config.llm.api_key_env)
     headers: dict[str, str] = {}
@@ -149,6 +208,41 @@ def chat_completion(
     except ValueError:
         raise LLMInvalid("malformed_http_json", "response body is not valid JSON") from None
     return parse_envelope(body)
+
+
+def _capability_rejection(status: int, body_text: str) -> bool:
+    """True only for an explicit response_format/json_schema rejection.
+
+    Requires ALL three: HTTP 400/422; explicit mention of
+    response_format/json_schema; explicit unsupported/unknown/unexpected
+    -parameter semantics. The body text is inspected transiently and is
+    never stored or logged.
+    """
+    if status not in _CAPABILITY_STATUS_CODES:
+        return False
+    text = (body_text or "")[:ERROR_BODY_SAMPLE_BYTES].lower()
+    has_param = any(pattern in text for pattern in _CAPABILITY_PARAM_PATTERNS)
+    has_semantic = any(pattern in text for pattern in _CAPABILITY_SEMANTIC_PATTERNS)
+    return has_param and has_semantic
+
+
+def _read_error_sample(response) -> str:
+    """Best-effort bounded decode of an HTTP-error body for classification.
+
+    The sample is capped and discarded; any read failure degrades to an
+    empty sample so the original HTTP error is always raised unchanged.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > ERROR_BODY_SAMPLE_BYTES:
+                break
+            chunks.append(chunk)
+    except Exception:
+        return ""
+    return b"".join(chunks).decode("utf-8", errors="replace")
 
 
 def _post_bounded(
@@ -166,7 +260,11 @@ def _post_bounded(
         with httpx.Client(**client_kwargs) as client:
             with client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code >= 400:
-                    raise LLMHTTPError(response.status_code)
+                    sample = _read_error_sample(response)
+                    raise LLMHTTPError(
+                        response.status_code,
+                        capability_rejection=_capability_rejection(response.status_code, sample),
+                    )
                 declared = response.headers.get("content-length", "")
                 if declared.isdigit() and int(declared) > RESPONSE_CAP_BYTES:
                     raise LLMResponseTooLarge()

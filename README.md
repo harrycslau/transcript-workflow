@@ -465,6 +465,22 @@ are treated as invalid model output (one retry). Tags are materialized
 only from the default variant; other variants never overwrite
 Recording-level default state.
 
+Summarization requests ask the oMLX endpoint for a deterministic
+OpenAI-compatible `response_format` JSON schema (`brain_summary_map`
+for map/non-final-reduce, `brain_summary_final` for final/single) while
+Brain keeps validating every payload itself whether or not the server
+enforces the grammar. A truncated response (`finish_reason: length`) is
+the stable `output_truncated` failure, detected before content parsing.
+Invalid HTTP-successful output gets exactly one bounded repair request
+naming only a safe category (never the rejected output); an explicit
+HTTP 400/422 capability rejection of the structured format instead
+allows one plain attempt plus at most one plain repair. Timeouts,
+endpoint failures, other HTTP statuses and oversized responses are
+never retried. Every other 200 response — including one whose Warning
+header (recognized or otherwise) says the format was not enforced — is
+validated locally and repaired exactly like an enforced one; there is no
+Warning classifier and no warning condition triggers a plain fallback.
+
 The web interface mirrors this on the recording detail AND summary
 pages: language tabs (Default / English / Traditional Chinese /
 Original plus existing variants such as Finnish), per-variant state,

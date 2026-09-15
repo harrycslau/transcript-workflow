@@ -95,6 +95,15 @@ class ScriptedLLM:
         return len(self.calls)
 
 
+def _chat_success(
+    content: str, *, finish_reason: str | None = None, headers: dict | None = None
+) -> httpx.Response:
+    body = omlx_envelope(content)
+    if finish_reason is not None:
+        body["choices"][0]["finish_reason"] = finish_reason
+    return httpx.Response(200, content=json.dumps(body).encode(), headers=headers or {})
+
+
 # ---------------------------------------------------------------------------
 # Schema validation
 # ---------------------------------------------------------------------------
@@ -473,7 +482,7 @@ class TestLifecycle:
         assert attempt.stage == AttemptStage.SUMMARIZATION
         # Provenance
         assert summary.model_id == "test-model"
-        assert summary.prompt_version == "2"
+        assert summary.prompt_version == "3"
         assert summary.parser_version == "1"
         assert len(summary.config_fingerprint) == 64
         assert summary.input_truncated is False
@@ -884,13 +893,14 @@ class TestMapReduce:
                 chunk_characters=60,
                 chunk_overlap_characters=0,
                 max_chunk_count=8,
-                max_input_characters=5000,
+                max_input_characters=8000,
             ),
             tags=tags_config("Academic"),
         )
         recording, _, _ = make_transcribed_recording([f"segment {i} " + "w" * 50 for i in range(6)])
         # Intermediates with long overviews: six of them together exceed
-        # the 5000-char cap; pairs fit including the current prompt scaffolding.
+        # the 8000-char cap (the structured response_format is part of the
+        # measured request); pairs fit including the current prompt scaffolding.
         big_map = map_summary_json(overview="o" * 600, key_points=["p" * 100] * 3)
         sub_map = map_summary_json(overview="m" * 600, key_points=["p" * 100] * 3)
         final_calls = {"n": 0}
@@ -947,7 +957,7 @@ class TestMapReduce:
             tmp_path,
             llm=make_llm_config(tmp_path).llm,
             summarization=small_config(
-                tmp_path, chunk_characters=120, chunk_overlap_characters=20, max_input_characters=3500
+                tmp_path, chunk_characters=120, chunk_overlap_characters=20, max_input_characters=6000
             ),
             tags=tags_config("Academic"),
         )
@@ -1528,6 +1538,421 @@ class TestInvalidOutputRetry:
         assert "秘密" not in stored
         assert "bad output" not in stored
         assert "super-secret" not in stored
+
+
+# ---------------------------------------------------------------------------
+# Structured response_format contract + finite request state machine
+# ---------------------------------------------------------------------------
+
+
+class TestStructuredRequestContract:
+    """Map/final schema selection, capability fallback, repairs, truncation."""
+
+    def _config(self, tmp_path, **overrides):
+        return make_config(
+            tmp_path,
+            llm=make_llm_config(tmp_path).llm,
+            summarization=small_config(tmp_path, **overrides),
+            tags=tags_config("Academic"),
+        )
+
+    def test_single_call_carries_final_schema(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            seen.append(json.loads(request.content))
+            return _chat_success(final_summary_json())
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        assert len(seen) == 1
+        response_format = seen[0]["response_format"]
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["name"] == "brain_summary_final"
+        assert response_format["json_schema"]["strict"] is True
+        schema = response_format["json_schema"]["schema"]
+        assert "required" in schema
+        # The strict action-item object requires owner/due_date (nullable).
+        assert set(schema["properties"]["action_items"]["items"]["required"]) == {
+            "text",
+            "owner",
+            "due_date",
+        }
+
+    def test_final_schema_action_items_require_nullable_owner_and_due(self):
+        action_items = summarize_service.FINAL_RESPONSE_SCHEMA["properties"]["action_items"]
+        props = action_items["items"]["properties"]
+        required = action_items["items"]["required"]
+        # Every declared property must be listed in required for OpenAI
+        # strict structured outputs.
+        assert set(required) == set(props) == {"text", "owner", "due_date"}
+        # owner/due_date stay nullable and add minLength=1 to match local
+        # nonblank validation for non-null strings.
+        for field in ("owner", "due_date"):
+            assert props[field]["type"] == ["string", "null"]
+            assert props[field]["minLength"] == 1
+
+    def test_map_and_final_reduce_schema_selection(self, tmp_path):
+        config = self._config(tmp_path, chunk_characters=50, chunk_overlap_characters=0)
+        recording, _, _ = make_transcribed_recording([f"segment {i} " + "w" * 40 for i in range(3)])
+        seen: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            system = body["messages"][0]["content"]
+            content = final_summary_json() if "ALLOWED TAGS" in system else map_summary_json()
+            return _chat_success(content)
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        names = [body["response_format"]["json_schema"]["name"] for body in seen]
+        assert names.count("brain_summary_map") == 3
+        assert names.count("brain_summary_final") == 1
+
+    def test_non_final_reduce_carries_map_schema(self, tmp_path):
+        config = self._config(
+            tmp_path,
+            chunk_characters=60,
+            chunk_overlap_characters=0,
+            max_chunk_count=8,
+            max_input_characters=8000,
+        )
+        recording, _, _ = make_transcribed_recording([f"segment {i} " + "w" * 50 for i in range(6)])
+        big = map_summary_json(overview="o" * 600, key_points=["p" * 100] * 3)
+        sub = map_summary_json(overview="m" * 600, key_points=["p" * 100] * 3)
+        seen: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            system = body["messages"][0]["content"]
+            user = body["messages"][1]["content"]
+            if "ALLOWED TAGS" in system:
+                return _chat_success(final_summary_json())
+            if "<partial_summaries>" in user:
+                return _chat_success(sub)
+            return _chat_success(big)
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        non_final_reduces = [
+            body
+            for body in seen
+            if "<partial_summaries>" in body["messages"][1]["content"]
+            and "ALLOWED TAGS" not in body["messages"][0]["content"]
+        ]
+        assert non_final_reduces  # the oversized merged request forced sub-reduction
+        assert all(
+            body["response_format"]["json_schema"]["name"] == "brain_summary_map"
+            for body in non_final_reduces
+        )
+
+    def test_200_warning_valid_output_still_validates_locally(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            seen.append(json.loads(request.content))
+            return _chat_success(
+                final_summary_json(),
+                headers={"Warning": '199 omlx "response_format not enforced; best effort"'},
+            )
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        # No fallback/extra call: the Warning is inert.
+        assert len(seen) == 1
+        assert "response_format" in seen[0]
+
+    def test_200_warning_invalid_output_uses_local_validation_and_one_repair(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        sentinel = "WARNING-SENTINEL-c0ffee"
+        warning = {"Warning": f'199 omlx "response_format not enforced {sentinel}"'}
+        seen: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            if len(seen) == 1:
+                return _chat_success('{"title": 7}', headers=warning)
+            return _chat_success(final_summary_json(), headers=warning)
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        # Same local validation + exactly one structured repair as without
+        # any Warning header; the header is never surfaced.
+        assert len(seen) == 2
+        assert all("response_format" in body for body in seen)
+        assert "failed validation" in seen[1]["messages"][1]["content"]
+        assert sentinel not in seen[1]["messages"][1]["content"]
+
+    def test_explicit_422_falls_back_to_plain_once(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            if "response_format" in body:
+                return httpx.Response(
+                    422, content=b'{"error": "unsupported parameter: response_format"}'
+                )
+            return _chat_success(final_summary_json())
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        assert len(seen) == 2
+        assert "response_format" in seen[0]
+        assert "response_format" not in seen[1]
+
+    @pytest.mark.parametrize(
+        "status,body",
+        [(500, b'{"error": "boom"}'), (400, b'{"error": "bad model"}')],
+    )
+    def test_no_plain_fallback_for_other_http_errors(self, tmp_path, status, body):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            seen.append(json.loads(request.content))
+            return httpx.Response(status, content=body)
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "failed"
+        assert result["error_code"] == "http_error"
+        assert len(seen) == 1
+        assert "response_format" in seen[0]
+
+    def test_structured_invalid_then_one_repair(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        sentinel = "REJECTED-MODEL-OUTPUT-SENTINEL"
+        seen: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            if len(seen) == 1:
+                return _chat_success('{"leak": "' + sentinel + '", "title": 7')
+            return _chat_success(final_summary_json())
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        assert len(seen) == 2
+        repair_user = seen[1]["messages"][1]["content"]
+        assert "failed validation" in repair_user
+        assert sentinel not in repair_user
+        assert "response_format" in seen[1]
+
+    def test_structured_invalid_repair_invalid_terminal_two_calls(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            seen.append(json.loads(request.content))
+            return _chat_success('{"title": 7}')
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "failed"
+        assert result["error_code"] == "schema_validation"
+        assert len(seen) == 2
+
+    def test_capability_fallback_invalid_then_plain_repair_three_calls(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            index = len(seen)
+            if index == 1:
+                assert "response_format" in body
+                return httpx.Response(422, content=b'{"error": "unknown parameter json_schema"}')
+            assert "response_format" not in body
+            if index == 2:
+                return _chat_success('{"title": 7}')
+            return _chat_success(final_summary_json())
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        assert len(seen) == 3
+
+    def test_capability_fallback_plain_repair_invalid_terminal_three_calls(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            if len(seen) == 1:
+                return httpx.Response(422, content=b'{"error": "unsupported response_format"}')
+            return _chat_success('{"title": 7}')
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "failed"
+        assert result["error_code"] == "schema_validation"
+        assert len(seen) == 3
+
+    def test_truncation_then_compact_repair_succeeds(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            seen.append(body)
+            if len(seen) == 1:
+                return _chat_success('{"partial":', finish_reason="length")
+            return _chat_success(final_summary_json())
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "summarized"
+        assert len(seen) == 2
+        repair_user = seen[1]["messages"][1]["content"]
+        assert "truncated" in repair_user
+        assert "compact" in repair_user
+
+    def test_repeated_truncation_terminal_output_truncated(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        seen: list[dict] = []
+
+        def handler(request):
+            seen.append(json.loads(request.content))
+            return _chat_success('{"partial":', finish_reason="length")
+
+        result = summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        assert result["result"] == "failed"
+        assert result["error_code"] == "output_truncated"
+        assert len(seen) == 2
+        attempt = ProcessingAttempt.objects.filter(
+            recording=recording, stage=AttemptStage.SUMMARIZATION
+        ).order_by("-ordinal").first()
+        assert attempt.error_code == "output_truncated"
+        assert attempt.outcome == AttemptOutcome.INVALID_OUTPUT
+
+    def test_injected_call_receives_safe_repair_prompt(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        sentinel = "INJECTED-REJECTED-OUTPUT"
+        llm = ScriptedLLM([f'{{"leak": "{sentinel}"', final_summary_json()])
+        result = summarize_service.summarize_one(config, recording, llm_call=llm)
+        assert result["result"] == "summarized"
+        assert llm.call_count == 2
+        assert llm.calls[1]["system"] == llm.calls[0]["system"]
+        assert "failed validation" in llm.calls[1]["user"]
+        assert sentinel not in llm.calls[1]["user"]
+
+    def test_request_size_gate_includes_schema(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        measured: list[dict] = []
+        real_measure = summarize_service.llm_service.request_payload_characters
+
+        def recording_measure(payload):
+            size = real_measure(payload)
+            plain = {key: value for key, value in payload.items() if key != "response_format"}
+            measured.append({"size": size, "plain": len(json.dumps(plain, ensure_ascii=False))})
+            return size
+
+        monkeypatch.setattr(
+            summarize_service.llm_service, "request_payload_characters", recording_measure
+        )
+
+        def handler(request):
+            return _chat_success(final_summary_json())
+
+        summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(handler))
+        structured_size = measured[0]["size"]
+        assert structured_size > measured[0]["plain"]
+
+        # With no schema the request would be smaller and would pass; the
+        # structured request must fail the gate pre-HTTP.
+        capped = self._config(tmp_path, max_input_characters=structured_size - 1)
+        recording2, _, _ = make_transcribed_recording(["hello world"], sha="size-gate-recording")
+
+        def forbidden(request):
+            raise AssertionError("the structured request must fail the size gate before HTTP")
+
+        result = summarize_service.summarize_one(capped, recording2, transport=httpx.MockTransport(forbidden))
+        assert result["result"] == "failed"
+        assert result["error_code"] == "input_too_large"
+        assert not Summary.objects.filter(recording=recording2).exists()
+
+    def test_request_size_gate_includes_repair_prompt(self, tmp_path, monkeypatch):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        measured: list[int] = []
+        real_measure = summarize_service.llm_service.request_payload_characters
+
+        def recording_measure(payload):
+            size = real_measure(payload)
+            measured.append(size)
+            return size
+
+        monkeypatch.setattr(
+            summarize_service.llm_service, "request_payload_characters", recording_measure
+        )
+
+        def ok(request):
+            return _chat_success(final_summary_json())
+
+        summarize_service.summarize_one(config, recording, transport=httpx.MockTransport(ok))
+        initial_size = measured[0]
+
+        capped = self._config(tmp_path, max_input_characters=initial_size)
+        recording2, _, _ = make_transcribed_recording(["hello world"], sha="repair-size-recording")
+        calls: list[int] = []
+
+        def invalid_first(request):
+            calls.append(1)
+            return _chat_success("{not json")
+
+        result = summarize_service.summarize_one(capped, recording2, transport=httpx.MockTransport(invalid_first))
+        # First (initial) request fits exactly; the repair prompt pushes
+        # the measured request over the cap, so no repair HTTP call is made.
+        assert result["result"] == "failed"
+        assert result["error_code"] == "input_too_large"
+        assert len(calls) == 1
+
+    def test_truncation_failure_preserves_previous_summary_and_versioning(self, tmp_path):
+        config = self._config(tmp_path)
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        summarize_service.summarize_one(
+            config, recording, llm_call=ScriptedLLM([final_summary_json(title="V1")])
+        )
+        assert recording.current_summary().title == "V1"
+
+        def handler(request):
+            return _chat_success('{"partial":', finish_reason="length")
+
+        result = summarize_service.summarize_one(
+            config, recording, regenerate=True, transport=httpx.MockTransport(handler)
+        )
+        assert result["result"] == "failed"
+        assert result["error_code"] == "output_truncated"
+        assert result["kept_current_summary"] is True
+        recording.refresh_from_db()
+        assert recording.summary_status == SummaryState.CURRENT
+        assert recording.resummarization_failed is True
+        assert recording.current_summary().title == "V1"
+        attempt = ProcessingAttempt.objects.filter(
+            recording=recording, stage=AttemptStage.SUMMARIZATION
+        ).order_by("-ordinal").first()
+        assert attempt.error_code == "output_truncated"
+        assert attempt.outcome == AttemptOutcome.INVALID_OUTPUT
+        # The failed attempt's error message is sanitized (no model output).
+        assert "partial" not in attempt.error_message
 
 
 # ---------------------------------------------------------------------------

@@ -530,6 +530,28 @@ class TestReviewBadge:
         content = client.get("/recordings/").content.decode()
         assert '<span class="badge"' not in content
 
+    def test_unverified_automatic_routing_not_counted(self, client):
+        """An active unverified automatic decision is audit-only and never
+        contributes to the Review badge."""
+        rec, _t, _s = _make_recording(1)
+        RoutingDecision.objects.create(
+            recording=rec, ordinal=1, route_suggestion="european",
+            profile_name="european", model_id="m", method=RoutingMethod.AUTOMATIC,
+            routing_verified=False, is_active=True,
+        )
+        content = client.get("/recordings/").content.decode()
+        assert '<span class="badge"' not in content
+
+    def test_true_needs_review_still_counted(self, client):
+        rec, _t, _s = _make_recording(1)
+        Recording.objects.filter(pk=rec.pk).update(
+            processing_status=ProcessingStatus.NEEDS_REVIEW
+        )
+        content = client.get("/recordings/").content.decode()
+        badge = re.search(r'<span class="badge"[^>]*>(\d+)</span>', content)
+        assert badge is not None
+        assert badge.group(1) == "1"
+
     def test_context_processor_issues_exactly_one_query(self, client):
         from workflow import context_processors
 

@@ -652,11 +652,6 @@ def _section_filter_only(qs, filters: ListFilters, timezone_name: str):
             | Q(transcript__recording__retranscription_failed=True)
             | Q(transcript__recording__resummarization_failed=True)
             | Q(section_default_summary_state=SummaryVariantState.VariantStatus.FAILED)
-            | Q(
-                transcript__recording__processing_status=ProcessingStatus.TRANSCRIBED,
-                transcript__recording__routing_decisions__is_active=True,
-                transcript__recording__routing_decisions__routing_verified=False,
-            )
         ).distinct()
 
     if filters.audio:
@@ -1166,10 +1161,6 @@ class LibraryItemCard:
             or row["resummarization_failed"]
             or row["summary_status"] == SummaryState.FAILED
             or row["audio_status"] == AudioStatus.MISSING
-            or (
-                row["processing_status"] == ProcessingStatus.TRANSCRIBED
-                and row["has_route_unverified"]
-            )
         )
 
     @property
@@ -1623,11 +1614,6 @@ def filter_only(queryset, filters: ListFilters, timezone_name: str):
             | Q(retranscription_failed=True)
             | Q(resummarization_failed=True)
             | Q(summary_status=SummaryState.FAILED)
-            | Q(
-                processing_status=ProcessingStatus.TRANSCRIBED,
-                routing_decisions__is_active=True,
-                routing_decisions__routing_verified=False,
-            )
         ).distinct()
 
     if filters.audio:

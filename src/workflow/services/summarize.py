@@ -12,12 +12,19 @@ Flow per recording:
    (input size, computed chunk count and limits recorded) — zero HTTP
    calls and no Summary row.
 4. Map/reduce: every request payload is serialized in full and checked
-   against ``max_input_characters`` (scaffolding and JSON escaping
-   included) before any HTTP call; oversized reduce inputs are handled
-   by deterministic hierarchical reduction, failing cleanly before HTTP
-   when even a single intermediate cannot fit. One logical call = size
-   gate + HTTP + envelope validation + JSON parse + schema validation;
-   invalid output retries that whole logical call exactly once.
+   against ``max_input_characters`` (scaffolding, an optional
+   ``response_format`` JSON schema, and JSON escaping included) before
+   any HTTP call; oversized reduce inputs are handled by deterministic
+   hierarchical reduction, failing cleanly before HTTP when even a
+   single intermediate cannot fit. One logical call = size gate + HTTP +
+   envelope/finish_reason validation + JSON parse + schema validation.
+   The finite request state machine is: one structured (``json_schema``)
+   request, then exactly one repair request when the HTTP-successful
+   output is invalid; an explicit HTTP 400/422 structured-format
+   capability rejection instead allows one plain attempt plus at most
+   one plain repair. No other failure is ever retried, and Brain's own
+   validation is authoritative whether or not the server enforces the
+   format.
 5. Persistence goes exclusively through :func:`persist_summary`, which
    enforces the section/transcript/recording relationship invariants
    and the one-active-summary-per-scope constraint in one transaction.
@@ -81,7 +88,10 @@ logger = logging.getLogger(__name__)
 PARSER_VERSION = "1"
 # Code-owned prompt implementation version. Stored on Summary for
 # provenance. Replaces config-driven prompt_version for new summaries.
-PROMPT_IMPLEMENTATION_VERSION = "2"
+# v3: map/reduce/final requests now carry a deterministic OpenAI-
+# compatible json_schema ``response_format`` and use the bounded repair
+# request policy.
+PROMPT_IMPLEMENTATION_VERSION = "3"
 
 FINAL_SHAPE_DOC = (
     '{"title": string, "overview": string, '
@@ -109,6 +119,154 @@ MAX_MAP_KEY_POINTS = 15
 MAX_MAP_KEY_POINT_CHARS = 500
 MAX_SUGGESTED_TAGS = 50
 MAX_TAG_NAME_CHARS = 64
+
+# Deterministic JSON schemas encoding the intended canonical shape and
+# the bounds the grammar can represent. They are sent as an
+# OpenAI-compatible ``response_format`` hint; Brain's own compatibility
+# parsing and local semantic validation remain authoritative whether or
+# not the server enforces the grammar, including historical null/missing
+# collection tolerance, whitespace stripping, canonical language
+# normalization and key-point hierarchy rules that JSON Schema cannot
+# express. Extra properties are disallowed so the structured contract
+# matches the documented shape (the local validators ignore unknown
+# fields either way). Allowed tag names are deliberately NOT encoded as
+# an enum: the current behavior records an unknown suggestion as
+# ``rejected`` rather than rejecting the whole payload, and an empty
+# configured-tag set has no valid enum.
+MAP_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "overview": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_MAP_OVERVIEW_CHARS,
+        },
+        "key_points": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_MAP_KEY_POINT_CHARS,
+            },
+            "maxItems": MAX_MAP_KEY_POINTS,
+        },
+    },
+    "required": ["overview", "key_points"],
+    "additionalProperties": False,
+}
+
+FINAL_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string", "minLength": 1, "maxLength": MAX_TITLE_CHARS},
+        "overview": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_OVERVIEW_CHARS,
+        },
+        "key_points": {
+            "type": "array",
+            "maxItems": MAX_KEY_POINTS,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_KEY_POINT_CHARS,
+                    },
+                    "level": {"type": "integer", "minimum": 0, "maximum": 3},
+                },
+                "required": ["text", "level"],
+                "additionalProperties": False,
+            },
+        },
+        "action_items": {
+            "type": "array",
+            "maxItems": MAX_ACTION_ITEMS,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_ACTION_TEXT_CHARS,
+                    },
+                    "owner": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "maxLength": MAX_ACTION_OWNER_CHARS,
+                    },
+                    "due_date": {
+                        "type": ["string", "null"],
+                        "minLength": 1,
+                        "maxLength": MAX_ACTION_DUE_CHARS,
+                    },
+                },
+                "required": ["text", "owner", "due_date"],
+                "additionalProperties": False,
+            },
+        },
+        "people": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": MAX_NAME_CHARS},
+            "maxItems": MAX_NAME_ITEMS,
+        },
+        "organizations": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": MAX_NAME_CHARS},
+            "maxItems": MAX_NAME_ITEMS,
+        },
+        "topics": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": MAX_NAME_CHARS},
+            "maxItems": MAX_NAME_ITEMS,
+        },
+        "suggested_tags": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1, "maxLength": MAX_TAG_NAME_CHARS},
+            "maxItems": MAX_SUGGESTED_TAGS,
+        },
+        "language": {"type": "string", "maxLength": MAX_LANGUAGE_CHARS},
+    },
+    "required": [
+        "title",
+        "overview",
+        "key_points",
+        "action_items",
+        "people",
+        "organizations",
+        "topics",
+        "suggested_tags",
+        "language",
+    ],
+    "additionalProperties": False,
+}
+
+
+def build_map_response_format() -> dict:
+    """Deterministic structured-output request for map/intermediate calls."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "brain_summary_map",
+            "strict": True,
+            "schema": MAP_RESPONSE_SCHEMA,
+        },
+    }
+
+
+def build_final_response_format() -> dict:
+    """Deterministic structured-output request for final/single calls."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "brain_summary_final",
+            "strict": True,
+            "schema": FINAL_RESPONSE_SCHEMA,
+        },
+    }
+
 
 _FENCE_RE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.DOTALL)
 _CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
@@ -564,6 +722,41 @@ def validate_final_payload(
 # Bounded LLM calls (map, sub-reduce, final reduce)
 # ---------------------------------------------------------------------------
 
+# Allowlisted repair-hint categories. Only these fixed phrases may ever
+# appear in a repair prompt; an unknown/hostile code maps to the generic
+# fallback. The rejected model output/body is NEVER echoed back.
+_REPAIR_CATEGORY_HINTS = {
+    "malformed_http_json": "the previous reply was not valid JSON",
+    "invalid_envelope": "the previous reply used an invalid response envelope",
+    "malformed_model_json": "the previous reply was not a valid JSON object",
+    "schema_validation": "the previous reply did not match the required JSON schema",
+    "language_mismatch": "the previous reply used the wrong output language",
+    "output_truncated": "the previous reply was truncated",
+}
+_REPAIR_FALLBACK_HINT = "the previous reply was invalid"
+_REPAIR_INSTRUCTION = (
+    "\n\nYour previous reply failed validation ({hint}). "
+    "Respond with ONLY a single JSON object that exactly matches the "
+    "required shape and field types."
+)
+_REPAIR_TRUNCATED_INSTRUCTION = (
+    " Keep the JSON compact and shorter so it fits within the output token limit."
+)
+
+
+def _repair_code(exc: llm_service.LLMInvalid) -> str:
+    code = getattr(exc, "code", "")
+    return code if isinstance(code, str) else ""
+
+
+def _repair_user_prompt(user: str, code: str) -> str:
+    """Strengthen the user prompt with ONLY a stable category hint."""
+    hint = _REPAIR_CATEGORY_HINTS.get(code, _REPAIR_FALLBACK_HINT)
+    prompt = user + _REPAIR_INSTRUCTION.format(hint=hint)
+    if code == "output_truncated":
+        prompt += _REPAIR_TRUNCATED_INSTRUCTION
+    return prompt
+
 
 def _call_llm(
     config: AppConfig,
@@ -571,56 +764,97 @@ def _call_llm(
     system: str,
     user: str,
     validate,
+    response_format: dict | None = None,
     transport=None,
     llm_call=None,
 ) -> dict:
-    """One logical summarization call, retried once on invalid output.
+    """One logical summarization call with a finite request state machine.
 
-    A logical call is: (1) the fully serialized request-size gate,
-    (2) one HTTP call (or the injected ``llm_call`` behind the same
-    gate), (3) envelope validation, (4) model-JSON parsing, (5) the
-    applicable map/final schema validation. The complete logical call is
-    retried exactly once when — and only when — the failure is an
-    invalid-output failure (malformed HTTP JSON, invalid envelope,
-    malformed model JSON, schema validation failure). Endpoint, timeout,
-    HTTP-status, response-too-large and request-too-large failures are
-    never retried. Both attempts use the same bounded request; the last
-    specific error code is preserved when both attempts fail.
+    A logical call is: (1) the fully serialized request-size gate
+    (including any ``response_format`` schema), (2) one HTTP call (or the
+    injected ``llm_call`` behind the same gate), (3) envelope validation
+    (including ``finish_reason``), (4) model-JSON parsing, (5) the
+    applicable map/final schema validation.
+
+    - Structured path (``response_format`` set): the first request uses
+      ``response_format``; an HTTP-successful invalid-output failure
+      (malformed HTTP JSON, invalid envelope, malformed model JSON,
+      schema validation, language mismatch, output truncation) allows
+      EXACTLY ONE structured repair request. Max 2 calls.
+    - An explicit HTTP 400/422 ``response_format``/``json_schema``
+      capability rejection of the structured request (classified from a
+      bounded, discarded error sample) allows EXACTLY ONE plain initial
+      attempt; if that succeeds but is invalid, at most ONE plain repair
+      follows. Max 3 calls, and only on this explicit path.
+    - Plain path (no ``response_format``): one plain initial request plus
+      one plain repair on invalid output. Max 2 calls.
+
+    Endpoint/timeout/other-HTTP/response-too-large failures are never
+    retried. Any 200 response carrying a Warning is treated exactly
+    like one without it: local validation is
+    authoritative and the same single repair request applies. The repair
+    prompt repeats the exact shape, names only an allowlisted stable
+    category, and never contains the rejected output. Repeated
+    ``length`` truncation gets one compact repair and then a terminal
+    ``output_truncated``. The last specific error code is preserved when
+    a repair also fails.
     """
-    last: Exception | None = None
-    for _ in range(2):
-        try:
-            payload = llm_service.build_chat_payload(
+
+    def run(*, structured: bool, repair_code: str | None) -> dict:
+        effective_user = user if repair_code is None else _repair_user_prompt(user, repair_code)
+        format_arg = response_format if structured else None
+        payload = llm_service.build_chat_payload(
+            config,
+            system_prompt=system,
+            user_prompt=effective_user,
+            temperature=config.summarization.temperature,
+            max_tokens=config.summarization.max_output_tokens,
+            response_format=format_arg,
+        )
+        size = llm_service.request_payload_characters(payload)
+        if size > config.summarization.max_input_characters:
+            raise InputTooLarge(
+                "request_too_large",
+                f"serialized request is {size} characters, exceeding the per-request limit of "
+                f"{config.summarization.max_input_characters}",
+            )
+        if llm_call is not None:
+            # Test injection runs behind the same size gate and the same
+            # parse/validation/repair semantics.
+            content = llm_call(system=system, user=effective_user)
+        else:
+            content = llm_service.chat_completion(
                 config,
                 system_prompt=system,
-                user_prompt=user,
+                user_prompt=effective_user,
                 temperature=config.summarization.temperature,
                 max_tokens=config.summarization.max_output_tokens,
+                response_format=format_arg,
+                transport=transport,
             )
-            size = llm_service.request_payload_characters(payload)
-            if size > config.summarization.max_input_characters:
-                raise InputTooLarge(
-                    "request_too_large",
-                    f"serialized request is {size} characters, exceeding the per-request limit of "
-                    f"{config.summarization.max_input_characters}",
-                )
-            if llm_call is not None:
-                # Test injection runs behind the same size gate and the
-                # same parse/validation retry semantics.
-                content = llm_call(system=system, user=user)
-            else:
-                content = llm_service.chat_completion(
-                    config,
-                    system_prompt=system,
-                    user_prompt=user,
-                    temperature=config.summarization.temperature,
-                    max_tokens=config.summarization.max_output_tokens,
-                    transport=transport,
-                )
-            return validate(_parse_model_json(content))
+        return validate(_parse_model_json(content))
+
+    if response_format is None:
+        # Plain path (e.g. source-language detection): initial + one repair.
+        try:
+            return run(structured=False, repair_code=None)
         except llm_service.LLMInvalid as exc:
-            last = exc
-    raise last  # type: ignore[misc]
+            return run(structured=False, repair_code=_repair_code(exc))
+
+    try:
+        return run(structured=True, repair_code=None)
+    except llm_service.LLMHTTPError as exc:
+        if not exc.capability_rejection:
+            raise
+        # Explicit capability rejection of the structured request: one
+        # plain initial attempt, then at most one plain repair.
+        try:
+            return run(structured=False, repair_code=None)
+        except llm_service.LLMInvalid as invalid:
+            return run(structured=False, repair_code=_repair_code(invalid))
+    except llm_service.LLMInvalid as exc:
+        # Ordinary invalid structured output: exactly one structured repair.
+        return run(structured=True, repair_code=_repair_code(exc))
 
 
 def _reduce_layer(
@@ -633,6 +867,7 @@ def _reduce_layer(
     source_language: str,
     transport=None,
     llm_call=None,
+    _split_allowed: bool = True,
 ) -> dict:
     """Deterministic hierarchical reduction over actual serialized sizes.
 
@@ -640,6 +875,13 @@ def _reduce_layer(
     per-request cap, splits deterministically in half and recurses with
     the map schema. If even a single intermediate cannot fit the cap,
     fails cleanly BEFORE any HTTP call.
+
+    ``_split_allowed`` is an internal termination guard: the merge that
+    follows a split runs with ``_split_allowed=False``. Re-splitting that
+    merge could only re-reduce the same already-reduced halves (which
+    does not deterministically shrink them) and would otherwise recurse
+    without bound; a merge that still cannot fit then raises
+    :class:`InputTooLarge` as the documented clean failure.
     """
     if final:
         validate = lambda data: _validate_language_consistency(  # noqa: E731
@@ -656,11 +898,12 @@ def _reduce_layer(
             system=_final_system_prompt(list(allowed.values()), output_language, source_language) if final else _map_system_prompt(output_language, source_language),
             user=_reduce_user_prompt(intermediates, final=final),
             validate=validate,
+            response_format=build_final_response_format() if final else build_map_response_format(),
             transport=transport,
             llm_call=llm_call,
         )
     except InputTooLarge:
-        if len(intermediates) < 2:
+        if len(intermediates) < 2 or not _split_allowed:
             raise
         mid = len(intermediates) // 2
         left = _reduce_layer(
@@ -677,6 +920,7 @@ def _reduce_layer(
             [left, right], config, allowed, final=final,
             output_language=output_language, source_language=source_language,
             transport=transport, llm_call=llm_call,
+            _split_allowed=False,
         )
 
 
@@ -701,6 +945,7 @@ def _generate_summary(
                 validate_final_payload(data, allowed, source_language=source_language),
                 output_language=output_language,
             ),
+            response_format=build_final_response_format(),
             transport=transport,
             llm_call=llm_call,
         )
@@ -717,6 +962,7 @@ def _generate_summary(
                 validate=lambda data: _validate_language_consistency(
                     validate_map_payload(data), output_language=output_language
                 ),
+                response_format=build_map_response_format(),
                 transport=transport,
                 llm_call=llm_call,
             )
@@ -1939,6 +2185,8 @@ __all__ = [
     "persist_summary",
     "validate_final_payload",
     "validate_map_payload",
+    "build_map_response_format",
+    "build_final_response_format",
     "config_fingerprint",
     "reconcile_recording_summary_state",
     "resolve_default_language",

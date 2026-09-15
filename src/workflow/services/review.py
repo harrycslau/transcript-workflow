@@ -62,41 +62,37 @@ def build_review_report() -> dict:
             }
         )
 
-    unverified = []
+    # Retained for report-shape compatibility only: an active UNVERIFIED
+    # automatic routing decision on a transcribed Recording is audit-only
+    # (see AGENTS.md) and is deliberately NOT a Review category. No query
+    # or population is performed for this obsolete entry.
+    unverified: list[dict] = []
     retranscription_failed = []
-    transcribed_qs = (
-        Recording.objects.filter(processing_status=ProcessingStatus.TRANSCRIBED)
+    failed_retranscription_qs = (
+        Recording.objects.filter(
+            processing_status=ProcessingStatus.TRANSCRIBED,
+            retranscription_failed=True,
+        )
         .select_related("last_failed_attempt")
         .prefetch_related(_active_decisions_prefetch())
     )
-    for recording in transcribed_qs:
+    for recording in failed_retranscription_qs:
         decision = _first_active(recording)
-        if recording.retranscription_failed:
-            failed_attempt = recording.last_failed_attempt  # select_related: no query
-            retranscription_failed.append(
-                {
-                    "recording_id": recording.pk,
-                    "kind": "failed_retranscription",
-                    "attempt_id": failed_attempt.pk if failed_attempt is not None else None,
-                    "error_code": failed_attempt.error_code if failed_attempt is not None else "",
-                    "error_message": sanitize_error(
-                        failed_attempt.error_message, limit=ERROR_DETAIL_CAP
-                    )
-                    if failed_attempt is not None
-                    else "",
-                    "route": decision.route_suggestion if decision else None,
-                }
-            )
-        if decision is not None and not decision.routing_verified:
-            unverified.append(
-                {
-                    "recording_id": recording.pk,
-                    "kind": "transcribed_routing_unverified",
-                    "route": decision.route_suggestion,
-                    "confidence": decision.confidence,
-                    "profile": decision.profile_name,
-                }
-            )
+        failed_attempt = recording.last_failed_attempt  # select_related: no query
+        retranscription_failed.append(
+            {
+                "recording_id": recording.pk,
+                "kind": "failed_retranscription",
+                "attempt_id": failed_attempt.pk if failed_attempt is not None else None,
+                "error_code": failed_attempt.error_code if failed_attempt is not None else "",
+                "error_message": sanitize_error(
+                    failed_attempt.error_message, limit=ERROR_DETAIL_CAP
+                )
+                if failed_attempt is not None
+                else "",
+                "route": decision.route_suggestion if decision else None,
+            }
+        )
 
     failed = [
         {"recording_id": pk, "kind": f"failed_{stage}"}

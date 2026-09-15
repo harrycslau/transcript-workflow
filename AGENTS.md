@@ -149,6 +149,19 @@ Non-negotiable principles:
   while the routing metadata/history and the manual routing controls
   stay available through the collapsed Routing disclosure (choosing the
   current profile there confirms the routing).
+- An active UNVERIFIED automatic `RoutingDecision` on a successfully
+  transcribed Recording is audit-only and is NEVER an actionable Review
+  category. It does not appear on the web Review page or its category
+  totals, is excluded from the global Review badge distinct-recording
+  count, is not reported as attention by `brain review` /
+  `build_review_report` (the report may retain the empty `unverified`
+  key for shape compatibility, but no query/population runs for it),
+  and is excluded from Library `review=1` filtering and
+  `LibraryItemCard.needs_attention` — all actionable-review surfaces
+  agree. `routing_verified` stays `false` and every routing
+  metadata/history/detail disclosure remains. Pre-transcription
+  `ProcessingStatus.NEEDS_REVIEW` review behavior is unchanged. No
+  migration, no existing-row mutation.
 - The client-side pending UI is progressive enhancement in
   `src/static/workflow/app.js` (`form[data-action-form]`): the FIRST
   submit is never cancelled (an ordinary native POST navigation),
@@ -352,6 +365,55 @@ Non-negotiable principles:
 - Web GET requests must remain strictly read-only (no detection, no
   network, no subprocess, no writes); unresolved Original is a status,
   never resolved by side effects on GET.
+
+## Summarization oMLX request contract (reliability patch)
+
+- Summarization map/reduce/final and single calls send a deterministic
+  OpenAI-compatible `response_format` (`json_schema`, `strict: true`):
+  `brain_summary_map` for map/non-final-reduce and `brain_summary_final`
+  for final/single. The schemas encode the intended canonical shape and
+  the representable structural bounds (counts, string lengths, minLength
+  nonblank strings, key-point levels, nullable-but-required action
+  `owner`/`due_date`, empty-list semantics); every declared property is
+  listed in `required` for strict structured outputs. Compatibility
+  parsing and local semantic validation remain authoritative whether or
+  not the server enforces the grammar — historical null/missing
+  collection tolerance, whitespace stripping, canonical BCP-47 language
+  normalization and key-point hierarchy rules are NOT encoded in the
+  schema. Allowed tag names are NOT encoded as an enum, so the existing
+  unknown-suggestion `rejected` behavior is unchanged.
+  `PROMPT_IMPLEMENTATION_VERSION` is `3`.
+- The serialized request-size gate measures the whole payload including
+  the schema and any repair prompt.
+- `finish_reason` is validated strictly: `length` is the stable
+  `output_truncated` category (raised BEFORE content parsing), `stop`/
+  absent is normal, and any other reason is a fixed sanitized
+  `invalid_envelope` whose raw value is never surfaced.
+- Finite request state machine (no loops): one structured `json_schema`
+  request, then EXACTLY ONE repair request when the HTTP-successful
+  output is invalid (malformed envelope/JSON, schema_validation,
+  language_mismatch, output_truncated). An explicit HTTP 400/422
+  response_format/json_schema capability rejection of the structured
+  request instead allows one plain attempt plus at most one plain repair
+  — hard max 3 calls, only on that explicit path. Endpoint/timeout/
+  other-HTTP/response-size failures are never retried. The repair prompt
+  repeats the exact required shape, names only an allowlisted stable
+  category, never contains the rejected output, and asks for compact
+  output when truncated; a repeated `length` after one compact repair is
+  terminal `output_truncated`. The last specific error code is preserved.
+- Every HTTP 200 — including one carrying an oMLX Warning (recognized
+  or otherwise) that `response_format` was not enforced — is treated
+  identically: local validation is authoritative and the same single
+  repair request applies; there is NO Warning classifier and no warning
+  condition triggers a plain fallback. Plain fallback exists ONLY for an
+  explicit HTTP 400/422 response_format/json_schema capability
+  rejection. Raw header text and bounded error-body samples are never
+  inspected for behavior, persisted, logged, returned, or otherwise
+  surfaced.
+- `_reduce_layer` carries its internal `_split_allowed` termination
+  guard: a merged request that still exceeds the cap after its halves
+  were already reduced fails cleanly with `input_too_large` instead of
+  re-reducing the same pair without bound.
 
 ## Failure, retry, recovery
 

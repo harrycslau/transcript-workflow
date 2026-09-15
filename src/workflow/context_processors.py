@@ -21,9 +21,11 @@ def review_badge_count() -> int:
     """Distinct Recordings appearing in ANY Review category.
 
     Matches the Review page's categories (incl. awaiting summary, failed
-    summary, failed re-summarization, missing audio and unverified
-    automatic routing). Overlapping categories are counted once via
-    ``distinct()``; the whole union is one bounded query.
+    summary, failed re-summarization and missing audio). An active
+    UNVERIFIED automatic routing decision on a transcribed Recording is
+    audit-only (see AGENTS.md) and is deliberately NOT a Review category.
+    Overlapping categories are counted once via ``distinct()``; the whole
+    union is one bounded query.
     """
     return (
         Recording.objects.filter(
@@ -37,11 +39,6 @@ def review_badge_count() -> int:
                 summary_status=SummaryState.MISSING,
             )
             | Q(audio_status=AudioStatus.MISSING)
-            | Q(
-                processing_status=ProcessingStatus.TRANSCRIBED,
-                routing_decisions__is_active=True,
-                routing_decisions__routing_verified=False,
-            )
         )
         .distinct()
         .count()

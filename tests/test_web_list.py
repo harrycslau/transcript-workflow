@@ -317,7 +317,42 @@ class TestStatusFilters:
         content = response.content.decode()
         assert str(needs_review.pk) in content
         assert str(failed.pk) in content
-        assert str(unverified.pk) in content
+        # An active unverified automatic routing decision is audit-only and
+        # is NOT an actionable-review Library filter match.
+        assert str(unverified.pk) not in content
+
+    def test_unverified_automatic_routing_not_needs_attention(self, client):
+        """The Library card/row for a transcribed recording with an active
+        unverified automatic decision is not styled as needing attention,
+        while a true NEEDS_REVIEW recording still is."""
+        from workflow.models import RoutingMethod
+
+        unverified, _t, _s = _make_recording(1)
+        RoutingDecision.objects.create(
+            recording=unverified,
+            ordinal=1,
+            route_suggestion="european",
+            profile_name="european",
+            model_id="parakeet-pro:nvidia_parakeet-v3",
+            method=RoutingMethod.AUTOMATIC,
+            routing_verified=False,
+            is_active=True,
+        )
+        needs_review, _t2, _s2 = _make_recording(2)
+        Recording.objects.filter(pk=needs_review.pk).update(
+            processing_status=ProcessingStatus.NEEDS_REVIEW
+        )
+
+        content = client.get("/recordings/").content.decode()
+
+        def card_for(pk: int) -> str:
+            for chunk in content.split('<li class="recording-card'):
+                if f"/recordings/{pk}/" in chunk:
+                    return chunk.split("</li>")[0]
+            raise AssertionError(f"card for recording {pk} not found")
+
+        assert "needs-attention" not in card_for(unverified.pk)
+        assert "needs-attention" in card_for(needs_review.pk)
 
     def test_invalid_has_summary_is_friendly(self, client):
         response = client.get("/recordings/?has_summary=banana")

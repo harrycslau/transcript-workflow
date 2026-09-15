@@ -57,17 +57,20 @@ The `design/ui-prototype/` directory
 remains the approved v6 design source (fictional data); the production
 Recording Detail, Transcript and History pages now implement that
 design. The
-working tree is independently full-suite verified: **3157 collected
-and 3157 passed** (the recorded Step 6.3 handoff state was 3100; the
+working tree is independently full-suite verified: **3201 collected
+and 3201 passed** (the recorded Step 6.3 handoff state was 3100; the
 committed `run --now` CLI round that followed took the clean baseline
 to 3112, the direct-action test rounds — new executing-POST/
 pending-hook tests plus the rewritten two-step-confirmation tests
 across nine web test files — took the tree to an intermediate 3119,
 the fingerprint input hardening round added a further 33 tests after
 that state to an intermediate 3152, and the routing-state fingerprint
-binding round added a further 5 tests, bringing the current tree to
-**3157** (net +45 over 3112); only the known `audioop` deprecation
-warning), with
+binding round added a further 5 tests to 3157; the summarization oMLX
+`response_format`/repair reliability round added a further 36 tests,
+bringing the tree to 3193, and the unverified-review audit-only round
+added a further 8 tests, bringing the current tree to **3201** (net
++89 over 3112); only the
+known `audioop` deprecation warning), with
 `manage.py check`, `makemigrations --check` (NO new migration; 0013
 still the head) and `git diff --check` clean.
 No real-database
@@ -75,6 +78,53 @@ migration or user data operation is claimed (the 0011/0012/0013 migrations are
 never applied to a real database by this work). This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
+
+## Summarization oMLX reliability patch (delivered in the working tree)
+
+A bounded reliability round for local oMLX summarization, with no new
+migration/config key/dependency and no change to canonical summary
+validation:
+
+- `workflow/services/llm.py`: `build_chat_payload`/`chat_completion`
+  accept an optional OpenAI-compatible `response_format` and the
+  serialized request-size gate measures it; `parse_envelope` validates
+  `finish_reason` (`length` → sanitized `LLMInvalid("output_truncated")`
+  BEFORE content parsing; `stop`/absent normal; anything else a fixed
+  `invalid_envelope` whose value is never surfaced); and an explicit HTTP
+  400/422 response_format/json_schema capability rejection is classified
+  from a bounded, discarded error-body sample into the bool
+  `LLMHTTPError.capability_rejection`. There is deliberately NO Warning
+  classifier: every HTTP 200 (recognized or unrecognized Warning
+  included) flows through the same envelope/content parsing, so only an
+  explicit 400/422 capability rejection can trigger a plain fallback and
+  headers are never surfaced.
+- `workflow/services/summarize.py`: deterministic
+  `brain_summary_map`/`brain_summary_final` `json_schema` requests for
+  map/non-final-reduce vs final/single; the schemas encode the intended
+  canonical shape and representable structural bounds (every declared
+  property required; action `owner`/`due_date` required-but-nullable with
+  `minLength: 1`) while compatibility parsing/local semantic validation
+  remains authoritative; `PROMPT_IMPLEMENTATION_VERSION`
+  is `3`; the one invalid-output retry is now a bounded repair request
+  naming only an allowlisted stable category and never echoing the
+  rejected output (compact-output instruction on truncation); an
+  explicit 400/422 structured-format capability rejection allows one
+  plain attempt plus at most one plain repair (hard max 3 calls, only on
+  that path); a 200 not-enforced Warning uses the same local-validation
+  + single-repair path; and `_reduce_layer` gained an internal
+  `_split_allowed` termination guard so an oversized merged request
+  fails cleanly instead of re-reducing the same pair without bound.
+- `output_truncated` flows unchanged through the durable attempt
+  `error_code`/`outcome` and the CLI/web sanitized surfaces.
+- Focused tests: `tests/test_llm_client.py` (+15),
+  `tests/test_summarize.py` (+19), `tests/test_summarize_cli.py` (+1),
+  `tests/test_section_summary_service.py` (+1). Verification:
+  `uv run pytest` → **3193 collected and 3193 passed**; `manage.py
+  check`, `makemigrations --check` (no migration) and
+  `git diff --check` clean. Two size-sensitive hierarchical-reduction
+  tests raised their `max_input_characters` to account for the now-
+  measured schema. No real network/model/audio call is claimed; all
+  tests use `MockTransport`.
 
 ## Handoff audit — 2026-09-15 (updated for the direct-action web workflow refinement)
 
@@ -2452,10 +2502,16 @@ required.)
 - Shared builder `workflow/services/review.py` used by BOTH
   `brain review` (CLI JSON unchanged plus additive `missing_audio`
   group and `error_code` on failed-retranscription rows) and
-  `/review/`; groups: needs-review, unverified automatic routing,
-  failed retranscription, pipeline failures, awaiting summary, failed
-  summary, failed re-summarization, missing audio. Stable sanitized
-  codes only; GET purity and bounded queries test-proven.
+  `/review/`; groups: needs-review, failed retranscription, pipeline
+  failures, awaiting summary, failed summary, failed re-summarization,
+  missing audio. An active UNVERIFIED automatic routing decision on a
+  transcribed recording is audit-only and is NOT an actionable Review
+  category: it is absent from the Review page/groups/totals, the global
+  badge count, `brain review` attention rows (the empty `unverified`
+  report key is retained for shape compatibility) and the Library
+  `review=1`/`needs_attention` surfaces; `routing_verified=false` and
+  the routing metadata/history/detail disclosure are preserved. Stable
+  sanitized codes only; GET purity and bounded queries test-proven.
 
 ### Web configuration
 

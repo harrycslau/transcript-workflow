@@ -14,7 +14,6 @@ from workflow.views.helpers import get_config
 
 _GROUP_META = [
     ("needs_review", "Routing needs review", "needs_review"),
-    ("unverified", "Transcribed with unverified automatic routing", "unverified"),
     ("failed_retranscription", "Failed retranscription (transcript kept)", "retranscription_failed"),
     ("failed", "Pipeline failures", "failed"),
     ("awaiting_summary", "Awaiting first summary", "awaiting_summary"),

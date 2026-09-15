@@ -49,7 +49,7 @@ from workflow.models import (
     TagAssignment,
 )
 from workflow.services import summarize as summarize_service
-from workflow.services.llm import LLMTimeout, LLMUnavailable
+from workflow.services.llm import LLMInvalid, LLMTimeout, LLMUnavailable
 from workflow.services.segmentation import (
     SegmentationError,
     save_segmented_version,
@@ -399,6 +399,29 @@ class TestFailureAndRegeneration:
         assert str(lang["transcript_id"]) == str(transcript.pk)
         assert str(lang["section_id"]) == str(section.pk)
         assert lang["resolved"] == "en"
+
+    def test_terminal_output_truncated_flows_through_section_path(self, tmp_path):
+        config = make_config_for(tmp_path)
+        recording, transcript, sections = split_recording(
+            ["alpha one", "beta two"], [1], ["A", "B"]
+        )
+        section = sections[0]
+        llm = ScriptedLLM([
+            LLMInvalid("output_truncated", "truncated"),
+            LLMInvalid("output_truncated", "truncated"),
+        ])
+        result = summarize_section_one(config, section, llm_call=llm)
+        assert result["result"] == "failed"
+        assert result["error_code"] == "output_truncated"
+        assert llm.call_count == 2
+        vs = SummaryVariantState.objects.get(
+            transcript=transcript, section=section, output_language="en"
+        )
+        assert vs.status == SummaryVariantState.VariantStatus.FAILED
+        assert vs.last_failed_attempt.error_code == "output_truncated"
+        assert vs.last_failed_attempt.outcome == AttemptOutcome.INVALID_OUTPUT
+        recording.refresh_from_db()
+        assert recording.summary_status == SummaryState.MISSING
 
     def test_failed_regeneration_preserves_active_summary_and_marks_variant(self, tmp_path):
         config = make_config_for(tmp_path)

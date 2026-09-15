@@ -86,6 +86,34 @@ class TestSummarizeCommand:
             cli.main(["summarize", "--regenerate"])
         assert excinfo.value.code == 2
 
+    def test_summarize_surfaces_output_truncated(self, cli_env, capsys, monkeypatch):
+        import httpx
+
+        from workflow.services import llm as llm_service
+
+        recording, _, _ = make_transcribed_recording(["hello world"])
+        real_client = llm_service.chat_completion
+        body = json.dumps(
+            {"choices": [{"message": {"content": '{"partial":'}, "finish_reason": "length"}]}
+        ).encode()
+        monkeypatch.setattr(
+            "workflow.services.summarize.llm_service.chat_completion",
+            lambda config, **kwargs: real_client(
+                config,
+                **{
+                    **kwargs,
+                    "transport": httpx.MockTransport(
+                        lambda request: httpx.Response(200, content=body)
+                    ),
+                },
+            ),
+        )
+        assert cli.main(["summarize", str(recording.pk), "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["result"] == "failed"
+        assert payload["error_code"] == "output_truncated"
+        assert Summary.objects.count() == 0
+
     def test_summarize_unknown_recording_exits_one(self, cli_env, capsys):
         assert cli.main(["summarize", "nope", "--json"]) == 1
         assert "recording not found" in capsys.readouterr().err
