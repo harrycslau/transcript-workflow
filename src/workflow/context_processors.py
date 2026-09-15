@@ -13,6 +13,7 @@ import logging
 from django.db.models import Q
 
 from workflow.models import AudioStatus, ProcessingStatus, Recording, SummaryState
+from workflow.services.review import awaiting_summary_condition
 
 logger = logging.getLogger(__name__)
 
@@ -21,12 +22,13 @@ def review_badge_count() -> int:
     """Distinct Recordings appearing in ANY Review category.
 
     Matches the Review page's categories (incl. awaiting summary, failed
-    summary, failed re-summarization and missing audio). An active
-    UNVERIFIED automatic routing decision on a transcribed Recording is
-    audit-only (see AGENTS.md) and is deliberately NOT a Review category.
-    Overlapping categories are counted once via ``distinct()``; the whole
-    union is one bounded query. Archived Recordings are excluded — they
-    are not a Review category.
+    summary, failed re-summarization and missing audio) through the SHARED
+    ``review.awaiting_summary_condition`` so page/CLI and badge semantics
+    cannot drift. An active UNVERIFIED automatic routing decision on a
+    transcribed Recording is audit-only (see AGENTS.md) and is
+    deliberately NOT a Review category. Overlapping categories are counted
+    once via ``distinct()``; the whole union is one bounded query.
+    Archived Recordings are excluded — they are not a Review category.
     """
     return (
         Recording.objects.filter(archived_at__isnull=True)
@@ -36,10 +38,7 @@ def review_badge_count() -> int:
             | Q(retranscription_failed=True)
             | Q(resummarization_failed=True)
             | Q(summary_status=SummaryState.FAILED)
-            | Q(
-                processing_status=ProcessingStatus.TRANSCRIBED,
-                summary_status=SummaryState.MISSING,
-            )
+            | awaiting_summary_condition()
             | Q(audio_status=AudioStatus.MISSING)
         )
         .distinct()

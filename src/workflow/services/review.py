@@ -17,7 +17,8 @@ loops.
 
 from __future__ import annotations
 
-from django.db.models import Prefetch, QuerySet
+from django.db.models import Prefetch, Q, QuerySet
+from django.db.models.expressions import RawSQL
 
 from workflow.models import (
     ProcessingStatus,
@@ -25,6 +26,7 @@ from workflow.models import (
     RoutingDecision,
     SummaryState,
 )
+from workflow.services.segmentation import canonical_hidden_recording_ids
 from workflow.services.transcription import ERROR_DETAIL_CAP, sanitize_error
 
 
@@ -33,6 +35,50 @@ def _reviewable() -> QuerySet:
     excluded (archival is not a Review category and must never surface on
     the Review page or the global badge)."""
     return Recording.objects.exclude(archived_at__isnull=False)
+
+
+# ---------------------------------------------------------------------------
+# The ONE shared canonical-layout SQL predicate (never forked, never a
+# Python id set): the parent Recording pks whose canonical active split
+# layout replaces their recording-backed Library item with Section items.
+# It is the ``segmentation.canonical_hidden_recording_ids()`` subquery used
+# by the normal Library projection and the Step 6.3 search engines, reused
+# here as a lazy read-only RawSQL subquery.
+#
+# It is consumed ONLY by the ``awaiting_summary`` Review condition below: a
+# suppressed split parent must not be reported (or badge-counted) merely
+# because its fixed ordinal-0 whole-recording summary is missing. The
+# missing summary is notification/actionability state, never a processing
+# gate — Section summaries are explicit manual work and are deliberately
+# NOT added to Review. Every other Review category reports the same parent
+# normally.
+# ---------------------------------------------------------------------------
+
+_HIDDEN_RECORDINGS_SQL_RAW = RawSQL(*canonical_hidden_recording_ids())
+
+
+def awaiting_summary_condition() -> Q:
+    """The shared ``awaiting_summary`` Review condition (page/report and
+    global badge use the SAME expression so they cannot drift).
+
+    A transcribed Recording with a missing first summary is awaiting
+    attention UNLESS its active transcript has a fully canonical active
+    split layout: its recording-backed item is then replaced by its
+    Section items, so the missing ordinal-0 whole-recording summary is
+    excluded from this ONE category. Unsplit, crop-only, historical-layout
+    and malformed-layout recordings still project as a recording item and
+    remain reported. Archived Recordings are excluded by the caller.
+    """
+    return Q(
+        processing_status=ProcessingStatus.TRANSCRIBED,
+        summary_status=SummaryState.MISSING,
+    ) & ~Q(pk__in=_HIDDEN_RECORDINGS_SQL_RAW)
+
+
+def awaiting_summary_queryset() -> QuerySet:
+    """The ``awaiting_summary`` category as a queryset, sharing the exact
+    :func:`awaiting_summary_condition` with the global badge."""
+    return _reviewable().filter(awaiting_summary_condition())
 
 
 def _active_decisions_prefetch() -> Prefetch:
@@ -109,9 +155,7 @@ def build_review_report() -> dict:
     ]
     awaiting_summary = [
         {"recording_id": pk, "kind": "awaiting_summary"}
-        for pk in _reviewable().filter(
-            processing_status=ProcessingStatus.TRANSCRIBED, summary_status=SummaryState.MISSING
-        ).values_list("pk", flat=True)
+        for pk in awaiting_summary_queryset().values_list("pk", flat=True)
     ]
     failed_summary = [
         {"recording_id": pk, "kind": "failed_summary", "error_code": code or "unknown"}

@@ -162,6 +162,26 @@ Non-negotiable principles:
   metadata/history/detail disclosure remains. Pre-transcription
   `ProcessingStatus.NEEDS_REVIEW` review behavior is unchanged. No
   migration, no existing-row mutation.
+- A Recording whose active transcript has a fully canonical active split
+  layout (its recording-backed Library item is replaced by its Section
+  items) is NOT reported in the `awaiting_summary` / "Awaiting first
+  summary" Review category, and does not contribute to the global Review
+  badge, SOLELY because its fixed ordinal-0 whole-recording summary is
+  missing. Missing Section summaries stay explicit manual Section work
+  and are deliberately NOT added to Review. This is
+  notification/actionability only: no summary state, automatic
+  `run`/pipeline-selector, retention or ordinal-0-summary behavior
+  changes. Every OTHER Review category
+  (pipeline/routing/retranscription/failed summary/re-summarization/
+  missing audio) still reports and counts the same parent; unsplit,
+  crop-only, historical-layout and malformed-layout recordings still
+  project as a recording item and remain reported; archived behavior is
+  unchanged. Page/report and badge share the ONE
+  `review.awaiting_summary_condition` (built on the SHARED
+  `segmentation.canonical_hidden_recording_ids()` canonical-layout SQL
+  predicate — never forked, never a Python id set), so they cannot
+  drift; `build_review_report`'s bounded constant query budget and
+  `review_badge_count`'s one-COUNT-query contract are preserved.
 - The client-side pending UI is progressive enhancement in
   `src/static/workflow/app.js` (`form[data-action-form]`): the FIRST
   submit is never cancelled (an ordinary native POST navigation),

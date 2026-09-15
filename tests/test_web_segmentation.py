@@ -1332,12 +1332,15 @@ class TestSegmentedHistory:
         with CaptureQueriesContext(connection) as ctx:
             client.get(f"/recordings/{recording.pk}/history/")
         # Bounded: the segmented-revisions query is one annotated SELECT
-        # (topic counts never trigger per-row queries).
+        # (topic counts never trigger per-row queries). The discriminator
+        # is the ``topic_count`` annotation alias; the global nav Review
+        # badge's canonical-layout subquery also mentions
+        # ``workflow_segmentedversion`` and is deliberately not counted.
         segmented_sql = [
             q["sql"]
             for q in ctx.captured_queries
             if "workflow_segmentedversion" in q["sql"]
-            and "COUNT" in q["sql"].upper()
+            and '"topic_count"' in q["sql"]
         ]
         assert len(segmented_sql) == 1
 

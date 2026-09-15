@@ -62,8 +62,8 @@ The `design/ui-prototype/` directory
 remains the approved v6 design source (fictional data); the production
 Recording Detail, Transcript and History pages now implement that
 design. The
-working tree is independently full-suite verified: **3333 collected
-and 3333 passed** (the recorded Step 6.3 handoff state was 3100; the
+working tree is independently full-suite verified: **3342 collected
+and 3342 passed** (the recorded Step 6.3 handoff state was 3100; the
 committed `run --now` CLI round that followed took the clean baseline
 to 3112, the direct-action test rounds — new executing-POST/
 pending-hook tests plus the rewritten two-step-confirmation tests
@@ -75,9 +75,10 @@ binding round added a further 5 tests to 3157; the summarization oMLX
 bringing the tree to 3193, the unverified-review audit-only round
 added a further 8 tests to 3201, the reversible-Recording-archive round
 added a further 42 focused tests to 3243, the reversible-Section-
-archive round added a further 44 tests to 3287, and the web summary
-model-selector/copy round adds a further 46 tests to the current
-**3333**; only the
+archive round added a further 44 tests to 3287, the web summary
+model-selector/copy round added a further 46 tests to 3333, and the
+Review awaiting-summary canonical-split exclusion round adds a further
+9 tests to the current **3342**; only the
 known `audioop` deprecation warning), with
 `manage.py check`, `makemigrations --check` (0015 is the new head) and
 `git diff --check` clean.
@@ -135,6 +136,47 @@ migration, no CLI feature and no dependency change.
   0015 stays the head) and `git diff --check` clean. No commit, no
   real-database migration and no real audio/network operation is
   claimed; all tests are mocked/network-free.
+
+## Review awaiting-summary canonical-split exclusion (delivered in the working tree)
+
+A bounded notification/actionability fix; **no migration, no CLI/web
+feature, no summary/layout/state change**.
+
+- **Behavior**: a Recording whose active transcript has a fully canonical
+  active split layout (its recording-backed Library item is replaced by
+  its Section items) is no longer reported in `awaiting_summary` /
+  "Awaiting first summary" and no longer contributes to the global Review
+  badge SOLELY because its fixed ordinal-0 whole-recording summary is
+  missing. Missing Section summaries stay explicit manual Section work and
+  are deliberately NOT added to Review. No summary state, automatic
+  `brain run` behavior, pipeline selector, retention or ordinal-0-summary
+  requirement changes.
+- **Other categories unchanged**: pipeline/routing/retranscription/
+  failed-summary/re-summarization/missing-audio attention still reports
+  and counts the same split parent; unsplit, crop-only, historical-layout
+  and malformed-layout recordings still project as recording items and
+  remain reported; archived behavior is unchanged.
+- **One shared condition, no fork**: `review.awaiting_summary_condition`
+  (a `Q`, with `review.awaiting_summary_queryset` for the report) is
+  consumed by both `build_review_report` and
+  `context_processors.review_badge_count`; it embeds the SHARED
+  `segmentation.canonical_hidden_recording_ids()` canonical-layout SQL
+  predicate as a lazy read-only `RawSQL` subquery — never a fork, never a
+  Python id set. `build_review_report`'s bounded constant query budget and
+  `review_badge_count`'s one-COUNT-query contract are preserved.
+- **Files**: `src/workflow/services/review.py`,
+  `src/workflow/context_processors.py`,
+  `tests/test_review_canonical_split.py` (new; 9 tests), plus the
+  `tests/test_web_segmentation.py` history N+1 query discriminator, which
+  now targets the `topic_count` annotation alias so the nav badge's
+  canonical-layout subquery is not miscounted, and `AGENTS.md`.
+- **Verification (independently confirmed, CURRENT)**: full suite
+  **3342 collected and 3342 passed** (the previous state was 3333; this
+  round adds **9** focused tests in
+  `tests/test_review_canonical_split.py`), only the known `audioop`
+  warning; `manage.py check`, `makemigrations --check` (no migration;
+  0015 stays the head) and `git diff --check` clean. No commit and no
+  real-database migration is claimed; all tests are mocked/network-free.
 
 ## Reversible Recording + individual-Section archive + section removal discoverability (delivered in the working tree)
 
