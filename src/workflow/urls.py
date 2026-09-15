@@ -20,6 +20,9 @@ urlpatterns = [
     path("ask/", ask.ask_view, name="ask"),
 
     path("recordings/", recordings.recording_list, name="recordings"),
+    # Read-only archived Recordings list (Step "archive"): linked from the
+    # normal Library; SELECTs only, no search/network/write.
+    path("recordings/archived/", recordings.recording_archived, name="recordings-archived"),
     # Dedicated POST-only semantic/hybrid Library search (Step 5C). GET is
     # a 405 with no config/health/network/DB work; the query never enters
     # a URL.
@@ -59,6 +62,18 @@ urlpatterns = [
         "recordings/<uuid:recording_id>/sections/<int:section_id>/summarize/",
         actions.action_section_summarize,
         name="action-section-summarize",
+    ),
+    # Reversible individual-Section archive (POST-only, direct first POST;
+    # never layout or source deletion).
+    path(
+        "recordings/<uuid:recording_id>/sections/<int:section_id>/archive/",
+        actions.action_section_archive,
+        name="action-section-archive",
+    ),
+    path(
+        "recordings/<uuid:recording_id>/sections/<int:section_id>/restore/",
+        actions.action_section_restore,
+        name="action-section-restore",
     ),
 
     path("tags/", tags.tag_list, name="tags"),
@@ -114,4 +129,8 @@ urlpatterns = [
     path("recordings/<uuid:recording_id>/transcribe/", actions.action_transcribe, name="action-transcribe"),
     path("recordings/<uuid:recording_id>/summarize/", actions.action_summarize, name="action-summarize"),
     path("recordings/<uuid:recording_id>/retry/", actions.action_retry, name="action-retry"),
+    # Reversible archive (POST-only, direct first POST; never source
+    # deletion).
+    path("recordings/<uuid:recording_id>/archive/", actions.action_archive, name="action-archive"),
+    path("recordings/<uuid:recording_id>/restore/", actions.action_restore, name="action-restore"),
 ]

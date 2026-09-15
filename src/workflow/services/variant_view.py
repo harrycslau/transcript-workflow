@@ -229,6 +229,7 @@ def build_variant_view(
             transcript.is_active
             and section.segmented_version is not None
             and section.segmented_version.is_active
+            and section.archived_at is None
         )
     else:
         transcript = recording.transcripts.filter(is_active=True).first()
@@ -239,6 +240,10 @@ def build_variant_view(
         ).first()
         # Whole-recording scope: never gated by section actionability.
         section_actionable = None
+    if recording.archived_at is not None:
+        # Archived recordings are read-only everywhere: no generation
+        # action is ever presented (the service boundary refuses too).
+        section_actionable = False
     view.has_transcript = True
     view.default_language = resolve_default_language(transcript)
 

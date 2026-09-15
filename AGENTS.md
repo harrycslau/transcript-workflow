@@ -285,6 +285,117 @@ Non-negotiable principles:
   state to the server-rendered initial values — no sessionStorage
   reopen marker exists any more.
 
+## Reversible archive (never source deletion)
+
+- `Recording.archived_at` (nullable, migration 0014) is the ONLY
+  Recording archive state; `Section.archived_at` (nullable, migration
+  0015) is the ONLY individual TOPIC-Section archive state. Archive is
+  REVERSIBLE and is never source-file, row, layout, index or history
+  deletion: audio, transcripts, summaries, tags, attempts, routing
+  decisions, `SegmentedVersion` revisions, SearchDocuments and
+  EmbeddingDocuments all stay physically stored and internally healthy.
+  Restore clears the field.
+- `workflow/services/archive.py` is the ONE archive/restore service:
+  transactional, idempotent (unchanged = zero DML), re-fetches the exact
+  Recording/Section, sets ONLY `archived_at` (+ `updated_at` for a
+  Recording), never touches files/network/index rows/history, returns
+  safe counts only, and logs nothing. Recording archive refuses while ANY
+  unfinished `ProcessingAttempt` exists (the mutating web path runs
+  `recover_interruptions` first); Recording restore is always safe.
+- Section archive is a visibility/eligibility marker on an individual
+  TOPIC Section, NOT layout deletion: it NEVER merges ranges and NEVER
+  mutates/supersedes a `SegmentedVersion`. Only a canonical topic Section
+  of the active transcript's active valid layout whose parent Recording
+  is NOT archived may be NEWLY archived (fixed, historical, cross-parent
+  and archived-parent targets refuse with stable categories). Restore is
+  deliberately PERMISSIVE: it clears an existing marker even when the
+  Section later became historical (that is the ONLY mutation; the layout
+  is untouched and the Section stays otherwise read-only). The web
+  Restore path covers that case through a DEDICATED opaque
+  ``section_restore_fingerprint`` (Recording id + archived state, Section
+  id + own archived state, transcript/layout ids + active/historical
+  state, ordinal) that does NOT require the layout/transcript to still be
+  active and never weakens ``section_state_fingerprint`` (which stays
+  canonical-active-only for ordinary summary/archive actions).
+- The SHARED canonical-layout validator keeps treating an archived
+  Section as structurally PRESENT (archive is eligibility, not topology),
+  so parent suppression stays based on the FULL canonical layout: an
+  archived Section creates an intentional hidden item, never a
+  resurrected parent Recording. Ineligibility is centralized, never
+  forked: `workflow.query._section_base_queryset` excludes
+  `Section.archived_at` (so the Library item projection/count/identity
+  UNION, the search engines' one-column item-key scope and the stale-key
+  hydration `library_items_by_keys` all exclude it while siblings remain
+  and the parent stays suppressed).
+- Web: `POST /recordings/<pk>/archive/`+`/restore/` and
+  `POST /recordings/<pk>/sections/<id>/archive/`+`/restore/` execute on
+  the FIRST POST (no confirmation interstitial) under the exclusive
+  pipeline lock + `recover_interruptions`. The recording-level opaque
+  `state_fingerprint` binds the archived state; the Section-level opaque
+  `section_state_fingerprint` binds the Section's OWN archived state (in
+  addition to the recording archived state and the canonical
+  layout/section identity) — a pre-archive form can never execute after
+  an archive and vice versa (canonical but stale ⇒ the safe under-lock
+  no-op; lock busy ⇒ friendly 409; missing/duplicate/malformed ⇒ friendly
+  400 before any lock). An archived individual Section detail stays
+  directly readable with a Section-archived banner + Restore and offers
+  NO ordinary summary/tag actions (service-side guards reject forged
+  ones); an archived parent Recording suppresses every Section
+  archive/restore control.
+- Ineligibility is centralized, never forked: `workflow.query.filter_only`
+  excludes archived Recordings (Library item projection/count/identity
+  UNION and the recording-scope search queryset) and the Section branch
+  excludes archived parents and archived Sections, so keyword/semantic/
+  hybrid search (web AND CLI) and the stale-key revalidation
+  (`library_items_by_keys`) can never return or hydrate an archived item.
+  `review.build_review_report` and the global Review badge exclude
+  archived; the pipeline work selectors (`route_pending`,
+  `transcribe_ready`, `summarize_pending`, `run_pipeline`) and explicit
+  `manual_route`/`confirm_routing`/`route_one`/`transcribe_one`/`retry`/
+  `summarize_one`/`summarize_section_one` refuse or skip archived
+  Recordings; the tag serialization boundary and
+  `save_segmented_version` reject archived writes. Read-only
+  detail/history/export routes stay available for restore/audit.
+- Ask: `retrieve_semantic_evidence` gained the bounded
+  `exclude_archived_sections` predicate. It excludes ARCHIVED Section
+  item keys (the SHARED `search_query._item_key_case` mapping plus the
+  SHARED canonical-layout predicate, never forked) BEFORE top-K
+  selection, while the ordinal-0 whole-recording variants stay
+  admissible (a whole-recording document under a split derives a NULL
+  item key and is not matched by the exclusion — the full Library item
+  scope would over-exclude it, so it is deliberately not reused). Ask
+  still passes the canonical archived-excluding Recording scope and
+  keeps the one-sweep/one-embedding/one-traversal contract; post-chat
+  revalidation fails closed when a cited Section's summary OR a Segment
+  inside an archived Section's range appears, so an archived-section
+  citation is impossible.
+- Archive/restore schedule NO search/embedding synchronization, delete
+  NO registry/FTS/vector rows and change NO index mapping/version; the
+  search and embedding indexes stay internally healthy (a rebuild still
+  includes archived documents internally) — ineligibility is a
+  query-scope concern. Rescan/ingest deduplication keeps the SAME
+  Recording/AudioSource (never a second content identity) and never
+  clears `archived_at`.
+- The read-only `/recordings/archived/` page (linked from the normal
+  Library, titled `Archived items`) renders ONE bounded deterministic
+  table over `workflow.query.archived_item_queryset`: archived Recording
+  rows PLUS independently archived canonical ACTIVE topic Sections whose
+  parent Recording is NOT archived (never parent + child duplicates),
+  ordered globally by `archived_at` descending then canonical item key,
+  hard limit+1 sentinel, hydrated by the SAME batched
+  `hydrate_library_items` contract (no N+1). Columns are Archived /
+  Title / Duration / Type-context. No search/`ListFilters`/return-token
+  expansion, no network, no writes.
+- Section "deletion" is discoverability only: an ACTIVE canonical topic
+  Section detail's upper link is `Edit/remove section` (the single link;
+  the duplicate paragraph and its verbose copy are gone) pointing to its
+  location in the existing transcript editor, where removing a
+  surrounding split/crop merges it with its neighbor and saved revisions
+  remain in History. There is NO section-delete service/model/migration
+  and historical/fixed/malformed/archived sections get no removal
+  control. Section archive is the separate, reversible visibility marker
+  described above.
+
 ## Multilingual summary variants (standing invariants)
 
 - Language policy has ONE home: `workflow/services/languages.py`
@@ -526,7 +637,7 @@ Non-negotiable principles:
 
 ## Migrations and DB constraints
 
-- Migrations `0001`–`0013` define the current schema (0007 is the
+- Migrations `0001`–`0015` define the current schema (0007 is the
   multilingual-summary migration: `Summary.output_language`,
   `SummaryVariantState`, transcript language-verification fields;
   intentionally irreversible — repair it in place, never add an 0008
@@ -565,7 +676,14 @@ Non-negotiable principles:
   the approved Step-6.2a temporary-split-title migration: the nullable
   `Section.title_is_temporary` Boolean (default False, existing rows
   migrate as custom) — additive and fully reversible with no data
-  migration). Add NEW
+  migration; 0014 is the approved reversible-Recording-archive migration:
+  the nullable `Recording.archived_at` timestamp (existing rows migrate as
+  active/NULL) — additive and fully reversible with no data migration
+  or `RunPython`; 0015 is the approved reversible-individual-Section-
+  archive migration: the nullable `Section.archived_at` timestamp
+  (existing rows migrate as unarchived/NULL), depends on 0014 and never
+  edits it — additive and fully reversible with no data migration or
+  `RunPython`). Add NEW
   migrations, never
   edit existing/applied ones. Enforce invariants with DB constraints
   (partial uniques, check constraints), not just application logic.
@@ -1392,9 +1510,11 @@ bullet below) and **Step 5D Ask with Citations is delivered too**
     target must be a TOPIC Section of the ACTIVE transcript's ACTIVE
     layout (shared `segmentation.require_active_topic_section`); fixed,
     historical, cross-parent and malformed-layout targets are stable
-    sanitized `SegmentationError` categories, and historical sections
-    are readable but never actionable. Input is ALL and ONLY the
-    Section's canonical segment range `[start, end_exclusive)` —
+    sanitized `SegmentationError` categories; historical sections are
+    readable but offer no ordinary summary/tag action (an archived
+    historical Section still offers the dedicated Restore). Input is ALL
+    and ONLY the Section's canonical segment range
+    `[start, end_exclusive)` —
     deterministic full stored text, never source audio, exact-count
     defense-in-depth — chunked by the existing bounded path. Output
     variants/versioning reuse the EXACT multilingual machinery: one
@@ -1403,7 +1523,14 @@ bullet below) and **Step 5D Ask with Citations is delivered too**
     default/original/en/zh-Hant, exact-scope attempt provenance and
     interruption recovery. The target section/layout is captured at the
     start AND revalidated at persistence (`section_layout_changed`
-    failure — never a write to read-only history). A section summary
+    failure — never a write to read-only history). `persist_summary`
+    itself re-locks the parent Recording FIRST and then the authoritative
+    target Section (the same order as `archive_section`) and rechecks
+    BOTH archive markers before any Summary/tag/variant DML — a parent
+    archive raises the stable archive error, a Section archive the stable
+    `section_archived` segmentation error — so an archive introduced
+    after generation but before persistence writes nothing and schedules
+    no sync. A section summary
     NEVER changes the Recording-level default tuple (`summary_status`,
     `resummarization_failed`, `last_failed_attempt`), processing status
     or the whole-recording summary; since Step 6.3 every successful
@@ -1606,8 +1733,8 @@ bullet below) and **Step 5D Ask with Citations is delivered too**
   layout answers its Section items with the parent Recording SUPPRESSED
   (never parent + section duplicates) while unsplit/crop-only/
   historical/malformed recordings fail closed to their single Recording
-  item. **NO new migration** (0013 stays the head; the version bump is
-  code-only).
+  item. **NO new migration at that delivery** (0013 was then the head;
+  the version bump is code-only; the later archive work adds 0014).
   - **Index v2**: `search_index.INDEX_VERSION` is `"2"`. The canonical
     summary set is now the whole-recording ordinal-0 variants PLUS
     every ACTIVE variant of a topic Section of the fully canonical

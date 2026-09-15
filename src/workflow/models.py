@@ -171,6 +171,14 @@ class Recording(models.Model):
         "workflow.ProcessingAttempt", null=True, blank=True,
         on_delete=models.SET_NULL, related_name="failed_for_recordings",
     )
+    # Reversible archive marker (nullable). Archival is NEVER deletion:
+    # source audio, transcripts, summaries, tags, index rows and history
+    # stay physically stored. A non-null value makes the Recording
+    # ineligible for every user-facing Library/search/Ask/Review result
+    # and for all automatic pipeline work; explicit pipeline mutations
+    # refuse safely. Restore simply clears the field. See
+    # ``workflow.services.archive``.
+    archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -481,6 +489,17 @@ class Section(models.Model):
     end_segment_ordinal_exclusive = models.PositiveIntegerField(null=True, blank=True)
     start_ms = models.BigIntegerField(null=True, blank=True)
     end_ms = models.BigIntegerField(null=True, blank=True)
+    # Reversible per-Section archive marker (nullable). Archive is a
+    # visibility/eligibility marker on an individual TOPIC Section, NOT
+    # layout deletion: it never merges ranges or mutates/supersedes the
+    # SegmentedVersion, and the Section, its summaries/tags/history, the
+    # SearchDocuments/EmbeddingDocuments and the source audio all stay
+    # stored. The canonical layout validator keeps treating an archived
+    # Section as structurally present (archive is eligibility, not
+    # topology); ineligibility is enforced by the Library/search/Ask item
+    # scopes. Restore clears the field. See
+    # ``workflow.services.archive``.
+    archived_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
 
     class Meta:

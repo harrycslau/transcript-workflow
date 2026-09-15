@@ -1040,3 +1040,119 @@ class TestPersistSummaryScopeDerivation:
             section__isnull=False, tag__name_key="academic"
         ).exists()
         assert summary.ordinal == 1
+
+
+class TestPersistSummaryArchiveBoundary:
+    """The final persistence boundary rechecks BOTH the parent Recording
+    and the authoritative target Section archive state (Recording first,
+    then Section — the same lock order as ``archive_section``) before any
+    Summary/tag/variant DML, so an archive introduced after generation but
+    before persistence writes nothing and schedules no sync."""
+
+    def _payload(self, suggested=()):
+        return {
+            "title": "T",
+            "overview": "O",
+            "key_points": [],
+            "action_items": [],
+            "people": [],
+            "organizations": [],
+            "topics": [],
+            "language": "en",
+            "suggested": list(suggested),
+            "rejected": [],
+        }
+
+    def _attempt(self, recording):
+        return ProcessingAttempt.objects.create(
+            recording=recording,
+            stage=AttemptStage.SUMMARIZATION,
+            ordinal=1,
+            model_id="m",
+        )
+
+    def _call(self, recording, transcript, section, attempt, payload):
+        return persist_summary(
+            recording=recording,
+            transcript=transcript,
+            section=section,
+            attempt=attempt,
+            payload=payload,
+            output_language="en",
+            is_default=True,
+            model_id="m",
+            base_url="u",
+            prompt_version="1",
+            fingerprint="f",
+            chunk_count=1,
+            input_characters=1,
+            limits_used={},
+            generation_mode="manual",
+        )
+
+    def test_section_archived_before_persistence_writes_nothing(
+        self, monkeypatch
+    ):
+        from workflow.services import summarize as summarize_module
+        from workflow.services.archive import archive_section
+
+        sync_calls: list = []
+        monkeypatch.setattr(
+            summarize_module,
+            "schedule_recording_sync",
+            lambda ids: sync_calls.append(list(ids)),
+        )
+        recording, transcript, sections = split_recording(
+            ["a", "b", "c"], [2], ["A", "B"]
+        )
+        section = sections[0]
+        attempt = self._attempt(recording)
+        # Archive AFTER generation but BEFORE persistence.
+        archive_section(recording, section)
+
+        with pytest.raises(SegmentationError) as excinfo:
+            self._call(
+                recording,
+                transcript,
+                section,
+                attempt,
+                self._payload([make_tag("Academic")]),
+            )
+        assert excinfo.value.code == "section_archived"
+        assert Summary.objects.count() == 0
+        assert not TagAssignment.objects.filter(section=section).exists()
+        assert sync_calls == []
+
+    def test_parent_archived_before_persistence_writes_nothing(self, monkeypatch):
+        from workflow.models import Recording
+        from workflow.services import summarize as summarize_module
+        from workflow.services.archive import ArchivedRecordingError
+
+        sync_calls: list = []
+        monkeypatch.setattr(
+            summarize_module,
+            "schedule_recording_sync",
+            lambda ids: sync_calls.append(list(ids)),
+        )
+        recording, transcript, sections = split_recording(
+            ["a", "b", "c"], [2], ["A", "B"]
+        )
+        section = sections[0]
+        attempt = self._attempt(recording)
+        # Simulate the direct-service race: archive the parent row without
+        # the service (the in-progress attempt would refuse the service).
+        Recording.objects.filter(pk=recording.pk).update(
+            archived_at=dj_timezone.now()
+        )
+
+        with pytest.raises(ArchivedRecordingError):
+            self._call(
+                recording,
+                transcript,
+                section,
+                attempt,
+                self._payload([make_tag("Academic")]),
+            )
+        assert Summary.objects.count() == 0
+        assert not TagAssignment.objects.filter(section=section).exists()
+        assert sync_calls == []

@@ -74,6 +74,8 @@
     "summarize": { label: "Summarizing…", message: "Summarization is running — this can take a while." },
     "retry": { label: "Retrying…", message: "Retrying the failed stage — this can take a while." },
     "segmentation-save": { label: "Saving…", message: "Saving the new layout revision…" },
+    "archive": { label: "Archiving…", message: "Archiving this recording — the page reloads when it finishes." },
+    "restore": { label: "Restoring…", message: "Restoring this recording — the page reloads when it finishes." },
   };
 
   function initActionForms() {

@@ -25,10 +25,12 @@ def review_badge_count() -> int:
     UNVERIFIED automatic routing decision on a transcribed Recording is
     audit-only (see AGENTS.md) and is deliberately NOT a Review category.
     Overlapping categories are counted once via ``distinct()``; the whole
-    union is one bounded query.
+    union is one bounded query. Archived Recordings are excluded — they
+    are not a Review category.
     """
     return (
-        Recording.objects.filter(
+        Recording.objects.filter(archived_at__isnull=True)
+        .filter(
             Q(processing_status=ProcessingStatus.NEEDS_REVIEW)
             | Q(processing_status=ProcessingStatus.FAILED)
             | Q(retranscription_failed=True)

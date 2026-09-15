@@ -199,6 +199,7 @@
 
 <div class="results-header">
   <span class="results-count">{{ page.paginator.count }} item{{ page.paginator.count|pluralize }}</span>
+  <a class="clear-filters" href="{% url 'recordings-archived' %}">Archived items</a>
 </div>
 
 {% if cards %}

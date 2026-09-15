@@ -7,6 +7,26 @@
   <a href="{% url 'recording-detail' recording.pk %}">{{ card.title }}</a>
 </p>
 
+{% if archived %}
+<div class="message message-warn archived-banner" role="status">
+  <strong>Archived.</strong> This section's recording is archived and read-only.
+  Audio, transcript, summaries, tags and history are retained — restore the
+  recording from its detail page to make it active again.
+</div>
+{% elif section_archived and not archived %}
+<div class="message message-warn archived-banner" role="status">
+  <strong>Section archived.</strong> This section is hidden from the Library,
+  search and Ask. Restore it to make it visible again.
+  <form method="post" action="{% url 'action-section-restore' recording.pk section.pk %}" data-action-form="restore">
+    {% csrf_token %}
+    <input type="hidden" name="fingerprint" value="{{ section_actions.restore_fingerprint }}">
+    {% if library_return_token %}<input type="hidden" name="lib_return" value="{{ library_return_token }}">{% endif %}
+    <button type="submit" class="btn-sm">Restore</button>
+    <span class="action-live" data-action-live aria-live="polite"></span>
+  </form>
+</div>
+{% endif %}
+
 <div class="detail-header">
   <h1 class="detail-title">{{ display_title }}</h1>
   <div class="detail-meta">
@@ -16,13 +36,13 @@
     <span class="meta-item"><span class="status status-{{ recording.processing_status }}">{{ recording.processing_status }}</span></span>
   </div>
   <div class="detail-links">
-    <a class="detail-link" href="{{ transcript_jump_url }}" aria-label="Open this section in the transcript">Section in transcript</a>
+    <a class="detail-link" href="{{ transcript_jump_url }}" aria-label="Open this section in the transcript">{% if section_actionable %}Edit/remove section{% else %}Section in transcript{% endif %}</a>
     <a class="detail-link" href="{{ full_transcript_url }}" aria-label="Open the full transcript">Full transcript</a>
     <a class="detail-link" href="{{ history_url }}" aria-label="Open the processing history">History</a>
   </div>
 </div>
 
-{% if not is_active_section %}
+{% if not is_active_section and not archived %}
   <div class="message message-warn" role="status">
     This is a historical section (read-only). It belongs to a superseded
     trim &amp; split revision{% if not section.transcript.is_active %} and a
@@ -43,7 +63,7 @@
         <li class="tag-chip tag-{{ assignment.origin }}"
             {% if assignment.origin == 'suggested' %}aria-label="{{ assignment.tag.name }} (suggested)"{% endif %}>
           {{ assignment.tag.name }}{% if assignment.origin == 'suggested' %} <span class="tag-chip-suggested">(suggested)</span>{% endif %}
-          {% if is_active_section %}
+          {% if section_actionable %}
             {% if assignment.origin == 'suggested' %}
               <form method="post" action="{% url 'section-tag-confirm' recording.pk section.pk assignment.tag.pk %}" class="inline-form">
                 {% csrf_token %}
@@ -60,11 +80,11 @@
         </li>
       {% endfor %}
     </ul>
-  {% elif is_active_section %}
+  {% elif section_actionable %}
     <p class="muted">No active tags.</p>
   {% endif %}
 
-  {% if is_active_section %}
+  {% if section_actionable %}
     <details class="enhanced-details tag-editor" id="tag-editor">
       <summary>+ Add tag</summary>
       <div class="tag-editor-body">
@@ -119,7 +139,7 @@
         <a class="btn-sm" href="{% url 'section-summary-export' recording.pk section.pk %}?format=text{{ variant.export_query }}">Plain text</a>
       {% endif %}
       {% url 'action-section-summarize' recording.pk section.pk as variant_action_url %}
-      {% if is_active_section %}
+      {% if section_actionable %}
         {% include "workflow/_variant_action.html" with action_url=variant_action_url actions=None section_actions=section_actions %}
       {% endif %}
     </div>
@@ -132,11 +152,11 @@
     <p class="empty-state">
       The summary in the original language has not been generated yet and the
       transcript's source language is not known.
-      {% if is_active_section %}
+      {% if section_actionable %}
         Use the Generate action: the source language will be detected locally
         first, then the summary is written in the original language.
       {% else %}
-        This historical section is read-only, so this language cannot be generated.
+        This section is read-only, so this language cannot be generated.
       {% endif %}
     </p>
   {% elif variant.summary %}
@@ -211,7 +231,7 @@
     <dt>Section ID</dt><dd><code>{{ section.pk }}</code></dd>
     <dt>Ordinal</dt><dd>{{ section.ordinal }}</dd>
     <dt>Range</dt><dd>{{ range_label }} (<code>{{ section.start_segment_ordinal }}&ndash;{{ section.end_segment_ordinal_exclusive }}</code>)</dd>
-    <dt>Layout revision</dt><dd>#{{ section.segmented_version.revision }}{% if not is_active_section %} <span class="muted">(historical)</span>{% endif %}</dd>
+    <dt>Layout revision</dt><dd>#{{ section.segmented_version.revision }}{% if not is_active_section and not archived %} <span class="muted">(historical)</span>{% endif %}</dd>
     <dt>Transcript version</dt><dd><code>{{ section.transcript_id }}</code>{% if not section.transcript.is_active %} <span class="muted">(historical)</span>{% endif %}</dd>
     <dt>Source language</dt><dd>{{ section.transcript.language_observed|default:"unknown" }}</dd>
     <dt>Recorded</dt><dd>{{ card.effective_at_label }} {{ card.effective_at|local_time }}</dd>
@@ -226,4 +246,21 @@
     {% endif %}
   </dl>
 </details>
+
+{% if section_actionable %}
+<section class="danger-zone" aria-label="Section danger zone">
+  <h2 class="overview-block-title">Danger zone</h2>
+  <p class="muted">
+    This hides the section from the Library, search and Ask. You can restore it later.
+  </p>
+  <form method="post" action="{% url 'action-section-archive' recording.pk section.pk %}" data-action-form="archive">
+    {% csrf_token %}
+    <input type="hidden" name="fingerprint" value="{{ section_actions.fingerprint }}">
+    {% if library_return_token %}<input type="hidden" name="lib_return" value="{{ library_return_token }}">{% endif %}
+    <button type="submit" class="btn-sm danger-button" data-pending-label="Archiving…">Archive section</button>
+    <span class="action-live" data-action-live aria-live="polite"
+          data-pending-message="Archiving this section — the page reloads when it finishes."></span>
+  </form>
+</section>
+{% endif %}
 {% endblock %}

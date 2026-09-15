@@ -285,6 +285,47 @@ def action_retry(request, recording_id):
     return _redirect_outcome(request, recording, outcome)
 
 
+@require_POST
+def action_archive(request, recording_id):
+    """Reversible archive (POST-only, executes on the first POST).
+
+    Never deletes source audio, DB rows, index rows or history. The
+    archived-state fingerprint invalidates pre-archive forms; the
+    service re-validates under the pipeline lock. GET is a 405.
+    """
+    recording = _recording_or_404(recording_id)
+    fingerprint = _validated_fingerprint(request)
+    if fingerprint is None:
+        return _fingerprint_rejection(request)
+    outcome = _execute(
+        request,
+        recording,
+        "archive",
+        expected_fingerprint=fingerprint,
+    )
+    return _redirect_outcome(request, recording, outcome)
+
+
+@require_POST
+def action_restore(request, recording_id):
+    """Reversible restore of an archived Recording (POST-only).
+
+    The archived-state fingerprint invalidates pre-restore forms. GET is
+    a 405.
+    """
+    recording = _recording_or_404(recording_id)
+    fingerprint = _validated_fingerprint(request)
+    if fingerprint is None:
+        return _fingerprint_rejection(request)
+    outcome = _execute(
+        request,
+        recording,
+        "restore",
+        expected_fingerprint=fingerprint,
+    )
+    return _redirect_outcome(request, recording, outcome)
+
+
 def _section_or_404(recording: Recording, section_id: int):
     """Parent-scoped topic-Section lookup: the Section must belong to
     ``recording`` (cross-recording/missing is a 404)."""
@@ -457,4 +498,70 @@ def action_section_summarize(request, recording_id, section_id):
     return _redirect_section_outcome(
         request, recording, section, outcome,
         return_language=return_language, lib_return=lib_return,
+    )
+
+
+@require_POST
+def action_section_archive(request, recording_id, section_id):
+    """Reversible archive of one individual TOPIC Section (POST-only).
+
+    Executes on the FIRST POST: strict fingerprint input validation
+    BEFORE any lock (missing/duplicate/malformed → friendly 400), then the
+    service's exclusive pipeline lock + interruption recovery +
+    stale-fingerprint safe no-op + the transactional archive. Never
+    deletes layout rows, source audio, history or index rows. GET is 405.
+    """
+    return _section_archive_request(request, recording_id, section_id, "archive")
+
+
+@require_POST
+def action_section_restore(request, recording_id, section_id):
+    """Restore one archived topic Section (POST-only).
+
+    The section fingerprint binds the Section archive state, so a stale
+    or duplicate submission is a safe no-op. GET is 405.
+    """
+    return _section_archive_request(request, recording_id, section_id, "restore")
+
+
+def _section_archive_request(request, recording_id, section_id, action):
+    config = get_config()
+    recording = _recording_or_404(recording_id)
+    section = _section_or_404(recording, section_id)
+    from workflow.services import library_return
+    from workflow.services.web_actions import (
+        canonical_section_fingerprint,
+        execute_section_archive,
+    )
+
+    fingerprint_values = request.POST.getlist("fingerprint")
+    if len(fingerprint_values) != 1:
+        return rejection_response(
+            request,
+            "The state fingerprint is missing or invalid — reload the page.",
+            "invalid_fingerprint",
+        )
+    fingerprint = canonical_section_fingerprint(fingerprint_values[0])
+    if fingerprint is None:
+        return rejection_response(
+            request,
+            "The state fingerprint is missing or invalid — reload the page.",
+            "invalid_fingerprint",
+        )
+    lib_return = ""
+    raw_lib_return = (request.POST.get("lib_return") or "").strip()
+    if raw_lib_return and library_return.decode_token(raw_lib_return, config.timezone) is not None:
+        lib_return = raw_lib_return
+    try:
+        outcome = execute_section_archive(
+            config,
+            recording,
+            section,
+            action=action,
+            expected_fingerprint=fingerprint,
+        )
+    except PipelineBusy as exc:
+        return conflict_response(request, exc.holder_pid)
+    return _redirect_section_outcome(
+        request, recording, section, outcome, lib_return=lib_return
     )

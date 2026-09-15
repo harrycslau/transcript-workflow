@@ -6,6 +6,22 @@
   <a href="{{ library_return_url }}">&larr; Library</a>
 </p>
 
+{% if archived %}
+<div class="message message-warn archived-banner" role="status">
+  <p>
+    <strong>Archived.</strong> This recording is hidden from the Library,
+    search, Ask and Review. Its audio file, transcript, summaries, tags and
+    history are retained — archived is not deleted.
+  </p>
+  <form method="post" action="{% url 'action-restore' recording.pk %}" data-action-form="restore">
+    {% csrf_token %}
+    <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+    <button type="submit" class="btn-sm">Restore</button>
+    <span class="action-live" data-action-live aria-live="polite"></span>
+  </form>
+</div>
+{% endif %}
+
 <div class="detail-header">
   <h1 class="detail-title">{{ card.title }}</h1>
   <div class="detail-meta">
@@ -16,7 +32,7 @@
   <div class="detail-links">
     <a class="detail-link" href="{% url 'recording-transcript' recording.pk %}" aria-label="Open the full transcript">Transcript</a>
     <a class="detail-link" href="{% url 'recording-history' recording.pk %}" aria-label="Open the processing history">History</a>
-    {% if actions.show_routing %}
+    {% if actions.show_routing and not archived %}
     <details class="enhanced-details routing-editor" id="routing-editor">
       <summary class="detail-link">Routing</summary>
       <div class="routing-panel">
@@ -55,7 +71,7 @@
   <span class="status-panel-main">{{ status.label }} — {{ status.detail }}</span>
 </div>
 
-{% if recording.processing_status == 'failed' or recording.retranscription_failed or recording.processing_status == 'needs_review' or recording.processing_status == 'ready_to_transcribe' %}
+{% if not archived and recording.processing_status == 'failed' or not archived and recording.retranscription_failed or not archived and recording.processing_status == 'needs_review' or not archived and recording.processing_status == 'ready_to_transcribe' %}
 <section class="recommended-action" aria-label="Recommended action">
   <div class="overview-block-head">
     <h2 class="overview-block-title">Recommended action</h2>
@@ -114,6 +130,7 @@
         <li class="tag-chip tag-{{ assignment.origin }}"
             {% if assignment.origin == 'suggested' %}aria-label="{{ assignment.tag.name }} (suggested)"{% endif %}>
           {{ assignment.tag.name }}{% if assignment.origin == 'suggested' %} <span class="tag-chip-suggested">(suggested)</span>{% endif %}
+          {% if not archived %}
           {% if assignment.origin == 'suggested' %}
             <form method="post" action="{% url 'tag-confirm' recording.pk assignment.tag.pk %}" class="inline-form">
               {% csrf_token %}
@@ -124,6 +141,7 @@
             {% csrf_token %}
             <button type="submit" class="link-button danger" aria-label="Remove {{ assignment.tag.name }}">Remove</button>
           </form>
+          {% endif %}
         </li>
       {% endfor %}
     </ul>
@@ -131,6 +149,7 @@
     <p class="muted">No active tags.</p>
   {% endif %}
 
+  {% if not archived %}
   <details class="enhanced-details tag-editor" id="tag-editor">
     <summary>+ Add tag</summary>
     <div class="tag-editor-body">
@@ -170,6 +189,7 @@
       </form>
     </div>
   </details>
+  {% endif %}
 </section>
 
 <section class="summary-section" aria-labelledby="summary-title">
@@ -191,9 +211,14 @@
   {% if variant.unresolved_original %}
     <p class="empty-state">
       The summary in the original language has not been generated yet and the
-      transcript's source language is not known. Use the Generate action:
-      the source language will be detected locally first, then the summary is
-      written in the original language.
+      transcript's source language is not known.
+      {% if archived %}
+        This recording is archived and read-only, so it cannot be generated now.
+      {% else %}
+        Use the Generate action:
+        the source language will be detected locally first, then the summary is
+        written in the original language.
+      {% endif %}
     </p>
   {% elif variant.summary %}
     <p class="variant-note muted">
@@ -282,4 +307,22 @@
     <dt>Created</dt><dd>{{ recording.created_at|local_time }}</dd>
   </dl>
 </details>
+
+{% if not archived %}
+<section class="danger-zone" aria-labelledby="danger-zone-title">
+  <h2 class="overview-block-title" id="danger-zone-title">Danger zone</h2>
+  <p class="muted">
+    This hides the recording from the Library, search, Ask and Review.
+    You can restore it later from the
+    <a href="{% url 'recordings-archived' %}">Archived items</a> page.
+  </p>
+  <form method="post" action="{% url 'action-archive' recording.pk %}" data-action-form="archive">
+    {% csrf_token %}
+    <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
+    <button type="submit" class="btn-sm danger-button" data-pending-label="Archiving…">Archive from Brain</button>
+    <span class="action-live" data-action-live aria-live="polite"
+          data-pending-message="Archiving this recording — the page reloads when it finishes."></span>
+  </form>
+</section>
+{% endif %}
 {% endblock %}

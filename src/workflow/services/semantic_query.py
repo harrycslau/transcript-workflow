@@ -133,6 +133,7 @@ from workflow.models import (
 )
 from workflow.services import search_index
 from workflow.services.embedding_client import EmbeddingError
+from workflow.services.segmentation import canonical_active_section_ids
 from workflow.services.embedding_index import (
     EMBEDDING_VERSION,
     _classify_active_page,
@@ -1124,6 +1125,27 @@ def _registry_table_ref() -> str:
     return f'"{SearchDocument._meta.db_table}"'
 
 
+def _archived_section_item_keys_sql() -> tuple[str, list]:
+    """``SELECT`` of the Library item keys (``s:<section id>``) of
+    ARCHIVED canonical ACTIVE topic Sections.
+
+    Reuses the SHARED canonical-layout predicate
+    (``canonical_active_section_ids`` — never forked) so it stays in
+    lock-step with the Library/search item mapping. Ask uses it to
+    exclude archived-section documents BEFORE top-K selection while
+    RETAINING the ordinal-0 whole-recording variants: a whole-recording
+    summary/segment under a split layout derives a NULL item key and is
+    therefore never matched by this exclusion (the full Library item
+    scope would over-exclude it, so it is deliberately not reused here).
+    """
+    valid_sql, valid_params = canonical_active_section_ids()
+    return (
+        "SELECT 's:' || s.id FROM workflow_section s "
+        "WHERE s.archived_at IS NOT NULL AND s.id IN (" + valid_sql + ")",
+        valid_params,
+    )
+
+
 def _item_scope_exists(item_scope_sql, item_scope_params, *, using: str) -> bool:
     """Item-mode counterpart of :func:`_scope_has_documents`: bounded
     existence check over the current SearchDocuments whose SHARED
@@ -1161,6 +1183,7 @@ def _validated_query_vector(embedded, normalized: str, dimensions: int) -> tuple
 def _iter_current_document_pages(
     *, using: str, page_size: int, scope_sql, scope_params,
     item_scope_sql=None, item_scope_params=None,
+    exclude_archived_sections: bool = False,
 ):
     """ALL current SearchDocuments in deterministic
     ``(recording_id, document_key)`` order, keyset-paged with the exact
@@ -1232,10 +1255,27 @@ def _iter_current_document_pages(
                 select_params=list(scope_select_params),
             )
         elif scope_sql is not None:
-            queryset = queryset.extra(
-                select={"in_scope": f"recording_id IN ({scope_sql})"},
-                select_params=list(scope_params or []),
-            )
+            if exclude_archived_sections:
+                case_sql, case_params = _item_key_case(table=_registry_table_ref())
+                archived_sql, archived_params = _archived_section_item_keys_sql()
+                expression = (
+                    f"(recording_id IN ({scope_sql})) AND "
+                    f"(({case_sql}) IS NULL OR ({case_sql}) NOT IN ({archived_sql}))"
+                )
+                queryset = queryset.extra(
+                    select={"in_scope": expression},
+                    select_params=[
+                        *scope_params,
+                        *case_params,
+                        *case_params,
+                        *archived_params,
+                    ],
+                )
+            else:
+                queryset = queryset.extra(
+                    select={"in_scope": f"recording_id IN ({scope_sql})"},
+                    select_params=list(scope_params or []),
+                )
         else:
             queryset = queryset.extra(select={"in_scope": "1"})
         if last_recording is not None:
@@ -1262,6 +1302,7 @@ def _iter_integrity_scored(
     state: dict,
     item_scope_sql=None,
     item_scope_params=None,
+    exclude_archived_sections: bool = False,
 ):
     """ONE complete active-generation integrity traversal.
 
@@ -1305,6 +1346,7 @@ def _iter_integrity_scored(
         scope_params=scope_params,
         item_scope_sql=item_scope_sql,
         item_scope_params=item_scope_params,
+        exclude_archived_sections=exclude_archived_sections,
     ):
         keys = [row.document_key for row in page]
         active_rows = list(
@@ -2029,6 +2071,7 @@ def retrieve_semantic_evidence(
     scope=None,
     config=None,
     embedder=None,
+    exclude_archived_sections: bool = False,
 ) -> SemanticEvidence:
     """One complete read-only DOCUMENT-LEVEL evidence retrieval (Step 5D).
 
@@ -2090,6 +2133,7 @@ def retrieve_semantic_evidence(
             scope_params=scope_params,
             query_vector=query_vector,
             state=state,
+            exclude_archived_sections=exclude_archived_sections,
         )
         if query_vector is not None:
             winners = select_semantic_evidence(

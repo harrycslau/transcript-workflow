@@ -39,7 +39,15 @@
   </p>
 {% endif %}
 
-{% if not editable %}
+{% if archived %}
+  <p class="archived-banner">
+    This recording is archived and read-only. The transcript, source audio and
+    history are retained; restore the recording from its detail page to edit
+    trim &amp; splits again.
+  </p>
+{% endif %}
+
+{% if not editable and not archived %}
   <p class="segmentation-readonly-note muted">
     {% if explicit_layout %}This is a saved trim &amp; split revision (<code>#{{ layout.revision }}</code>) — read only.{% else %}Trim &amp; split editing is only available on the active transcript.{% endif %}
   </p>

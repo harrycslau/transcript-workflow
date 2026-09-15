@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% load workflow_extras %}
+{% block title %}Archived items — Brain{% endblock %}
+{% block content %}
+<p class="breadcrumb muted">
+  <a href="{% url 'recordings' %}">&larr; Library</a>
+</p>
+
+<div class="detail-header">
+  <h1 class="detail-title">Archived items</h1>
+  <p class="page-subtitle muted">
+    Archived items are hidden from the Library, search, Ask and Review.
+    Their audio files, transcripts, summaries, tags, layout history and
+    index rows are retained — archived is not deleted. Open an item to
+    restore it.
+  </p>
+</div>
+
+{% if cards %}
+<div class="recording-table-wrap">
+  <table class="recording-table">
+    <caption class="visually-hidden">Archived items</caption>
+    <thead>
+      <tr>
+        <th scope="col">Archived</th>
+        <th scope="col">Title</th>
+        <th scope="col">Duration</th>
+        <th scope="col">Type / context</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for card in cards %}
+        <tr>
+          <td data-label="Archived">{{ card.archived_at|local_time }}</td>
+          <td data-label="Title">
+            {% if card.is_section %}
+              <a class="col-title" href="{% url 'section-detail' card.recording.pk card.section_id %}">{{ card.title }}</a>
+            {% else %}
+              <a class="col-title" href="{% url 'recording-detail' card.recording.pk %}">{{ card.title }}</a>
+            {% endif %}
+          </td>
+          <td data-label="Duration">{{ card.duration_seconds|duration }}</td>
+          <td data-label="Type / context">
+            {% if card.is_section %}
+              Topic {{ card.range_label }} · {{ card.parent_title }}
+            {% else %}
+              Recording
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if truncated %}
+<p class="muted">
+  Showing the {{ archived_limit }} most recently archived items. Older
+  archived items remain stored but are not listed here.
+</p>
+{% endif %}
+{% else %}
+<p class="empty-state">No archived items.</p>
+{% endif %}
+{% endblock %}

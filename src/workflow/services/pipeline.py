@@ -187,7 +187,8 @@ def recover_interruptions(config: AppConfig) -> dict:
         # Orphan in-flight recording states (process died between the
         # status change and attempt creation, or after attempt recovery).
         for recording in Recording.objects.filter(
-            processing_status__in=[ProcessingStatus.ROUTING, ProcessingStatus.TRANSCRIBING]
+            archived_at__isnull=True,
+            processing_status__in=[ProcessingStatus.ROUTING, ProcessingStatus.TRANSCRIBING],
         ).select_for_update():
             touched_recordings.add(recording.pk)
             if recording.processing_status == ProcessingStatus.ROUTING:
@@ -414,9 +415,14 @@ def _skip_outcome(recording: Recording, status: str) -> dict:
 
 
 def route_pending(config: AppConfig, recording_ids: list[str] | None = None) -> list[dict]:
-    """Automatically route all recordings in the ``routing`` state."""
+    """Automatically route all recordings in the ``routing`` state.
+
+    Archived recordings are never eligible for automatic processing.
+    """
     results: list[dict] = []
-    recordings = Recording.objects.filter(processing_status=ProcessingStatus.ROUTING)
+    recordings = Recording.objects.filter(
+        archived_at__isnull=True, processing_status=ProcessingStatus.ROUTING
+    )
     if recording_ids:
         recordings = recordings.filter(id__in=recording_ids)
     for recording in recordings:
@@ -425,6 +431,13 @@ def route_pending(config: AppConfig, recording_ids: list[str] | None = None) -> 
 
 
 def route_one(config: AppConfig, recording: Recording) -> dict:
+    if recording.archived_at is not None:
+        return {
+            "recording_id": recording.pk,
+            "result": "skipped",
+            "reason": "archived",
+            "status": recording.processing_status,
+        }
     # Routing-disabled is enforced BEFORE any source hashing, sample
     # extraction, MacWhisper or network work: a clean needs_review outcome.
     if not config.macwhisper.routing.enabled:
@@ -514,7 +527,10 @@ def manual_route(recording: Recording, profile_name: str, confirmed_by: str = "c
     """
     from brainlib.config import load_config
 
+    from workflow.services.archive import ensure_not_archived
+
     config = load_config()
+    ensure_not_archived(recording)
     profile = config.macwhisper.profile(profile_name)
     if profile is None:
         raise ConfigError(
@@ -523,6 +539,11 @@ def manual_route(recording: Recording, profile_name: str, confirmed_by: str = "c
         )
     with transaction.atomic():
         recording = Recording.objects.select_for_update().get(pk=recording.pk)
+        # Authoritative archived re-check on the LOCKED row: the cheap
+        # precheck above can be raced by an archive committed between the
+        # caller's load and this transaction, so a stale instance must
+        # never reach eligibility, DML or sync scheduling.
+        ensure_not_archived(recording)
         routing_failed = (
             recording.processing_status == ProcessingStatus.FAILED
             and recording.failure_stage == FailureStage.ROUTING
@@ -597,8 +618,16 @@ def manual_route(recording: Recording, profile_name: str, confirmed_by: str = "c
 
 def confirm_routing(recording: Recording, confirmed_by: str = "cli") -> dict:
     """Verify the active decision in place, without retranscription."""
+    from workflow.services.archive import ensure_not_archived
+
+    ensure_not_archived(recording)
     with transaction.atomic():
         recording = Recording.objects.select_for_update().get(pk=recording.pk)
+        # Authoritative archived re-check on the LOCKED row: the cheap
+        # precheck above can be raced by an archive committed between the
+        # caller's load and this transaction, so a stale instance must
+        # never reach the decision write or sync scheduling.
+        ensure_not_archived(recording)
         decision = RoutingDecision.objects.filter(recording=recording, is_active=True).first()
         if decision is None:
             raise ConfigError("no active routing decision to confirm")
@@ -613,9 +642,15 @@ def confirm_routing(recording: Recording, confirmed_by: str = "cli") -> dict:
 
 
 def transcribe_ready(config: AppConfig, recording_ids: list[str] | None = None) -> list[dict]:
-    """Transcribe all recordings in ``ready_to_transcribe``."""
+    """Transcribe all recordings in ``ready_to_transcribe``.
+
+    Archived recordings are never eligible for automatic processing.
+    """
     results: list[dict] = []
-    recordings = Recording.objects.filter(processing_status=ProcessingStatus.READY_TO_TRANSCRIBE)
+    recordings = Recording.objects.filter(
+        archived_at__isnull=True,
+        processing_status=ProcessingStatus.READY_TO_TRANSCRIBE,
+    )
     if recording_ids:
         recordings = recordings.filter(id__in=recording_ids)
     for recording in recordings:
@@ -626,6 +661,13 @@ def transcribe_ready(config: AppConfig, recording_ids: list[str] | None = None) 
 def transcribe_one(config: AppConfig, recording: Recording) -> dict:
     with transaction.atomic():
         recording = Recording.objects.select_for_update().get(pk=recording.pk)
+        if recording.archived_at is not None:
+            return {
+                "recording_id": recording.pk,
+                "result": "skipped",
+                "reason": "archived",
+                "status": recording.processing_status,
+            }
         if recording.processing_status not in (
             ProcessingStatus.READY_TO_TRANSCRIBE,
             ProcessingStatus.TRANSCRIBED,
@@ -696,6 +738,13 @@ def retry(config: AppConfig, recording: Recording, transport=None) -> dict:
     """
     with transaction.atomic():
         recording = Recording.objects.select_for_update().get(pk=recording.pk)
+        if recording.archived_at is not None:
+            return {
+                "recording_id": recording.pk,
+                "result": "skipped",
+                "reason": "archived",
+                "status": recording.processing_status,
+            }
         is_failed_retranscription = (
             recording.processing_status == ProcessingStatus.TRANSCRIBED
             and recording.retranscription_failed
@@ -774,7 +823,9 @@ def run_pipeline(config: AppConfig, *, respect_stability_window: bool = True) ->
     recovery = recover_interruptions(config)
     ingest_report = run_ingest(config, respect_stability_window=respect_stability_window)
     # Newly hashed recordings enter the routing stage.
-    for recording in Recording.objects.filter(processing_status=ProcessingStatus.DISCOVERED):
+    for recording in Recording.objects.filter(
+        archived_at__isnull=True, processing_status=ProcessingStatus.DISCOVERED
+    ):
         with transaction.atomic():
             recording = Recording.objects.select_for_update().get(pk=recording.pk)
             transition(recording, ProcessingStatus.ROUTING)

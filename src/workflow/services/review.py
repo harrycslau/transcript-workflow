@@ -17,7 +17,7 @@ loops.
 
 from __future__ import annotations
 
-from django.db.models import Prefetch
+from django.db.models import Prefetch, QuerySet
 
 from workflow.models import (
     ProcessingStatus,
@@ -26,6 +26,13 @@ from workflow.models import (
     SummaryState,
 )
 from workflow.services.transcription import ERROR_DETAIL_CAP, sanitize_error
+
+
+def _reviewable() -> QuerySet:
+    """Recordings eligible for the Review report: archived rows are
+    excluded (archival is not a Review category and must never surface on
+    the Review page or the global badge)."""
+    return Recording.objects.exclude(archived_at__isnull=False)
 
 
 def _active_decisions_prefetch() -> Prefetch:
@@ -47,7 +54,7 @@ def _first_active(recording: Recording) -> RoutingDecision | None:
 def build_review_report() -> dict:
     """Group recordings that need attention into stable categories."""
     needs_review = []
-    needs_review_qs = Recording.objects.filter(
+    needs_review_qs = _reviewable().filter(
         processing_status=ProcessingStatus.NEEDS_REVIEW
     ).prefetch_related(_active_decisions_prefetch())
     for recording in needs_review_qs:
@@ -69,7 +76,7 @@ def build_review_report() -> dict:
     unverified: list[dict] = []
     retranscription_failed = []
     failed_retranscription_qs = (
-        Recording.objects.filter(
+        _reviewable().filter(
             processing_status=ProcessingStatus.TRANSCRIBED,
             retranscription_failed=True,
         )
@@ -96,31 +103,31 @@ def build_review_report() -> dict:
 
     failed = [
         {"recording_id": pk, "kind": f"failed_{stage}"}
-        for pk, stage in Recording.objects.filter(processing_status=ProcessingStatus.FAILED).values_list(
+        for pk, stage in _reviewable().filter(processing_status=ProcessingStatus.FAILED).values_list(
             "pk", "failure_stage"
         )
     ]
     awaiting_summary = [
         {"recording_id": pk, "kind": "awaiting_summary"}
-        for pk in Recording.objects.filter(
+        for pk in _reviewable().filter(
             processing_status=ProcessingStatus.TRANSCRIBED, summary_status=SummaryState.MISSING
         ).values_list("pk", flat=True)
     ]
     failed_summary = [
         {"recording_id": pk, "kind": "failed_summary", "error_code": code or "unknown"}
-        for pk, code in Recording.objects.filter(summary_status=SummaryState.FAILED).values_list(
+        for pk, code in _reviewable().filter(summary_status=SummaryState.FAILED).values_list(
             "pk", "last_failed_attempt__error_code"
         )
     ]
     failed_resummarization = [
         {"recording_id": pk, "kind": "failed_resummarization", "attempt_id": attempt_id}
-        for pk, attempt_id in Recording.objects.filter(resummarization_failed=True).values_list(
+        for pk, attempt_id in _reviewable().filter(resummarization_failed=True).values_list(
             "pk", "last_failed_attempt_id"
         )
     ]
     missing_audio = [
         {"recording_id": pk, "kind": "missing_audio"}
-        for pk in Recording.objects.filter(audio_status="missing").values_list("pk", flat=True)
+        for pk in _reviewable().filter(audio_status="missing").values_list("pk", flat=True)
     ]
     return {
         "needs_review": needs_review,

@@ -146,6 +146,8 @@ class TestMigrationInspection:
             "workflow.0011_segmentedversion_remove_section_uniq_section_ordinal_and_more",
             "workflow.0012_remove_tagassignment_uniq_tag_assignment_and_more",
             "workflow.0013_section_title_is_temporary",
+            "workflow.0014_recording_archived_at",
+            "workflow.0015_section_archived_at",
         ]
 
     def test_unavailable_migration_table_category(self, monkeypatch):

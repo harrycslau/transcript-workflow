@@ -220,6 +220,10 @@ def state_fingerprint(recording: Recording) -> str:
                 "resummarization_failed": recording.resummarization_failed,
                 "summary_ordinal": summary.ordinal if summary is not None else None,
                 "last_attempt_id": last_attempt_id,
+                # Archive state: a rendered form from the active state can
+                # never execute after an archive, and a rendered restore
+                # form can never execute after a restore.
+                "archived": recording.archived_at is not None,
                 "variant_languages": variant_languages,
                 "language_state": language_state,
                 "routing_state": routing_state,
@@ -345,6 +349,15 @@ def execute_web_action(
                     "Reload the page and try again if still needed."
                 ),
             )
+        if action not in ("archive", "restore") and recording.archived_at is not None:
+            # Defense-in-depth: an archived Recording refuses every other
+            # mutating action. The archived-state fingerprint already
+            # invalidates pre-archive forms; this makes a forged/
+            # forged-state submission fail safely too.
+            raise ActionRejected(
+                "recording_archived",
+                "This recording is archived. Restore it before running pipeline actions.",
+            )
         if action == "route":
             return _action_route(config, recording, profile_name)
         if action == "confirm-routing":
@@ -355,7 +368,55 @@ def execute_web_action(
             return _action_summarize(config, recording, requested_mode, language=language)
         if action == "retry":
             return _action_retry(config, recording)
+        if action == "archive":
+            return _action_archive(recording)
+        if action == "restore":
+            return _action_restore(recording)
     raise ActionRejected("unknown_action", f"Unknown action '{action}'.")
+
+
+def _action_archive(recording: Recording) -> ActionOutcome:
+    from workflow.services.archive import archive_recording
+
+    result = archive_recording(recording)
+    if result.get("result") == "refused":
+        raise ActionRejected(
+            "unfinished_attempt",
+            "This recording still has a running pipeline attempt, so it was not "
+            "archived. Wait for it to finish (or recover it) and try again.",
+        )
+    if result.get("result") == "unchanged":
+        return ActionOutcome(
+            ok=True,
+            result="already_archived",
+            message="This recording was already archived.",
+        )
+    return ActionOutcome(
+        ok=True,
+        result="archived",
+        message=(
+            "Recording archived. Its audio, transcript, summaries, tags and history "
+            "are retained; it no longer appears in the Library, search, Ask or Review. "
+            "Restore it any time from the Archived page."
+        ),
+    )
+
+
+def _action_restore(recording: Recording) -> ActionOutcome:
+    from workflow.services.archive import restore_recording
+
+    result = restore_recording(recording)
+    if result.get("result") == "unchanged":
+        return ActionOutcome(
+            ok=True,
+            result="already_active",
+            message="This recording is not archived.",
+        )
+    return ActionOutcome(
+        ok=True,
+        result="restored",
+        message="Recording restored. It is eligible for the Library and search again.",
+    )
 
 
 def _action_route(config: AppConfig, recording: Recording, profile_name: str | None) -> ActionOutcome:
@@ -680,6 +741,11 @@ def section_state_fingerprint(recording: Recording, section) -> str:
         raise SegmentationError("section_state_too_large")
     state = {
         "recording": recording.pk,
+        "archived": recording.archived_at is not None,
+        # The Section's OWN archive marker: a rendered Archive form can
+        # never execute after an archive, and a rendered Restore form can
+        # never execute after a restore (stale/duplicate => safe no-op).
+        "section_archived": fresh_section.archived_at is not None,
         "active_transcript": active_transcript_pk,
         "layout_id": canonical["id"],
         "layout_revision": canonical["revision"],
@@ -699,6 +765,59 @@ def section_state_fingerprint(recording: Recording, section) -> str:
         "latest_attempt": latest_attempt,
         "variant_states": variant_states,
         "current_summaries": current_summaries,
+    }
+    return hashlib.sha256(
+        json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def section_restore_fingerprint(recording: Recording, section) -> str:
+    """OPAQUE read-only fingerprint of a SECTION restore form.
+
+    Unlike :func:`section_state_fingerprint` this deliberately does NOT
+    require the Section's layout/transcript to still be ACTIVE: an
+    archived Section that later became historical stays restorable
+    (reversible archive). It binds only the stable ownership/state
+    identities needed to make a stale or duplicate submission a safe
+    no-op: the parent Recording id and its archived state, the Section id
+    and its OWN archived state, the transcript id/active state, the
+    SegmentedVersion id/active state and the Section ordinal.
+
+    Strictly SELECT-only (no writes, network, subprocess or locks) and
+    bounded. Returns a canonical 64-lowercase-hex SHA-256; ids and raw
+    JSON never appear in it. A missing/cross-parent/fixed (non-topic)
+    target raises the stable sanitized ``SegmentationError`` categories.
+    """
+    from workflow.services.segmentation import SegmentationError
+
+    if section is None or not isinstance(section, Section):
+        raise SegmentationError("section_not_found")
+    fresh = (
+        Section.objects.select_related("transcript", "segmented_version")
+        .filter(pk=section.pk)
+        .first()
+    )
+    if fresh is None:
+        raise SegmentationError("section_not_found")
+    if fresh.segmented_version_id is None:
+        raise SegmentationError("section_not_topic")
+    if fresh.transcript.recording_id != recording.pk:
+        raise SegmentationError("section_not_in_recording")
+    recording_archived_at = (
+        Recording.objects.filter(pk=recording.pk)
+        .values_list("archived_at", flat=True)
+        .first()
+    )
+    state = {
+        "recording": fresh.transcript.recording_id,
+        "recording_archived": recording_archived_at is not None,
+        "section": fresh.pk,
+        "section_archived": fresh.archived_at is not None,
+        "transcript": fresh.transcript_id,
+        "transcript_active": bool(fresh.transcript.is_active),
+        "layout": fresh.segmented_version_id,
+        "layout_active": bool(fresh.segmented_version.is_active),
+        "ordinal": fresh.ordinal,
     }
     return hashlib.sha256(
         json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -806,7 +925,14 @@ def execute_section_summarize(
     with pipeline_lock(config):
         recover_interruptions(config)
         recording = Recording.objects.get(pk=recording.pk)
+        if recording.archived_at is not None:
+            return _section_stale_outcome()
         section = Section.objects.get(pk=section.pk)
+        if section.archived_at is not None:
+            # An archived individual Section is read-only: no ordinary
+            # summary action may run against it (the archived detail
+            # renders only Restore; this rejects forged submissions).
+            return _section_stale_outcome()
         try:
             require_active_topic_section(section)
         except SegmentationError:
@@ -867,6 +993,121 @@ def execute_section_summarize(
         )
 
 
+_SECTION_ARCHIVE_MESSAGES = {
+    "section_not_found": "The section no longer exists.",
+    "section_not_in_recording": "The section does not belong to this recording.",
+    "section_not_topic": "Only topic sections can be archived.",
+    "transcript_not_active": "Only the active transcript's sections can be archived.",
+    "section_not_active": "The section belongs to a historical layout revision and is read-only.",
+    "section_not_in_layout": "The section is not part of the active layout.",
+    "layout_invalid": "The stored trim & split revision is invalid.",
+    "parent_archived": "This recording is archived — restore it before archiving its sections.",
+}
+
+
+def execute_section_archive(
+    config: AppConfig,
+    recording: Recording,
+    section,
+    *,
+    action: str,
+    expected_fingerprint: str | None = None,
+) -> ActionOutcome:
+    """Run one reversible Section archive/restore under the pipeline lock.
+
+    Mirrors the section-summary contract: service-boundary validation
+    BEFORE any lock (missing/malformed fingerprint or cross-parent
+    Section → safe stale no-op), then the exclusive pipeline lock,
+    interruption recovery, live Section re-validation via the SHARED
+    ``section_state_fingerprint`` (stale/duplicate => safe no-op with zero
+    DML), then the transactional ``archive_section``/``restore_section``
+    service. An archived parent Recording suppresses the operation (the
+    web hides the controls; this is defense-in-depth). No files, network,
+    index rows, layout revisions or sync are touched.
+    """
+    from workflow.services import archive as archive_service
+    from workflow.services.pipeline import recover_interruptions
+    from workflow.services.segmentation import SegmentationError
+
+    if action not in ("archive", "restore"):
+        return _section_stale_outcome()
+    expected_fingerprint = (
+        canonical_section_fingerprint(expected_fingerprint)
+        if expected_fingerprint is not None
+        else None
+    )
+    if expected_fingerprint is None:
+        return _section_stale_outcome()
+    fresh_section = (
+        Section.objects.select_related("transcript").filter(pk=section.pk).first()
+    )
+    if (
+        fresh_section is None
+        or fresh_section.transcript.recording_id != recording.pk
+    ):
+        return _section_stale_outcome()
+
+    with pipeline_lock(config):
+        recover_interruptions(config)
+        recording = Recording.objects.get(pk=recording.pk)
+        if recording.archived_at is not None:
+            return _section_stale_outcome()
+        section = Section.objects.get(pk=section.pk)
+        if action == "restore":
+            # Reversible restore uses the DEDICATED archive-state
+            # fingerprint so a Section that became historical remains
+            # restorable; stale/duplicate submissions (layout, transcript
+            # or archive-state change) are safe no-ops.
+            try:
+                current = section_restore_fingerprint(recording, section)
+            except SegmentationError:
+                return _section_stale_outcome()
+            if current != expected_fingerprint:
+                return _section_stale_outcome()
+            result = archive_service.restore_section(recording, section)
+        else:
+            # New archive stays canonical-ACTIVE-topic-only: the ordinary
+            # summary/archive fingerprint already fails closed for a
+            # historical target.
+            try:
+                current = section_state_fingerprint(recording, section)
+            except SegmentationError:
+                return _section_stale_outcome()
+            if current != expected_fingerprint:
+                return _section_stale_outcome()
+            result = archive_service.archive_section(recording, section)
+
+    outcome = result.get("result")
+    if outcome == "archived":
+        return ActionOutcome(
+            ok=True,
+            result="archived",
+            message=(
+                "Section archived. It no longer appears in the Library, search or "
+                "Ask; its summary, tags, transcript and history are retained."
+            ),
+        )
+    if outcome == "restored":
+        return ActionOutcome(
+            ok=True,
+            result="restored",
+            message="Section restored. It is eligible for the Library and search again.",
+        )
+    if outcome == "unchanged":
+        if action == "archive":
+            return ActionOutcome(
+                ok=True, result="already_archived", message="This section was already archived."
+            )
+        return ActionOutcome(
+            ok=True, result="already_active", message="This section is not archived."
+        )
+    reason = result.get("reason") or "unknown"
+    message = _SECTION_ARCHIVE_MESSAGES.get(
+        reason, "The section archive request could not be completed."
+    )
+    return ActionOutcome(ok=False, result="refused", message=message)
+
+
 def attempt_summary_for_display(recording: Recording, limit: int = 10) -> list[dict]:
     """Sanitized attempt rows for the detail/history pages.
 
@@ -918,6 +1159,7 @@ _SEGMENTATION_MESSAGES = {
     ),
     "too_many_topics": "Too many topic sections.",
     "recording_not_found": "The recording no longer exists.",
+    "recording_archived": "This recording is archived — restore it before editing trim & splits.",
     "transcript_not_found": "The transcript no longer exists.",
     "transcript_not_active": "Only the active transcript can be trimmed and split.",
     "transcript_empty": "The transcript has no segments.",

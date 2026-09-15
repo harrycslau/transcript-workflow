@@ -26,9 +26,9 @@ TARGET_0008 = ("workflow", "0008_search_index")
 # models (Tag definition_origin, Section segmented_version + Step 6.2a
 # title_is_temporary — read by the SHARED canonical-layout predicate of
 # the Step 6.3 section-summary mapping —, section-scoped TagAssignments,
-# etc.), so any runtime call on the isolated database must run against
-# the full current schema.
-TARGET_LEAF = ("workflow", "0013_section_title_is_temporary")
+# Recording.archived_at, Section.archived_at, etc.), so any runtime call
+# on the isolated database must run against the full current schema.
+TARGET_LEAF = ("workflow", "0015_section_archived_at")
 
 ALIAS = "mig0008"
 

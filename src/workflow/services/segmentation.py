@@ -107,6 +107,7 @@ _MESSAGES = {
     "section_not_active": "section belongs to a historical layout revision",
     "section_not_in_layout": "section does not belong to the active layout",
     "section_not_in_recording": "section does not belong to the recording",
+    "section_archived": "section is archived and read-only",
     "section_state_too_large": "section summary state is too large to fingerprint",
 }
 
@@ -739,6 +740,10 @@ def _save_locked(
         )
         if recording is None:
             raise SegmentationError("recording_not_found")
+        if recording.archived_at is not None:
+            # Archival is not layout deletion: the stored revision stays
+            # readable, but no new layout revision may be written.
+            raise SegmentationError("recording_archived")
 
         transcript = (
             Transcript.objects.using(using)

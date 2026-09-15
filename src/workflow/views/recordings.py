@@ -28,8 +28,11 @@ from workflow.models import (
 from workflow.query import (
     ListFilters,
     RecordingCard,
+    archived_item_queryset,
+    hydrate_library_items,
     list_filters,
     recording_detail_queryset,
+    recording_list_queryset,
     section_duration_seconds,
 )
 from workflow.views.helpers import get_config
@@ -289,6 +292,39 @@ def recording_list(request):
                 secure=request.is_secure(),
             )
     return response
+
+
+# Bounded read-only combined archived-items listing (never a
+# search/network/write): a hard limit+1 sentinel row with a visible
+# truncation notice, deterministic newest-archived-first order, and the
+# existing batched hydration contract so there is no N+1.
+ARCHIVED_LIMIT = 200
+
+
+def recording_archived(request):
+    """Read-only combined Archived-items list, linked from the Library.
+
+    One bounded deterministic table over
+    :func:`workflow.query.archived_item_queryset` — archived Recordings
+    PLUS independently archived canonical active topic Sections whose
+    parent Recording is not archived (never parent + child duplicates),
+    ordered globally by ``archived_at`` descending then canonical item
+    key, hard limit+1 sentinel. SELECTs only: no search, no health gate,
+    no embedding/network, no writes, no ``ListFilters``/return-token
+    framework. Hydration is the SAME batched
+    :func:`workflow.query.hydrate_library_items` contract (no N+1).
+    """
+    get_config()  # fail fast on broken config, same as other pages
+    queryset = archived_item_queryset().order_by("-archived_at", "item_key")
+    rows = list(queryset[: ARCHIVED_LIMIT + 1])
+    truncated = len(rows) > ARCHIVED_LIMIT
+    rows = rows[:ARCHIVED_LIMIT]
+    context = {
+        "cards": hydrate_library_items(rows),
+        "truncated": truncated,
+        "archived_limit": ARCHIVED_LIMIT,
+    }
+    return render(request, "workflow/recording_archived.html", context)
 
 
 def _keyword_search_redirect(request, config):
@@ -786,6 +822,7 @@ def recording_detail(request, recording_id):
     context = {
         "card": card,
         "recording": recording,
+        "archived": recording.archived_at is not None,
         "transcript": transcript,
         "transcript_segment_count": transcript_segment_count,
         "preview_segments": preview_segments,
@@ -952,7 +989,12 @@ def recording_transcript(request, recording_id):
     page = paginator.get_page(request.GET.get("page"))
     model_id = transcript.attempt.model_id if transcript.attempt_id is not None else ""
 
-    editable = transcript.is_active and explicit_layout is None and not layout_error
+    editable = (
+        transcript.is_active
+        and explicit_layout is None
+        and not layout_error
+        and recording.archived_at is None
+    )
 
     # Working range of the selected layout (full transcript when none).
     working_start = 0
@@ -1082,6 +1124,7 @@ def recording_transcript(request, recording_id):
         "card": card,
         "recording": recording,
         "recording_title": card.title,
+        "archived": recording.archived_at is not None,
         "transcript": transcript,
         "is_active_version": transcript.is_active,
         "section_return": section_return,
@@ -1277,8 +1320,12 @@ def section_detail(request, recording_id, section_id):
     # The global configured/retired tag choices only feed the ACTIVE
     # section's tag editor. A HISTORICAL section renders ONLY its assigned
     # tags read-only (the template never opens the editor), so the global
-    # Tag queries are skipped entirely for historical pages.
-    if is_active_section:
+    # Tag queries are skipped entirely for historical pages. An ARCHIVED
+    # recording is read-only too.
+    archived = recording.archived_at is not None
+    section_archived = section.archived_at is not None
+    section_actionable = is_active_section and not archived and not section_archived
+    if section_actionable:
         tag_choices = Tag.objects.filter(is_configured=True).order_by("name")
         retired_tag_choices = Tag.objects.filter(is_configured=False).order_by("name")
         active_by_tag = {assignment.tag_id: assignment for assignment in active_section_tags}
@@ -1304,10 +1351,22 @@ def section_detail(request, recording_id, section_id):
         retired_tag_options = []
 
     section_actions = {}
-    if is_active_section:
+    if is_active_section and not archived:
+        # The ordinary fingerprint binds the Section's OWN archive marker
+        # too, so an Archive form is stale after an archive.
         from workflow.services.web_actions import section_state_fingerprint
 
         section_actions["fingerprint"] = section_state_fingerprint(recording, section)
+    if section_archived and not archived:
+        # The DEDICATED restore fingerprint works for an owned topic
+        # Section even when its layout/transcript became historical, so a
+        # historical archived Section stays restorable (reversible
+        # archive) while the ordinary fingerprint above is unchanged.
+        from workflow.services.web_actions import section_restore_fingerprint
+
+        section_actions["restore_fingerprint"] = section_restore_fingerprint(
+            recording, section
+        )
 
     # Read-only parent routing decision (context/provenance only).
     routing_decision = recording.routing_decisions.filter(is_active=True).first()
@@ -1317,6 +1376,9 @@ def section_detail(request, recording_id, section_id):
         "recording": recording,
         "section": section,
         "canonical": canonical,
+        "archived": archived,
+        "section_archived": section_archived,
+        "section_actionable": section_actionable,
         "is_active_section": is_active_section,
         "range_label": range_label(
             section.start_segment_ordinal, section.end_segment_ordinal_exclusive

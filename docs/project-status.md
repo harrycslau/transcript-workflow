@@ -1,10 +1,14 @@
-# Project status — implementation handoff (Step 6.3 section content in the search/embedding/Ask stack delivered; direct-action web workflow delivered on top)
+# Project status — implementation handoff (reversible Recording + individual-Section archive delivered on top of Step 6.3 + direct-action web workflow)
 
 This file reflects the repository through the delivered Step 6.3 plus the
-delivered **direct-action web workflow** refinement on top of it (all
+delivered **direct-action web workflow** refinement and the delivered
+**reversible Recording + individual-Section archive** (plus section
+removal discoverability) on top of it (all
 mutating web workflow actions now execute on the first POST from their
 origin-page forms — see the direct-action section below and the durable
-"Web actions" section of `AGENTS.md`):
+"Web actions" section of `AGENTS.md`; archive is reversible and never
+source-file deletion — see the archive section below and the durable
+"Reversible archive" section of `AGENTS.md`):
 Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
@@ -57,8 +61,8 @@ The `design/ui-prototype/` directory
 remains the approved v6 design source (fictional data); the production
 Recording Detail, Transcript and History pages now implement that
 design. The
-working tree is independently full-suite verified: **3201 collected
-and 3201 passed** (the recorded Step 6.3 handoff state was 3100; the
+working tree is independently full-suite verified: **3287 collected
+and 3287 passed** (the recorded Step 6.3 handoff state was 3100; the
 committed `run --now` CLI round that followed took the clean baseline
 to 3112, the direct-action test rounds — new executing-POST/
 pending-hook tests plus the rewritten two-step-confirmation tests
@@ -67,17 +71,127 @@ the fingerprint input hardening round added a further 33 tests after
 that state to an intermediate 3152, and the routing-state fingerprint
 binding round added a further 5 tests to 3157; the summarization oMLX
 `response_format`/repair reliability round added a further 36 tests,
-bringing the tree to 3193, and the unverified-review audit-only round
-added a further 8 tests, bringing the current tree to **3201** (net
-+89 over 3112); only the
+bringing the tree to 3193, the unverified-review audit-only round
+added a further 8 tests to 3201, the reversible-Recording-archive round
+added a further 42 focused tests to 3243, and the reversible-Section-
+archive round adds a further 44 tests to the current **3287**; only the
 known `audioop` deprecation warning), with
-`manage.py check`, `makemigrations --check` (NO new migration; 0013
-still the head) and `git diff --check` clean.
+`manage.py check`, `makemigrations --check` (0015 is the new head) and
+`git diff --check` clean.
 No real-database
-migration or user data operation is claimed (the 0011/0012/0013 migrations are
-never applied to a real database by this work). This file is
+migration or user data operation is claimed (the 0011/0012/0013/0014/0015
+migrations are never applied to a real database by this work). This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
+
+## Reversible Recording + individual-Section archive + section removal discoverability (delivered in the working tree)
+
+A small additive archive feature (migration **0014**, `Recording.archived_at`;
+migration **0015**, `Section.archived_at`) plus the section-removal
+discoverability link. **Archival is never source deletion**: audio files,
+transcripts, summaries, tags, layout revisions and all history are
+retained, and the derived `SearchDocument`/`EmbeddingDocument` rows stay
+physically stored and internally healthy. The changes:
+
+- **Service** (`workflow/services/archive.py`): the ONE transactional,
+  idempotent archive/restore service. It re-fetches the exact Recording,
+  sets only `archived_at` (+ `updated_at`), returns safe counts only,
+  logs nothing and never touches files/network/index rows/history/sync.
+  Archive refuses while an unfinished `ProcessingAttempt` exists (the web
+  path runs `recover_interruptions` first); restore is always safe.
+- **Web**: `POST /recordings/<pk>/archive/`+`/restore/` and
+  `POST /recordings/<pk>/sections/<id>/archive/`+`/restore/` execute on
+  the FIRST POST under the pipeline lock + recovery, guarded by the
+  opaque `state_fingerprint` / `section_state_fingerprint`, which bind
+  the Recording / Section archived state (cross-state stale forms are
+  safe no-ops; lock busy ⇒ 409). The active recording detail shows a
+  compact Danger zone (`Archive from Brain`, `.btn-sm`); an archived
+  recording detail is directly readable with an Archived banner +
+  Restore and renders NO ordinary mutating forms (service-side guards
+  reject forged posts). An active topic Section detail shows a compact
+  Danger zone (`Archive section`); an archived Section detail shows a
+  Section-archived banner + Restore and offers NO ordinary summary/tag
+  actions; an archived parent Recording suppresses every Section
+  archive/restore control.
+- **Section archive is a visibility marker, not layout deletion**: it
+  never merges ranges or mutates/supersedes a `SegmentedVersion`. Only a
+  canonical topic Section of the active transcript's active valid layout
+  with an unarchived parent may be newly archived (fixed/historical/
+  cross-parent/archived-parent refuse); restore is deliberately
+  permissive (it clears a marker even when the Section later became
+  historical — that is the only mutation and the Section stays otherwise
+  read-only). A **dedicated opaque `section_restore_fingerprint`**
+  (Recording id + archived state, Section id + own archived state,
+  transcript/layout ids + active/historical state, ordinal) lets the
+  historical archived Section detail render Restore without requiring
+  the layout/transcript to still be active; it never weakens
+  `section_state_fingerprint` (canonical-active-only for ordinary
+  summary/archive actions). The SHARED canonical layout validator keeps
+  treating an archived Section as structurally present, so parent
+  suppression stays based on the full layout and an archived Section is
+  an intentional hidden item. Historical archived Sections may be absent
+  from the Archived items table; their direct detail page supplies
+  Restore.
+- **Persistence-time archive boundary**: `persist_summary` re-locks the
+  parent Recording FIRST and then the authoritative target Section (the
+  same order as `archive_section`) and rechecks BOTH archive markers
+  before any Summary/tag/variant DML (parent archive → the stable
+  `ArchivedRecordingError`; Section archive → the stable
+  `section_archived` `SegmentationError`, which the section caller maps
+  to `section_layout_changed`). An archive introduced after generation
+  but before persistence therefore writes nothing and schedules no sync.
+- **Eligibility exclusions are centralized, not forked**:
+  `workflow.query.filter_only` excludes archived Recordings and
+  `workflow.query._section_base_queryset` excludes `Section.archived_at`,
+  so the Library projection/count/identity UNION, the canonical item
+  scope (web + CLI keyword/semantic/hybrid), stale-key revalidation and
+  Ask all agree while siblings remain and the parent stays suppressed.
+  Review report/badge and the pipeline work selectors exclude archived
+  Recordings; explicit pipeline/summarize/segmentation/tag mutations
+  refuse or skip safely. Ask excludes archived Section item keys BEFORE
+  top-K selection (`retrieve_semantic_evidence`'s
+  `exclude_archived_sections` predicate, reusing the shared item mapping
+  + canonical-layout predicate while keeping the ordinal-0
+  whole-recording variants admissible) and revalidates archived summary
+  ownership AND archived Section segment ranges post-chat. Read-only
+  detail/history/export routes remain available.
+- **Index**: archive/restore schedule no sync, delete no rows and change
+  no index mapping/version; `search-index status` stays healthy and a
+  rebuild still includes archived documents internally. Restore makes an
+  item eligible again immediately with no reindex/embed. Ingest
+  deduplication keeps the SAME Recording/AudioSource and never clears
+  `archived_at` and never creates a duplicate content identity.
+- **Discovery**: the read-only `/recordings/archived/` page (linked from
+  the Library, titled `Archived items`) renders ONE bounded deterministic
+  table over `workflow.query.archived_item_queryset` — archived
+  Recording rows PLUS independently archived canonical ACTIVE topic
+  Sections whose parent Recording is not archived (never parent + child
+  duplicates), ordered globally by `archived_at` descending then
+  canonical item key, hard limit+1 sentinel, hydrated by the same batched
+  `hydrate_library_items` contract; columns Archived / Title / Duration /
+  Type-context; no search/`ListFilters`/return-token expansion.
+- **Section "deletion" is discoverability only**: an ACTIVE canonical
+  topic Section detail's upper link is `Edit/remove section` (the single
+  link; the duplicate paragraph and verbose copy are gone) pointing to
+  its location in the transcript editor, where removing a surrounding
+  split/crop merges it with its neighbor and saved revisions remain in
+  History. Historical/fixed/malformed/archived sections get no removal
+  control; there is no section-delete service/model/migration.
+- **Verification (historical Recording-archive state)**: **42 new tests**
+  across `tests/test_archive_service.py` (7),
+  `tests/test_archive_migration_0014.py` (4),
+  `tests/test_archive_eligibility.py` (17, including the two
+  stale-instance under-lock archive-race guards),
+  `tests/test_archive_embedding.py` (1) and `tests/test_web_archive.py`
+  (13), plus the updated migration-readiness/search-index-migration leaf
+  expectations. The **Section archive round** adds **44 tests**
+  (`tests/test_section_archive_service.py` 16,
+  `tests/test_section_archive_migration_0015.py` 4,
+  `tests/test_web_section_archive.py` 17,
+  `tests/test_ask_section_archive.py` 5, and 2 persistence-boundary tests
+  in `tests/test_section_summary_service.py`) plus the updated migration
+  leaf expectations. The full suite is green; all tests are mocked/network-free
+  and no real audio/MacWhisper/oMLX operation is performed.
 
 ## Summarization oMLX reliability patch (delivered in the working tree)
 
@@ -290,7 +404,10 @@ and its tests are in the working tree.
   display title, section duration) is delivered** (see the Step 6.2a
   section below), and **Step 6.3 (section content in the
   search/embedding/Ask stack + Library-item search everywhere) is
-  delivered** (see the Step 6.3 section below); the next planned work
+  delivered** (see the Step 6.3 section below), and the **reversible
+  Recording + individual-Section archive + section removal
+  discoverability is delivered** (migrations 0014/0015; see the archive
+  section above); the next planned work
   is **Step 6.4** — retention/Keep-Audio/Rescan policies plus
   missing-file reconciliation (real source-file
   deletion/move/trash/quarantine remains an explicit approval gate),

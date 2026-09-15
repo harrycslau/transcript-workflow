@@ -229,8 +229,18 @@ def _lock_recording(recording_pk: str) -> None:
     never relied upon. Section-scoped writers call this BEFORE their
     authoritative active-section validation so the serialization
     boundary precedes every validation read.
+
+    Archived Recordings are rejected here with the stable sanitized
+    ``recording_archived`` category: every web tag mutation (recording
+    and section scope) establishes this boundary, so no tag edit can be
+    written against an archived recording.
     """
-    Recording.objects.select_for_update().get(pk=recording_pk)
+    recording = Recording.objects.select_for_update().get(pk=recording_pk)
+    if recording.archived_at is not None:
+        raise TagOperationError(
+            "recording_archived",
+            "This recording is archived — restore it before editing tags.",
+        )
 
 
 def _section_parent_recording(section) -> Recording:
@@ -274,6 +284,14 @@ def _require_topic_section(section) -> dict:
     if section is None or type(section) is not Section:
         raise TagOperationError(
             "section_not_available", "This section is not available for tag editing."
+        )
+    if Section.objects.filter(pk=section.pk, archived_at__isnull=False).exists():
+        # An archived individual Section is read-only: no tag edit may be
+        # written against it (the archived detail renders no editor; this
+        # rejects forged submissions).
+        raise TagOperationError(
+            "section_archived",
+            "This section is archived — restore it before editing tags.",
         )
     try:
         return segmentation_service.require_active_topic_section(section)

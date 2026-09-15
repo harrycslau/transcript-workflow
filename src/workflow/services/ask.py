@@ -68,7 +68,9 @@ from django.urls import reverse
 
 from brainlib.config import ConfigError
 from workflow.models import (
+    Recording,
     SearchDocument,
+    Section,
     Summary,
     Transcript,
     TranscriptSegment,
@@ -372,7 +374,14 @@ def _validate_live_evidence(
     malformed-layout and cross-parent section summaries are therefore
     never eligible: a layout that changed after materialization (or a
     forged provenance) fails closed here, identically on the pre-chat
-    materialization check and the post-chat revalidation."""
+    materialization check and the post-chat revalidation.
+
+    An ARCHIVED individual Section is never eligible either: its
+    summary is rejected by the ``section__archived_at`` guard and a
+    Segment falling inside an archived canonical active Section's range
+    is rejected by the archived-range check — so archiving a cited
+    Section during the chat is the fixed sanitized concurrent-change
+    failure, never an answer."""
     segment_items = [item for item in items if item.doc_type == "segment"]
     summary_items = [item for item in items if item.doc_type == "summary"]
 
@@ -397,7 +406,11 @@ def _validate_live_evidence(
     if transcript_ids:
         active_owner = dict(
             Transcript.objects.using(using)
-            .filter(pk__in=transcript_ids, is_active=True)
+            .filter(
+                pk__in=transcript_ids,
+                is_active=True,
+                recording__archived_at__isnull=True,
+            )
             .values_list("pk", "recording_id")
         )
     existing_pairs: set = set()
@@ -410,11 +423,36 @@ def _validate_live_evidence(
             .filter(pair_query)
             .values_list("transcript_id", "ordinal")
         )
+    # Archived individual topic Sections can never own evidence: a
+    # Segment whose ordinal falls in an ARCHIVED canonical active topic
+    # Section's range fails closed here (the retrieval already excluded
+    # it before top-K; this is the post-chat/concurrent-change guard).
+    # The SHARED canonical-layout predicate is reused, never forked.
+    archived_ranges: dict[int, list] = {}
+    if transcript_ids:
+        section_sql, section_params = canonical_active_section_ids()
+        for tid, start, end in (
+            Section.objects.using(using)
+            .filter(
+                transcript_id__in=transcript_ids,
+                pk__in=RawSQL(section_sql, list(section_params)),
+                archived_at__isnull=False,
+            )
+            .values_list(
+                "transcript_id",
+                "start_segment_ordinal",
+                "end_segment_ordinal_exclusive",
+            )
+        ):
+            archived_ranges.setdefault(tid, []).append((start, end))
     for item in segment_items:
         if active_owner.get(item.transcript_id) != item.recording_id:
             raise _concurrent_change()
         if (item.transcript_id, item.segment_ordinal) not in existing_pairs:
             raise _concurrent_change()
+        for start, end in archived_ranges.get(item.transcript_id, ()):
+            if start is not None and start <= item.segment_ordinal < end:
+                raise _concurrent_change()
 
     eligible_summaries: dict = {}
     summary_ids = sorted({item.summary_id for item in summary_items})
@@ -423,6 +461,7 @@ def _validate_live_evidence(
             pk__in=summary_ids,
             is_active=True,
             transcript__is_active=True,
+            recording__archived_at__isnull=True,
         )
         # Whole-recording (fixed ordinal-0, layout-less) variants — the
         # unchanged Step 5D eligibility, section identity never claimed.
@@ -447,6 +486,7 @@ def _validate_live_evidence(
         for pk, recording_id, transcript_id, output_language, section_id in (
             base.filter(
                 section__isnull=False,
+                section__archived_at__isnull=True,
                 section__in=RawSQL(section_sql, list(section_params)),
                 section__transcript=F("transcript"),
             ).values_list(
@@ -489,6 +529,7 @@ def _canonical_section_id_map(summary_ids, *, using: str) -> dict:
             is_active=True,
             transcript__is_active=True,
             section__isnull=False,
+            section__archived_at__isnull=True,
             section__in=RawSQL(section_sql, list(section_params)),
             section__transcript=F("transcript"),
         )
@@ -872,6 +913,16 @@ def ask_question(
             using=using,
             config=config,
             embedder=embedder,
+            # Archived Recordings can never contribute evidence: the
+            # canonical Recording scope excludes them before any
+            # embedding/integrity work (reused, not re-implemented).
+            scope=Recording.objects.using(using).filter(archived_at__isnull=True),
+            # Archived individual Sections are excluded BEFORE top-K
+            # selection too (the shared item mapping + canonical-layout
+            # predicate, never a post-retrieval drop). The ordinal-0
+            # whole-recording variants stay admissible — only archived
+            # SECTION item keys are excluded.
+            exclude_archived_sections=True,
         )
         items = _materialize_evidence(evidence.matches, using=using, config=config)
         items, budget_dropped = _apply_total_char_bound(items)

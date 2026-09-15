@@ -1243,9 +1243,28 @@ def persist_summary(
     if transcript.recording_id != recording.pk:
         raise SummaryRelationError("transcript does not belong to the summary's recording")
 
+    from workflow.services.archive import ensure_not_archived
+
     now = timezone.now()
     with transaction.atomic():
+        # Final archive boundary, locked in the SAME order as
+        # ``archive_section`` (Recording first, then Section) so a direct
+        # service call can never race an archive: the authoritative parent
+        # Recording must still be active, and the authoritative target
+        # Section row must not have been archived during generation. Both
+        # are checked BEFORE any Summary/tag/variant DML; the parent uses
+        # the established archive error and the Section the established
+        # segmentation error category (the section-summary caller maps the
+        # latter to its stable ``section_layout_changed`` failure).
         rec = Recording.objects.select_for_update().get(pk=recording.pk)
+        ensure_not_archived(rec)
+        fresh_section = (
+            Section.objects.select_for_update().filter(pk=section.pk).first()
+        )
+        if fresh_section is None:
+            raise SummaryRelationError("summary section no longer exists")
+        if fresh_section.archived_at is not None:
+            raise SegmentationError("section_archived")
         # Derive the scope from the Section shape and re-validate a topic
         # section RIGHT HERE — after the recording is locked/reloaded and
         # immediately before the Summary/tag writes.
@@ -1433,6 +1452,8 @@ def summarize_one(
             f"(allowed: {', '.join(languages.GENERATION_SELECTORS)})"
         )
     recording = Recording.objects.get(pk=recording.pk)
+    if recording.archived_at is not None:
+        return _skip(recording, "archived")
     if not config.summarization.enabled:
         return _skip(recording, "summarization_disabled")
     transcript = recording.transcripts.filter(is_active=True).first()
@@ -1659,7 +1680,9 @@ def summarize_pending(config: AppConfig) -> dict:
     sync = sync_tags(config)
     results: list[dict] = []
     eligible = Recording.objects.filter(
-        processing_status=ProcessingStatus.TRANSCRIBED, summary_status=SummaryState.MISSING
+        archived_at__isnull=True,
+        processing_status=ProcessingStatus.TRANSCRIBED,
+        summary_status=SummaryState.MISSING,
     )
     for recording in eligible:
         results.append(summarize_one(config, recording, generation_mode=GenerationMode.AUTOMATIC))
@@ -1785,6 +1808,12 @@ def summarize_section_one(
     segmentation_service.require_active_topic_section(section)
     transcript = section.transcript
     recording = transcript.recording
+    if recording.archived_at is not None:
+        return _skip_section(section, "archived")
+    if Section.objects.filter(pk=section.pk, archived_at__isnull=False).exists():
+        # An archived individual Section is read-only (the web renders no
+        # action; this rejects a forged/direct service call).
+        return _skip_section(section, "archived")
 
     # Resolve target_language to output_language
     output_language = resolve_output_language(transcript, target_language)

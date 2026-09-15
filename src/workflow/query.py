@@ -496,8 +496,16 @@ def _recording_item_columns(
     qs = Recording.objects.using(using).annotate(effective_at=effective_at_annotation())
     qs = filter_only(qs, filters, timezone_name)
     qs = qs.exclude(pk__in=_HIDDEN_RECORDINGS_SQL_RAW)
+    annotated = _recording_item_annotation(qs)
+    if item_keys is not None:
+        annotated = annotated.filter(item_key__in=item_keys)
+    return annotated.order_by().values(*_ITEM_COLUMNS)
+
+
+def _recording_item_annotation(qs):
+    """The shared recording-branch presentation annotations."""
     display_title = _display_title_expression()
-    annotated = qs.annotate(
+    return qs.annotate(
         default_output_language=_default_output_language_subquery(),
         display_title=display_title,
         title_fold=_fold_expression(display_title),
@@ -517,9 +525,6 @@ def _recording_item_columns(
         # projects it directly (never an annotation of the same name,
         # which Django forbids).
     )
-    if item_keys is not None:
-        annotated = annotated.filter(item_key__in=item_keys)
-    return annotated.order_by().values(*_ITEM_COLUMNS)
 
 
 def _section_default_language_expression() -> Subquery:
@@ -568,23 +573,36 @@ def _section_has_default_summary_expression() -> Exists:
     )
 
 
-def _section_base_queryset(*, using: str = "default"):
+def _section_base_queryset(*, using: str = "default", include_archived: bool = False):
     """The Section branch base: topic Sections whose transcript is ACTIVE
     and whose SegmentedVersion is that transcript's ACTIVE revision (with
     the cross-parent ownership guard), limited to canonically valid
     Section pks via the shared parameterized RawSQL subquery (lazy —
     never a Python id set, never a growing ``IN (... )`` parameter
-    list), annotated with the filter/order columns."""
+    list), annotated with the filter/order columns.
+
+    ``include_archived=False`` (the normal Library/search/Ask scope)
+    excludes Sections carrying their own ``archived_at`` marker.
+    ``include_archived=True`` (the read-only combined archive listing
+    only) keeps them; the SHARED canonical-layout predicate itself stays
+    unchanged (archive is eligibility, not topology), so an archived
+    Section still counts as structurally present and its parent stays
+    suppressed.
+    """
+    qs = Section.objects.using(using).filter(
+        pk__in=_VALID_SECTIONS_SQL_RAW,
+        segmented_version__isnull=False,
+        transcript__is_active=True,
+        # Archived parents are ineligible everywhere user-facing:
+        # their canonical topic Sections disappear with them.
+        transcript__recording__archived_at__isnull=True,
+        segmented_version__is_active=True,
+        transcript=F("segmented_version__transcript"),
+    )
+    if not include_archived:
+        qs = qs.filter(archived_at__isnull=True)
     return (
-        Section.objects.using(using)
-        .filter(
-            pk__in=_VALID_SECTIONS_SQL_RAW,
-            segmented_version__isnull=False,
-            transcript__is_active=True,
-            segmented_version__is_active=True,
-            transcript=F("segmented_version__transcript"),
-        )
-        .annotate(
+        qs.annotate(
             effective_at=Coalesce(
                 "transcript__recording__recorded_at",
                 "transcript__recording__discovered_at",
@@ -777,8 +795,16 @@ def _section_item_columns(
     """
     qs = _section_base_queryset(using=using)
     qs = _section_filter_only(qs, filters, timezone_name)
+    annotated = _section_item_annotation(qs)
+    if item_keys is not None:
+        annotated = annotated.filter(item_key__in=item_keys)
+    return annotated.order_by().values(*_ITEM_COLUMNS)
+
+
+def _section_item_annotation(qs):
+    """The shared section-branch presentation annotations."""
     section_title = Coalesce(_section_display_title_expression(), Value(TITLE_PLACEHOLDER))
-    annotated = qs.annotate(
+    return qs.annotate(**dict(
         item_kind=Value("section", output_field=CharField(max_length=16)),
         item_key=Concat(Value("s:"), F("pk"), output_field=CharField()),
         recording_id=F("transcript__recording_id"),
@@ -797,10 +823,7 @@ def _section_item_columns(
         range_start=F("start_segment_ordinal"),
         range_end=F("end_segment_ordinal_exclusive"),
         duration_seconds=_section_duration_expression(),
-    )
-    if item_keys is not None:
-        annotated = annotated.filter(item_key__in=item_keys)
-    return annotated.order_by().values(*_ITEM_COLUMNS)
+    ))
 
 
 def library_item_queryset(
@@ -836,6 +859,45 @@ def library_item_queryset(
     section_qs = _section_item_columns(
         filters, timezone_name, using=using, item_keys=item_keys
     )
+    return recording_qs.union(section_qs)
+
+
+def archived_item_queryset(*, using: str = "default") -> QuerySet:
+    """The read-only combined Archived-items projection (Recording +
+    Section archive).
+
+    A database UNION of the same-shaped branches projecting exactly the
+    shared :data:`_ITEM_COLUMNS` plus ``archived_at``:
+
+    - archived Recordings (every archived Recording, regardless of any
+      canonical split layout);
+    - independently archived canonical ACTIVE topic Sections whose parent
+      Recording is NOT archived (so a parent + child can never both
+      appear as separate rows).
+
+    The branches do NOT apply the Library ``ListFilters`` or the
+    canonical parent-suppression exclusion — this is a bounded archive
+    listing, not the Library — and the SHARED canonical-layout predicate
+    is unchanged (an archived Section is structurally present, so its
+    parent stays suppressed in the normal Library). Deliberately
+    unsliced and unordered: the caller orders by ``-archived_at,
+    item_key`` and applies its own hard limit+1 sentinel before
+    hydration, exactly like the normal front-page listing.
+    """
+    recording_qs = (
+        Recording.objects.using(using)
+        .filter(archived_at__isnull=False)
+        .annotate(effective_at=effective_at_annotation())
+    )
+    recording_qs = _recording_item_annotation(recording_qs)
+    recording_qs = recording_qs.order_by().values(*_ITEM_COLUMNS, "archived_at")
+
+    section_qs = _section_base_queryset(using=using, include_archived=True).filter(
+        archived_at__isnull=False
+    )
+    section_qs = _section_item_annotation(section_qs)
+    section_qs = section_qs.order_by().values(*_ITEM_COLUMNS, "archived_at")
+
     return recording_qs.union(section_qs)
 
 
@@ -1174,6 +1236,14 @@ class LibraryItemCard:
     @property
     def summary_status(self):
         return self._row.get("summary_status")
+
+    @property
+    def archived_at(self):
+        """The item's own archive marker (Recording or Section), or
+        ``None`` for an item read from the normal Library projection."""
+        if self.is_section:
+            return self.section.archived_at if self.section is not None else None
+        return self.recording.archived_at if self.recording is not None else None
 
     @property
     def duration_seconds(self) -> float | None:
@@ -1571,7 +1641,16 @@ def filter_only(queryset, filters: ListFilters, timezone_name: str):
     (the search scope queryset reuses exactly these predicates, so
     filtering semantics can never diverge between the Library listing
     and a scoped keyword search).
+
+    Archived Recordings are excluded here — the ONE central exclusion
+    shared by the Library item projection/count/identity UNION, the
+    recording-scope search queryset and every scoped keyword/semantic/
+    hybrid engine — so archived rows can never reach a user-facing
+    result. Detail/history/export reads never use this helper and stay
+    available for restore/audit.
     """
+    queryset = queryset.filter(archived_at__isnull=True)
+
     if filters.date:
         start, end = local_day_bounds(filters.date, timezone_name)
         queryset = queryset.filter(effective_at__gte=start, effective_at__lt=end)

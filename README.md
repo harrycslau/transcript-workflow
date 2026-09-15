@@ -36,6 +36,17 @@ POST-only and their query never appears in a URL (Step 5C). Ask with
 citations is available via `brain ask "QUESTION"` and the `/ask/` page
 (Step 5D): answers cite only actually retrieved local transcript
 segments or summaries.
+Recordings can be **archived** and later restored from the web UI.
+Archiving hides a recording from the Library, search, Ask and Review and
+stops automatic pipeline work, while its audio file, transcript,
+summaries, tags and history are retained and remain directly readable.
+Archive is **not** source-file deletion: Brain still never deletes,
+moves, or modifies audio files. An individual topic Section can be
+archived and restored on its own from its detail page (hidden from the
+Library, search and Ask while its trim &amp; split layout is untouched),
+and archived recordings and Sections are listed together on the
+read-only `/recordings/archived/` (`Archived items`) page linked from the
+Library.
 Manual topic splitting, scheduling, and retention deletion are
 planned for Step 6. **The app does not currently delete, move, or
 modify audio files.**
