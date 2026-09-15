@@ -256,6 +256,29 @@ def action_summarize(request, recording_id):
             "Summarization is not available for this recording in its current state.",
             "ineligible_state",
         )
+    # Strict selected-model input contract BEFORE any lock/recovery/
+    # network/write. Initial Generate renders no selector and stays
+    # default-only; Retry/Regenerate must carry exactly one field value
+    # that is an exact effective-allowlist member. Missing/duplicate/
+    # blank/oversized/unknown is ONE fixed friendly 400.
+    from workflow.services.web_actions import (
+        INVALID_SUMMARY_MODEL_MESSAGE,
+        resolve_submitted_model,
+    )
+
+    config = get_config()
+    selected_model = resolve_submitted_model(
+        config,
+        request.POST.getlist("model"),
+        # The RENDERED mode decides whether a selector was present: only
+        # Retry/Regenerate forms carry one. A stale form that no longer
+        # matches the live mode stays the under-lock safe no-op below.
+        default_only=requested_mode not in ("retry_summary", "regenerate"),
+    )
+    if selected_model is None:
+        return rejection_response(
+            request, INVALID_SUMMARY_MODEL_MESSAGE, "invalid_model"
+        )
     outcome = _execute(
         request,
         recording,
@@ -263,6 +286,7 @@ def action_summarize(request, recording_id):
         requested_mode=requested_mode,
         expected_fingerprint=fingerprint,
         language=language,
+        model=selected_model,
     )
     return _redirect_outcome(
         request, recording, outcome, language=language,
@@ -484,6 +508,26 @@ def action_section_summarize(request, recording_id, section_id):
             "Summarization is not available for this section in its current state.",
             "ineligible_state",
         )
+    # Strict selected-model input contract BEFORE any lock/recovery/
+    # network/write (see the recording-level action): initial Generate is
+    # default-only; Retry/Regenerate must carry exactly one exact
+    # effective-allowlist member.
+    from workflow.services.web_actions import (
+        INVALID_SUMMARY_MODEL_MESSAGE,
+        resolve_submitted_model,
+    )
+
+    selected_model = resolve_submitted_model(
+        config,
+        request.POST.getlist("model"),
+        # The RENDERED mode decides whether a selector was present (see
+        # the recording-level action); a stale form stays a safe no-op.
+        default_only=requested_mode not in ("retry_summary", "regenerate"),
+    )
+    if selected_model is None:
+        return rejection_response(
+            request, INVALID_SUMMARY_MODEL_MESSAGE, "invalid_model"
+        )
     try:
         outcome = execute_section_summarize(
             config,
@@ -492,6 +536,7 @@ def action_section_summarize(request, recording_id, section_id):
             requested_mode=requested_mode,
             expected_fingerprint=fingerprint,
             language=language,
+            model=selected_model,
         )
     except PipelineBusy as exc:
         return conflict_response(request, exc.holder_pid)

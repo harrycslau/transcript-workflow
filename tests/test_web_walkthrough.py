@@ -90,7 +90,7 @@ def test_walkthrough():
     actions_mod.execute_web_action = fake_exec
     try:
         r = c.post(f"/recordings/{recording.pk}/summarize/",
-                   {"mode": "regenerate", "fingerprint": fp})
+                   {"mode": "regenerate", "model": "test-summary-model", "fingerprint": fp})
     finally:
         actions_mod.execute_web_action = real_exec
     assert r.status_code == 302 and seen["action"] == "summarize"

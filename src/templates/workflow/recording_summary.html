@@ -18,7 +18,7 @@
     language will be detected locally first (one bounded request, retried at
     most once on invalid output).
   </p>
-  {% include "workflow/_variant_action.html" with return_view="summary" %}
+  {% include "workflow/_variant_action.html" with return_view="summary" model_choices=actions.summary_model_choices summary_default_model=actions.summary_default_model %}
 {% elif summary %}
   <p class="variant-label muted">
     Language: {{ summary.output_language }}{% if summary.output_language == variant.default_language %} (default){% endif %}
@@ -33,7 +33,7 @@
   </p>
   <p class="current-banner">This is the current summary of the recording (version #{{ summary.ordinal }}).</p>
   {% include "workflow/_summary_body.html" %}
-  {% include "workflow/_variant_action.html" with return_view="summary" %}
+  {% include "workflow/_variant_action.html" with return_view="summary" model_choices=actions.summary_model_choices summary_default_model=actions.summary_default_model %}
   <details class="provenance">
     <summary>Provenance</summary>
     <dl>
@@ -63,6 +63,6 @@
       No summary in this language yet — generate it below.
     {% endif %}
   </p>
-  {% include "workflow/_variant_action.html" with return_view="summary" %}
+  {% include "workflow/_variant_action.html" with return_view="summary" model_choices=actions.summary_model_choices summary_default_model=actions.summary_default_model %}
 {% endif %}
 {% endblock %}

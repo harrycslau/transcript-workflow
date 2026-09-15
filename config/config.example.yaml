@@ -112,6 +112,13 @@ summarization:
   max_total_characters: 960000
   temperature: 0.2
   max_output_tokens: 3000
+  # Optional static allowlist of alternate models offered by the web
+  # Retry/Regenerate selectors. The configured llm.model is always the
+  # first/default choice; list only additional exact model identities
+  # (server/API model names). Omitted or empty keeps the single-model
+  # behavior. Entries are exact strings, de-duplicated, max 32 entries
+  # of at most 255 characters.
+  models: []
 
 embedding:
   base_url: http://localhost:8000/v1

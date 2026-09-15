@@ -425,7 +425,7 @@ class TestSummarizeAction:
         monkeypatch.setattr("workflow.services.summarize.summarize_one", fake_summarize)
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"mode": "retry_summary", "fingerprint": _fingerprint(recording)},
+            {"mode": "retry_summary", "model": "test-summary-model", "fingerprint": _fingerprint(recording)},
         )
         assert response.status_code == 302
         assert captured["regenerate"] is False
@@ -442,7 +442,7 @@ class TestSummarizeAction:
         monkeypatch.setattr("workflow.services.summarize.summarize_one", failing)
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"mode": "regenerate", "fingerprint": _fingerprint(recording)},
+            {"mode": "regenerate", "model": "test-summary-model", "fingerprint": _fingerprint(recording)},
         )
         assert response.status_code == 302
         existing.refresh_from_db()
@@ -462,7 +462,7 @@ class TestSummarizeAction:
         monkeypatch.setattr("workflow.services.summarize.summarize_one", fail)
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"mode": "regenerate", "fingerprint": fingerprint},
+            {"mode": "regenerate", "model": "test-summary-model", "fingerprint": fingerprint},
         )
         assert response.status_code == 302
 
@@ -543,7 +543,7 @@ class TestStaleFingerprints:
         def fail(config, rec, action, **kwargs):
             raise AssertionError("stale fingerprint must not dispatch")
 
-        monkeypatch.setattr("workflow.services.web_actions.state_fingerprint", lambda rec: "different")
+        monkeypatch.setattr("workflow.services.web_actions.state_fingerprint", lambda rec, **kwargs: "different")
         monkeypatch.setattr("workflow.services.pipeline.transcribe_one", fail)
         response = client.post(
             f"/recordings/{recording.pk}/transcribe/",
@@ -967,8 +967,8 @@ class TestPendingStateFormHooks:
 
     def test_regenerate_variant_form_carries_keep_current_copy(self, client):
         """A regenerate variant carries the template-owned keep-current
-        copy (inline note + pending message): the current summary stays
-        active unless the new version is created completely."""
+        PENDING message (live region) and the model selector, while the
+        separate visible inline sentence is removed."""
         recording, transcript, section = make_transcribed_recording(
             ["x"], sha="hooks-regen"
         )
@@ -976,7 +976,15 @@ class TestPendingStateFormHooks:
         content = client.get(f"/recordings/{recording.pk}/").content.decode()
         assert 'data-action-form="summarize"' in content
         assert 'data-pending-label="Regenerating…"' in content
+        # The pending live-region message remains.
         assert "current summary stays active unless the new version" in content
+        # The separate visible inline sentence is gone.
+        assert "is created completely" not in content
+        # Retry/Regenerate render the selector row with the effective
+        # choices; the default (test config: only the configured
+        # alternative) is selected.
+        assert 'name="model"' in content
+        assert "test-summary-model" in content
 
     def test_section_variant_form_carries_hooks(self, client):
         """Phase 2: the section-scoped variant form executes on its first

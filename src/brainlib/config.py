@@ -164,6 +164,12 @@ _DEFAULTS: dict[str, Any] = {
         "max_total_characters": 960000,
         "temperature": 0.2,
         "max_output_tokens": 3000,
+        # Optional static allowlist of alternate summarization models for
+        # the web Retry/Regenerate selectors. The exact configured
+        # ``llm.model`` is always the first/default choice; these are
+        # additional choices only. Omitted/empty keeps the historical
+        # single-model behavior.
+        "models": [],
     },
     "tags": {
         "allowed": [],
@@ -284,6 +290,10 @@ class SummarizationConfig:
     max_total_characters: int
     temperature: float
     max_output_tokens: int
+    # Optional static allowlist of exact alternate model identities for
+    # the web Retry/Regenerate selectors (declaration order, exact
+    # strings, no canonicalization). Empty keeps single-model behavior.
+    models: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -345,11 +355,38 @@ class AppConfig:
         return value or None
 
 
+def available_summary_models(config: AppConfig) -> tuple[str, ...]:
+    """Effective ordered, de-duplicated summary model choices.
+
+    The exact configured ``llm.model`` is always FIRST (when nonblank),
+    followed by the configured ``summarization.models`` alternatives in
+    declaration order. Entries are de-duplicated by exact identity; the
+    stored model identities are never stripped or canonicalized (blankness
+    is tested with ``.strip()`` only). An omitted/empty
+    ``summarization.models`` therefore yields exactly ``(llm.model,)`` —
+    the historical single-model behavior.
+    """
+    choices: list[str] = []
+    for model in (config.llm.model, *config.summarization.models):
+        if not model.strip():
+            continue
+        if model not in choices:
+            choices.append(model)
+    return tuple(choices)
+
+
 # --------------------------------------------------------------------------
 # Validation helpers
 # --------------------------------------------------------------------------
 
 _MISSING = object()
+
+# Hard bounds for the optional ``summarization.models`` allowlist: a
+# modest number of choices (existing model identities are short request
+# fields, so a large list is never legitimate) and a per-entry length cap
+# matching the real model-id field scale.
+MAX_SUMMARY_MODELS = 32
+MAX_SUMMARY_MODEL_CHARS = 255
 
 
 def _section(raw: dict[str, Any], name: str) -> dict[str, Any]:
@@ -694,6 +731,45 @@ def _parse_tags_config(raw: dict[str, Any]) -> tuple[TagsConfig, list[TagSpec], 
     return TagsConfig(allowed=tuple(allowed)), initial_tags, notice
 
 
+def _parse_summarization_models(value: Any) -> tuple[str, ...]:
+    """Validate the optional ``summarization.models`` allowlist.
+
+    Entries are exact nonblank strings, never stripped or canonicalized
+    (blankness is tested with ``.strip()`` only). Booleans, non-strings,
+    control characters/newlines, over-cap lengths, over-cap list sizes and
+    exact duplicates are rejected with a concise :class:`ConfigError`.
+    The list need not repeat ``llm.model``.
+    """
+    if not isinstance(value, list):
+        raise ConfigError(f"[summarization.models] must be a list, got {type(value).__name__}")
+    if len(value) > MAX_SUMMARY_MODELS:
+        raise ConfigError(
+            f"[summarization.models] must not exceed {MAX_SUMMARY_MODELS} entries, "
+            f"got {len(value)}"
+        )
+    parsed: list[str] = []
+    for index, item in enumerate(value):
+        if isinstance(item, bool) or not isinstance(item, str):
+            raise ConfigError(f"[summarization.models] entry {index} must be a string")
+        if not item.strip():
+            raise ConfigError(f"[summarization.models] entry {index} must not be blank")
+        if len(item) > MAX_SUMMARY_MODEL_CHARS:
+            raise ConfigError(
+                f"[summarization.models] entry {index} must not exceed "
+                f"{MAX_SUMMARY_MODEL_CHARS} characters"
+            )
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in item):
+            raise ConfigError(
+                f"[summarization.models] entry {index} must not contain control characters"
+            )
+        if item in parsed:
+            raise ConfigError(
+                f"[summarization.models] entry {index} duplicates an earlier model"
+            )
+        parsed.append(item)
+    return tuple(parsed)
+
+
 def _parse_summarization(raw: dict[str, Any]) -> SummarizationConfig:
     s = _section(raw, "summarization")
     enabled = _get(s, "enabled", "summarization", bool)
@@ -705,6 +781,7 @@ def _parse_summarization(raw: dict[str, Any]) -> SummarizationConfig:
     max_total = _get_number(s, "max_total_characters", "summarization", int, positive=True)
     temperature = _get_number(s, "temperature", "summarization", (int, float))
     max_output_tokens = _get_number(s, "max_output_tokens", "summarization", int, positive=True)
+    models = _parse_summarization_models(s.get("models", []))
     if overlap < 0:
         raise ConfigError(f"[summarization]: 'chunk_overlap_characters' must be >= 0, got {overlap}")
     if overlap >= chunk:
@@ -734,6 +811,7 @@ def _parse_summarization(raw: dict[str, Any]) -> SummarizationConfig:
         max_total_characters=max_total,
         temperature=float(temperature),
         max_output_tokens=max_output_tokens,
+        models=models,
     )
 
 

@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from brainlib.config import AppConfig
+from brainlib.config import AppConfig, MAX_SUMMARY_MODEL_CHARS, available_summary_models
 from workflow.models import (
     FailureStage,
     ProcessingAttempt,
@@ -110,7 +110,90 @@ class ActionOutcome:
     detail: dict[str, Any] = field(default_factory=dict)
 
 
-def state_fingerprint(recording: Recording) -> str:
+# ONE fixed friendly message (with a stable code) for every rejected
+# summary-model selection; never echoes the submitted value.
+INVALID_SUMMARY_MODEL_MESSAGE = (
+    "The selected summary model is missing or not available — reload the page."
+)
+
+
+def _fingerprint_model_state(config: AppConfig | None) -> tuple[list[str], str]:
+    """(effective model allowlist, default model) bound by action fingerprints.
+
+    ``config`` is the caller's loaded configuration; when omitted the
+    boot-time settings configuration is used (the same source the web
+    layer renders with), so read-only fingerprint calls stay consistent.
+    The identities are hashed into the opaque digest and never rendered.
+    """
+    if config is None:
+        try:
+            from brain import settings as django_settings
+
+            config = django_settings.BRAIN_CONFIG_OBJ
+        except Exception:
+            return [], ""
+    return list(available_summary_models(config)), config.llm.model
+
+
+def resolve_submitted_model(
+    config: AppConfig, values: list[str], *, default_only: bool
+) -> str | None:
+    """Strictly parse the executing POST's selected summary model.
+
+    ``values`` is the raw ``request.POST.getlist("model")``. Returns the
+    exact selected model, or ``None`` for ONE fixed friendly 400:
+    missing, duplicate, blank, oversized or not in the effective
+    allowlist. ``default_only`` is the initial-Generate case: no selector
+    is rendered, so an absent value is the configured default and a
+    forged alternate is rejected. Pure input validation — no lock,
+    recovery, network, DB read or write.
+    """
+    default = config.llm.model
+    if default_only:
+        if not values:
+            return default
+        if len(values) != 1 or values[0] != default:
+            return None
+        return default
+    if len(values) != 1:
+        return None
+    value = values[0]
+    if (
+        type(value) is not str
+        or not value.strip()
+        or len(value) > MAX_SUMMARY_MODEL_CHARS
+        or value not in available_summary_models(config)
+    ):
+        return None
+    return value
+
+
+def _validated_effective_model(config: AppConfig, model: str | None, *, mode: str) -> str:
+    """Service-boundary validation of a summary action's selected model.
+
+    Initial ``first`` generation has no selector and stays restricted to
+    the configured default (an alternate forged value is rejected, never
+    silently honored). ``retry_summary``/``regenerate`` require an exact
+    member of the effective allowlist. Raises :class:`ActionRejected`
+    with ONE fixed sanitized message/code for every rejection.
+    """
+    default = config.llm.model
+    if mode == "first":
+        if model is None or model == default:
+            return default
+        raise ActionRejected("invalid_model", INVALID_SUMMARY_MODEL_MESSAGE)
+    if (
+        model is None
+        or type(model) is not str
+        or not model.strip()
+        or len(model) > MAX_SUMMARY_MODEL_CHARS
+        or model not in available_summary_models(config)
+    ):
+        raise ActionRejected("invalid_model", INVALID_SUMMARY_MODEL_MESSAGE)
+    return model
+
+
+def state_fingerprint(recording: Recording, *, config: AppConfig | None = None) -> str:
     """OPAQUE stable fingerprint of the state an action form was rendered from.
 
     Returns the canonical lowercase 64-hex SHA-256 digest over the exact
@@ -208,6 +291,11 @@ def state_fingerprint(recording: Recording) -> str:
             "default_output": resolve_default_language(active_transcript),
             "original_output": resolve_output_language(active_transcript, "original"),
         }
+    # Effective summary-model allowlist/default: a configuration change
+    # (configured alternatives or the default model identity) invalidates
+    # rendered Retry/Regenerate forms. Identities are hashed into the
+    # opaque digest, never rendered.
+    model_choices, default_model = _fingerprint_model_state(config)
     # The hashed payload is the EXACT historical deterministic JSON
     # serialization (sort_keys, default separators, UTF-8); the returned
     # value is its opaque lowercase hex SHA-256 digest.
@@ -227,6 +315,8 @@ def state_fingerprint(recording: Recording) -> str:
                 "variant_languages": variant_languages,
                 "language_state": language_state,
                 "routing_state": routing_state,
+                "summary_models": model_choices,
+                "summary_default_model": default_model,
             },
             sort_keys=True,
         ).encode("utf-8")
@@ -321,6 +411,7 @@ def execute_web_action(
     profile_name: str | None = None,
     requested_mode: str | None = None,
     language: str = "default",
+    model: str | None = None,
 ) -> ActionOutcome:
     """Run one mutating web action under the global pipeline lock.
 
@@ -340,7 +431,7 @@ def execute_web_action(
 
         recover_interruptions(config)
         recording = Recording.objects.get(pk=recording.pk)
-        if state_fingerprint(recording) != expected_fingerprint:
+        if state_fingerprint(recording, config=config) != expected_fingerprint:
             return ActionOutcome(
                 ok=True,
                 result="state_changed",
@@ -365,7 +456,9 @@ def execute_web_action(
         if action == "transcribe":
             return _action_transcribe(config, recording)
         if action == "summarize":
-            return _action_summarize(config, recording, requested_mode, language=language)
+            return _action_summarize(
+                config, recording, requested_mode, language=language, model=model
+            )
         if action == "retry":
             return _action_retry(config, recording)
         if action == "archive":
@@ -521,7 +614,7 @@ def _action_transcribe(config: AppConfig, recording: Recording) -> ActionOutcome
 
 def _action_summarize(
     config: AppConfig, recording: Recording, requested_mode: str | None,
-    *, language: str = "default",
+    *, language: str = "default", model: str | None = None,
 ) -> ActionOutcome:
     from workflow.services.languages import GENERATION_SELECTORS
     from workflow.services.summarize import summarize_one
@@ -564,10 +657,16 @@ def _action_summarize(
                 "Reload the page and try again if still needed."
             ),
         )
+    # Service-boundary defense-in-depth: the selected model is validated
+    # again here (initial Generate stays default-only; Retry/Regenerate
+    # must be an exact effective-allowlist member). Never an arbitrary
+    # submitted string.
+    selected_model = _validated_effective_model(config, model, mode=mode)
     result = summarize_one(
         config, recording,
         target_language=language,
         regenerate=(mode == "regenerate"),
+        model=selected_model,
     )
     if result.get("result") == "summarized":
         return ActionOutcome(
@@ -631,7 +730,9 @@ def _action_retry(config: AppConfig, recording: Recording) -> ActionOutcome:
     return ActionOutcome(ok=ok, result="retried", message=message, detail=result)
 
 
-def section_state_fingerprint(recording: Recording, section) -> str:
+def section_state_fingerprint(
+    recording: Recording, section, *, config: AppConfig | None = None
+) -> str:
     """OPAQUE read-only fingerprint of a SECTION summary action form.
 
     Strictly SELECT-only (no writes, network, subprocess, or locks) and
@@ -739,6 +840,7 @@ def section_state_fingerprint(recording: Recording, section) -> str:
     )
     if len(current_summaries) > _SECTION_FINGERPRINT_STATE_CAP:
         raise SegmentationError("section_state_too_large")
+    model_choices, default_model = _fingerprint_model_state(config)
     state = {
         "recording": recording.pk,
         "archived": recording.archived_at is not None,
@@ -765,6 +867,10 @@ def section_state_fingerprint(recording: Recording, section) -> str:
         "latest_attempt": latest_attempt,
         "variant_states": variant_states,
         "current_summaries": current_summaries,
+        # Effective summary-model allowlist/default (hashed, opaque):
+        # a config choice change invalidates rendered section forms.
+        "summary_models": model_choices,
+        "summary_default_model": default_model,
     }
     return hashlib.sha256(
         json.dumps(state, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -864,6 +970,7 @@ def execute_section_summarize(
     requested_mode: str | None = None,
     expected_fingerprint: str | None = None,
     language: str = "default",
+    model: str | None = None,
 ) -> ActionOutcome:
     """Run one Step 6.2 section-summarization action under the lock.
 
@@ -938,7 +1045,7 @@ def execute_section_summarize(
         except SegmentationError:
             return _section_stale_outcome()
         try:
-            current = section_state_fingerprint(recording, section)
+            current = section_state_fingerprint(recording, section, config=config)
         except SegmentationError:
             return _section_stale_outcome()
         if current != expected_fingerprint:
@@ -964,11 +1071,23 @@ def execute_section_summarize(
             )
         if requested_mode != mode:
             return _section_stale_outcome()
+        # Service-boundary defense-in-depth: validate the selected model
+        # again (initial Generate default-only; Retry/Regenerate exact
+        # effective-allowlist member). Never an arbitrary submitted value.
+        try:
+            selected_model = _validated_effective_model(config, model, mode=mode)
+        except ActionRejected:
+            return ActionOutcome(
+                ok=False,
+                result="failed",
+                message=INVALID_SUMMARY_MODEL_MESSAGE,
+            )
         result = summarize_section_one(
             config,
             section,
             target_language=language,
             regenerate=(mode == "regenerate"),
+            model=selected_model,
         )
         if result.get("result") == "summarized":
             return ActionOutcome(
@@ -1070,7 +1189,7 @@ def execute_section_archive(
             # summary/archive fingerprint already fails closed for a
             # historical target.
             try:
-                current = section_state_fingerprint(recording, section)
+                current = section_state_fingerprint(recording, section, config=config)
             except SegmentationError:
                 return _section_stale_outcome()
             if current != expected_fingerprint:

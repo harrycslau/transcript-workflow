@@ -37,6 +37,7 @@ def default_summarization(**overrides) -> SummarizationConfig:
         max_total_characters=overrides.pop("max_total_characters", 960000),
         temperature=overrides.pop("temperature", 0.2),
         max_output_tokens=overrides.pop("max_output_tokens", 3000),
+        models=tuple(overrides.pop("models", ())),
     )
 
 
@@ -221,6 +222,7 @@ def write_cli_config(tmp_path, monkeypatch, **kwargs):
             "max_total_characters": config.summarization.max_total_characters,
             "temperature": config.summarization.temperature,
             "max_output_tokens": config.summarization.max_output_tokens,
+            "models": list(config.summarization.models),
         },
         "tags": {
             "allowed": [{"name": t.name, "description": t.description} for t in config.tags.allowed]

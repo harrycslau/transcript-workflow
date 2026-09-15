@@ -348,7 +348,7 @@ class TestReadSelectorVersusGenerationSelector:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "mode": "regenerate", "language": "original",
+                "mode": "regenerate", "model": "test-summary-model", "language": "original",
                 "return_language": "fi", "return_view": "summary",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -372,7 +372,7 @@ class TestReadSelectorVersusGenerationSelector:
         )
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"mode": "regenerate", "language": "original", "return_language": "fi",
+            {"mode": "regenerate", "model": "test-summary-model", "language": "original", "return_language": "fi",
              "fingerprint": state_fingerprint(recording)},
         )
         assert response.status_code == 302  # executed directly — no interstitial
@@ -549,7 +549,7 @@ class TestReturnView:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "mode": "regenerate", "language": "zh-Hant",
+                "mode": "regenerate", "model": "test-summary-model", "language": "zh-Hant",
                 "return_language": "zh-Hant", "return_view": "summary",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -570,7 +570,7 @@ class TestReturnView:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "mode": "regenerate", "language": "zh-Hant",
+                "mode": "regenerate", "model": "test-summary-model", "language": "zh-Hant",
                 "return_language": "zh-Hant", "return_view": "detail",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -593,7 +593,7 @@ class TestReturnView:
         )
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"mode": "regenerate", "language": "zh-Hant", "return_view": "summary",
+            {"mode": "regenerate", "model": "test-summary-model", "language": "zh-Hant", "return_view": "summary",
              "return_language": "zh-Hant", "fingerprint": state_fingerprint(recording)},
         )
         assert response.status_code == 302  # executed directly — no interstitial
@@ -610,7 +610,7 @@ class TestReturnView:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "mode": "regenerate", "language": "zh-Hant",
+                "mode": "regenerate", "model": "test-summary-model", "language": "zh-Hant",
                 "return_view": "javascript:alert(1)",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -632,7 +632,7 @@ class TestReturnView:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "mode": "regenerate", "language": "zh-Hant",
+                "mode": "regenerate", "model": "test-summary-model", "language": "zh-Hant",
                 "return_view": "http://evil.example/steal",
                 "fingerprint": state_fingerprint(recording),
             },

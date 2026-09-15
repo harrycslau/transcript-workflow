@@ -138,15 +138,15 @@
         <a class="btn-sm" href="{% url 'section-summary-export' recording.pk section.pk %}?format=markdown{{ variant.export_query }}">Markdown</a>
         <a class="btn-sm" href="{% url 'section-summary-export' recording.pk section.pk %}?format=text{{ variant.export_query }}">Plain text</a>
       {% endif %}
-      {% url 'action-section-summarize' recording.pk section.pk as variant_action_url %}
-      {% if section_actionable %}
-        {% include "workflow/_variant_action.html" with action_url=variant_action_url actions=None section_actions=section_actions %}
-      {% endif %}
     </div>
   </div>
 
   {% url 'section-detail' recording.pk section.pk as variant_tab_base %}
   {% include "workflow/_variant_tabs.html" with tab_base=variant_tab_base %}
+  {% url 'action-section-summarize' recording.pk section.pk as variant_action_url %}
+  {% if section_actionable %}
+    {% include "workflow/_variant_action.html" with action_url=variant_action_url actions=None section_actions=section_actions model_choices=section_actions.summary_model_choices summary_default_model=section_actions.summary_default_model %}
+  {% endif %}
 
   {% if variant.unresolved_original %}
     <p class="empty-state">

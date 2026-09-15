@@ -216,6 +216,13 @@ button:hover, .link-button:hover { background: var(--bg); }
 .edit-actions .action-live:not(:empty) { flex-basis: 100%; }
 .action-note { font-size: 0.8125rem; }
 .action-buttons .action-note { margin: 0; }
+/* Retry/Regenerate model selector row: the form takes its own full line
+   and lays out label/select/button accessibly. The element-qualified
+   selector intentionally beats the later generic ``.inline-form``
+   display rule. Initial Generate renders no selector. */
+form.action-form-model { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+form.action-form-model label { font-size: 0.8125rem; font-weight: 600; color: var(--color-text-2); }
+form.action-form-model select { font-size: 0.75rem; max-width: 100%; }
 
 /* ============================================================
    LIBRARY FILTER AREA — two rows, no caption

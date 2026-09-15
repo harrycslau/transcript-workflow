@@ -14,18 +14,21 @@ submits itself as a generation target. The form posts:
 - return_language: the read selector to keep the selected tab after the
   action (validated against the read-only view-model by the view);
 - return_view: the page to return to (allowlist token, never a URL);
-- mode: the expected per-language action mode.
+- mode: the expected per-language action mode;
+- model: the selected summary model on Retry/Regenerate only (initial
+  Generate stays default-model-only and renders no selector). The value
+  must be an exact member of the effective allowlist; the view/service
+  validate it strictly and never accept an arbitrary string.
 
 Both the recording-level and the section-scoped summarize forms execute
 their action on this first POST (no server-side confirmation step), so
 both carry the pending-state hooks (``data-action-form`` marker +
 ``aria-live`` status region) for the submit JavaScript. The pending
 label/message are TEMPLATE-OWNED here because the copy varies with the
-per-language action mode; a regenerate additionally carries the concise
-keeps-current-on-failure inline note.
+per-language action mode.
 {% endcomment %}
 {% if variant.action_selector and variant.action_mode %}
-<form method="post" action="{% if action_url %}{{ action_url }}{% else %}{% url 'action-summarize' recording.pk %}{% endif %}" class="inline-form" data-action-form="summarize">
+<form method="post" action="{% if action_url %}{{ action_url }}{% else %}{% url 'action-summarize' recording.pk %}{% endif %}" class="inline-form{% if variant.action_mode != 'first' %} action-form-model{% endif %}" data-action-form="summarize">
   {% csrf_token %}
   {% if library_return_token %}<input type="hidden" name="lib_return" value="{{ library_return_token }}">{% endif %}
   <input type="hidden" name="fingerprint" value="{% if actions %}{{ actions.fingerprint }}{% elif section_actions %}{{ section_actions.fingerprint }}{% endif %}">
@@ -33,7 +36,14 @@ keeps-current-on-failure inline note.
   <input type="hidden" name="language" value="{{ variant.action_selector }}">
   <input type="hidden" name="return_language" value="{{ variant.requested }}">
   <input type="hidden" name="return_view" value="{{ return_view|default:'detail' }}">
-  {% if variant.action_mode == 'regenerate' %}<span class="action-note muted">The current summary stays active unless the new version is created completely.</span>{% endif %}
+  {% if variant.action_mode != 'first' %}
+    <label for="summary-model-{{ recording.pk }}-{{ variant.action_selector }}-{{ variant.action_mode }}">{% if variant.action_mode == 'retry_summary' %}Retry:{% else %}Regenerate:{% endif %}</label>
+    <select id="summary-model-{{ recording.pk }}-{{ variant.action_selector }}-{{ variant.action_mode }}" name="model">
+      {% for model in model_choices %}
+        <option value="{{ model }}"{% if model == summary_default_model %} selected{% endif %}>{{ model }}</option>
+      {% endfor %}
+    </select>
+  {% endif %}
   <button type="submit"
           data-pending-label="{% if variant.action_mode == 'first' %}Generating…{% elif variant.action_mode == 'retry_summary' %}Retrying…{% else %}Regenerating…{% endif %}">
     {% if variant.action_mode == 'first' %}Generate{% elif variant.action_mode == 'retry_summary' %}Retry{% else %}Regenerate{% endif %}

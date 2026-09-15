@@ -68,6 +68,8 @@ summarization:
   max_total_characters: 960000
   temperature: 0.2
   max_output_tokens: 3000
+  models:
+    - test-summary-model
 
 tags:
   allowed:

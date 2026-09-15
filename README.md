@@ -476,6 +476,16 @@ are treated as invalid model output (one retry). Tags are materialized
 only from the default variant; other variants never overwrite
 Recording-level default state.
 
+The web Retry and Regenerate actions offer a model selector (initial
+Generate stays default-model-only). The effective choices are always the
+exact configured `llm.model` first, followed by any optional
+`summarization.models` allowlist in `config/config.yaml` (exact model
+identities, de-duplicated; omitted/empty keeps single-model behavior). A
+selection applies only to that one operation and never changes the
+persisted configuration; the exact model is recorded on the attempt and
+Summary provenance and is validated at both the request and service
+boundaries.
+
 Summarization requests ask the oMLX endpoint for a deterministic
 OpenAI-compatible `response_format` JSON schema (`brain_summary_map`
 for map/non-final-reduce, `brain_summary_final` for final/single) while

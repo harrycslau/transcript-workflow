@@ -446,8 +446,15 @@ def _action_availability(config, recording) -> dict:
     show_routing = route_eligible(recording) and (
         recording.processing_status != ProcessingStatus.NEEDS_REVIEW
     )
+    from brainlib.config import available_summary_models
+
     return {
-        "fingerprint": state_fingerprint(recording),
+        "fingerprint": state_fingerprint(recording, config=config),
+        # Effective summary-model choices for the Retry/Regenerate
+        # selectors (exact configured llm.model first, then configured
+        # summarization.models alternatives, de-duplicated).
+        "summary_model_choices": list(available_summary_models(config)),
+        "summary_default_model": config.llm.model,
         "route_eligible": route_eligible(recording),
         "route_profiles": [
             {
@@ -1354,9 +1361,16 @@ def section_detail(request, recording_id, section_id):
     if is_active_section and not archived:
         # The ordinary fingerprint binds the Section's OWN archive marker
         # too, so an Archive form is stale after an archive.
+        from brainlib.config import available_summary_models
         from workflow.services.web_actions import section_state_fingerprint
 
-        section_actions["fingerprint"] = section_state_fingerprint(recording, section)
+        section_actions["fingerprint"] = section_state_fingerprint(
+            recording, section, config=config
+        )
+        section_actions["summary_model_choices"] = list(
+            available_summary_models(config)
+        )
+        section_actions["summary_default_model"] = config.llm.model
     if section_archived and not archived:
         # The DEDICATED restore fingerprint works for an owned topic
         # Section even when its layout/transcript became historical, so a

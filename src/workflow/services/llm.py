@@ -113,9 +113,12 @@ def build_chat_payload(
     temperature: float,
     max_tokens: int,
     response_format: dict[str, Any] | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
+    # ``model`` is the exact selected model for this one operation; None
+    # keeps the configured default (config.llm.model, never mutated).
     payload: dict[str, Any] = {
-        "model": config.llm.model,
+        "model": config.llm.model if model is None else model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -180,12 +183,15 @@ def chat_completion(
     response_format: dict[str, Any] | None = None,
     timeout: float | None = None,
     transport=None,
+    model: str | None = None,
 ) -> str:
     """POST one chat completion and return the validated message content.
 
     Raises the :class:`LLMError` taxonomy on every failure mode; the
     caller decides how failures map onto attempt state. ``response_format``
-    is an optional OpenAI-compatible structured-output request.
+    is an optional OpenAI-compatible structured-output request. ``model``
+    overrides the configured model for this one request (None keeps
+    ``config.llm.model``).
     """
     payload = build_chat_payload(
         config,
@@ -194,6 +200,7 @@ def chat_completion(
         temperature=temperature,
         max_tokens=max_tokens,
         response_format=response_format,
+        model=model,
     )
     api_key = config.api_key_for(config.llm.api_key_env)
     headers: dict[str, str] = {}

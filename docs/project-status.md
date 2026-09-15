@@ -1,9 +1,10 @@
-# Project status — implementation handoff (reversible Recording + individual-Section archive delivered on top of Step 6.3 + direct-action web workflow)
+# Project status — implementation handoff (web summary model selector + copy refinement delivered on top of reversible Recording + individual-Section archive, Step 6.3 + direct-action web workflow)
 
 This file reflects the repository through the delivered Step 6.3 plus the
-delivered **direct-action web workflow** refinement and the delivered
+delivered **direct-action web workflow** refinement, the delivered
 **reversible Recording + individual-Section archive** (plus section
-removal discoverability) on top of it (all
+removal discoverability) and the delivered **web summary model selector +
+copy refinement** on top of it (all
 mutating web workflow actions now execute on the first POST from their
 origin-page forms — see the direct-action section below and the durable
 "Web actions" section of `AGENTS.md`; archive is reversible and never
@@ -61,8 +62,8 @@ The `design/ui-prototype/` directory
 remains the approved v6 design source (fictional data); the production
 Recording Detail, Transcript and History pages now implement that
 design. The
-working tree is independently full-suite verified: **3287 collected
-and 3287 passed** (the recorded Step 6.3 handoff state was 3100; the
+working tree is independently full-suite verified: **3333 collected
+and 3333 passed** (the recorded Step 6.3 handoff state was 3100; the
 committed `run --now` CLI round that followed took the clean baseline
 to 3112, the direct-action test rounds — new executing-POST/
 pending-hook tests plus the rewritten two-step-confirmation tests
@@ -73,8 +74,10 @@ binding round added a further 5 tests to 3157; the summarization oMLX
 `response_format`/repair reliability round added a further 36 tests,
 bringing the tree to 3193, the unverified-review audit-only round
 added a further 8 tests to 3201, the reversible-Recording-archive round
-added a further 42 focused tests to 3243, and the reversible-Section-
-archive round adds a further 44 tests to the current **3287**; only the
+added a further 42 focused tests to 3243, the reversible-Section-
+archive round added a further 44 tests to 3287, and the web summary
+model-selector/copy round adds a further 46 tests to the current
+**3333**; only the
 known `audioop` deprecation warning), with
 `manage.py check`, `makemigrations --check` (0015 is the new head) and
 `git diff --check` clean.
@@ -83,6 +86,55 @@ migration or user data operation is claimed (the 0011/0012/0013/0014/0015
 migrations are never applied to a real database by this work). This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
+
+## Web summary model selector + copy refinement (delivered in the working tree)
+
+A bounded web-action refinement on top of the archive round; no
+migration, no CLI feature and no dependency change.
+
+- **Config**: optional static `summarization.models` (exact nonblank
+  strings, ≤32 entries of ≤255 chars, no stripping/canonicalization;
+  bool/non-list/non-str/control/newline/duplicate rejected as sanitized
+  `ConfigError`). Effective choices are always exact `llm.model` first,
+  then configured alternatives in order, de-duplicated by exact
+  identity; omitted/empty keeps `(llm.model,)`.
+- **UI**: `_variant_action.html` renders the selector ONLY for
+  Retry/Regenerate (initial Generate is default-only and renders none) —
+  a `<select name="model">` with a `<label>` reading `Retry:`/
+  `Regenerate:` and the exact default option selected, on its own line
+  below the language tabs. The visible `The current summary stays active
+  unless the new version is created completely.` sentence is removed;
+  the pending `aria-live` semantics are unchanged.
+- **Safety**: the executing POST must carry exactly one `model` value
+  that is an exact effective-allowlist member, parsed BEFORE any
+  lock/recovery/network/write (ONE fixed friendly `invalid_model` 400
+  for missing/duplicate/blank/oversized/unknown) and re-validated at the
+  service boundary; a forged alternate on initial Generate is rejected.
+  A selection affects ONLY that one operation (`AppConfig` is never
+  mutated): it is threaded through source-language detection,
+  map/reduce/final/repair/fallback, the durable attempt
+  (`model_id`/`cli_args_json`) and `Summary.model_id`/config fingerprint,
+  with `config.llm.model` unchanged for every existing service/CLI/batch
+  caller. The effective allowlist/default are bound into the recording
+  and section opaque action fingerprints (config choice changes stale
+  forms). GET does no model discovery and stays read-only.
+- **Files**: `src/brainlib/config.py`, `src/workflow/services/llm.py`,
+  `src/workflow/services/summarize.py`,
+  `src/workflow/services/web_actions.py`, `src/workflow/views/actions.py`,
+  `src/workflow/views/recordings.py`,
+  `src/templates/workflow/_variant_action.html` (+ include sites),
+  `src/static/workflow/base.css`, `config/config.example.yaml`,
+  `README.md`, `AGENTS.md`.
+- **Verification (independently confirmed, CURRENT)**: full suite
+  **3333 collected and 3333 passed** (the archive state was 3287; this
+  round adds **46** focused tests — `tests/test_summarization_models_config.py`
+  (18), `tests/test_summarize_model_selection.py` (7) and
+  `tests/test_web_summary_model_selector.py` (21) — plus focused updates
+  to the existing web/multilingual tests), only the known `audioop`
+  warning; `manage.py check`, `makemigrations --check` (no migration;
+  0015 stays the head) and `git diff --check` clean. No commit, no
+  real-database migration and no real audio/network operation is
+  claimed; all tests are mocked/network-free.
 
 ## Reversible Recording + individual-Section archive + section removal discoverability (delivered in the working tree)
 

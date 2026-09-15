@@ -188,7 +188,8 @@ class TestInvalidPayloadBeforeLock:
         _fake_summarize(monkeypatch, rec, captured=captured)
         response = client.post(
             _post_url(rec, sections[0]),
-            {"language": "default", "mode": "REGENERATE", "fingerprint": fp},
+            {"language": "default", "mode": "REGENERATE",
+             "model": "test-summary-model", "fingerprint": fp},
         )
         assert response.status_code == 302
         assert captured["regenerate"] is True
@@ -311,7 +312,7 @@ class TestDirectExecution:
         _fake_summarize(monkeypatch, rec, captured=captured)
         response = client.post(
             _post_url(rec, sections[0]),
-            {"language": "default", "mode": "regenerate", "fingerprint": fingerprint},
+            {"language": "default", "mode": "regenerate", "model": "test-summary-model", "fingerprint": fingerprint},
         )
         assert response.status_code == 302
         assert captured["regenerate"] is True
@@ -327,7 +328,7 @@ class TestDirectExecution:
         _fake_summarize(monkeypatch, rec, captured=captured)
         response = client.post(
             _post_url(rec, sections[0]),
-            {"language": "default", "mode": "retry_summary", "fingerprint": fingerprint},
+            {"language": "default", "mode": "retry_summary", "model": "test-summary-model", "fingerprint": fingerprint},
         )
         assert response.status_code == 302
         assert captured["regenerate"] is False
@@ -407,6 +408,7 @@ class TestDirectExecution:
         response = client.post(
             _post_url(rec, sections[0]),
             {"language": "original", "mode": "regenerate",
+             "model": "test-summary-model",
              "return_language": "fi", "fingerprint": fingerprint},
         )
         assert response.status_code == 302
@@ -830,12 +832,13 @@ class TestRealSectionGenerationIntegration:
         monkeypatch.setattr(
             "workflow.services.summarize.llm_service.chat_completion", fake_chat
         )
+        integration_config = self._integration_config(tmp_path)
         monkeypatch.setattr(
             "workflow.views.actions.get_config",
-            lambda: self._integration_config(tmp_path),
+            lambda: integration_config,
         )
 
-        fingerprint = section_state_fingerprint(rec, section)
+        fingerprint = section_state_fingerprint(rec, section, config=integration_config)
         response = client.post(
             _post_url(rec, section),
             {"language": "default", "mode": "first", "fingerprint": fingerprint},

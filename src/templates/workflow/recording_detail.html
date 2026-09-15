@@ -201,12 +201,12 @@
         <a class="btn-sm" href="{% url 'summary-export' recording.pk %}?format=markdown{{ variant.export_query }}">Markdown</a>
         <a class="btn-sm" href="{% url 'summary-export' recording.pk %}?format=text{{ variant.export_query }}">Plain text</a>
       {% endif %}
-      {% include "workflow/_variant_action.html" %}
     </div>
   </div>
 
   {% url 'recording-detail' recording.pk as variant_tab_base %}
   {% include "workflow/_variant_tabs.html" with tab_base=variant_tab_base %}
+  {% include "workflow/_variant_action.html" with model_choices=actions.summary_model_choices summary_default_model=actions.summary_default_model %}
 
   {% if variant.unresolved_original %}
     <p class="empty-state">

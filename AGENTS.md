@@ -476,6 +476,28 @@ Non-negotiable principles:
 - Web GET requests must remain strictly read-only (no detection, no
   network, no subprocess, no writes); unresolved Original is a status,
   never resolved by side effects on GET.
+- Optional static `summarization.models` (exact nonblank strings, ≤32
+  entries of ≤255 chars, no stripping/canonicalization, duplicates/
+  bool/non-list/non-str/control rejected as sanitized `ConfigError`);
+  effective choices are always exact `llm.model` first, then configured
+  alternatives in order, de-duplicated by exact identity, omitted/empty
+  ⇒ `(llm.model,)`. The web Retry/Regenerate forms (recording and
+  section, shared `_variant_action.html`) render a `<select name="model">`
+  with a `<label>` reading `Retry:`/`Regenerate:` and the exact default
+  selected; initial Generate renders no selector and is default-only.
+  The executing POST is strictly parsed (exactly one value, exact
+  effective-allowlist membership) BEFORE lock/recovery/network/write —
+  one fixed friendly `invalid_model` 400 for missing/duplicate/blank/
+  oversized/unknown — and re-validated at the service boundary. A
+  selection affects ONLY that one operation: it is threaded through
+  source-language detection, map/reduce/final/repair/fallback, the
+  durable attempt (`model_id`/`cli_args_json`) and `Summary.model_id`
+  and the config fingerprint, with `config.llm.model` as the unchanged
+  default for every existing service/CLI/batch caller. The effective
+  allowlist/default are bound into the recording and section opaque
+  action fingerprints (config choice changes stale forms). `AppConfig`
+  is never mutated; GET performs no model discovery/network and no
+  migration or new CLI feature exists.
 
 ## Summarization oMLX request contract (reliability patch)
 

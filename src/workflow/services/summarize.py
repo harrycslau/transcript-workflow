@@ -286,8 +286,36 @@ normalize_source_language = languages.canonicalize_language  # noqa: F401 (re-ex
 canonical_source_for_output = languages.output_language_for_source  # noqa: F401 (re-export)
 
 
+def _resolve_selected_model(config: AppConfig, model: str | None) -> str:
+    """Resolve and validate the exact model for one summarization operation.
+
+    ``None`` selects the configured default ``config.llm.model`` (the
+    existing behavior for every service/CLI/batch caller). An explicit
+    override must be an exact member of the effective allowlist
+    (``available_summary_models`` — ``llm.model`` first, then configured
+    ``summarization.models``, exact identity) and is otherwise rejected
+    with a sanitized :class:`ConfigError`. An arbitrary submitted model
+    string can never reach a request. The configuration object is never
+    mutated.
+    """
+    from brainlib.config import MAX_SUMMARY_MODEL_CHARS, available_summary_models
+
+    if model is None or model == config.llm.model:
+        # The configured default is always permitted (including the
+        # documented blank-model error path handled by the caller).
+        return config.llm.model
+    if (
+        type(model) is not str
+        or not model.strip()
+        or len(model) > MAX_SUMMARY_MODEL_CHARS
+        or model not in available_summary_models(config)
+    ):
+        raise ConfigError("invalid summarization model selection")
+    return model
+
+
 def _detect_source_language(
-    config: AppConfig, transcript: Transcript, *, transport=None, llm_call=None
+    config: AppConfig, transcript: Transcript, *, transport=None, llm_call=None, model=None
 ) -> tuple[str | None, llm_service.LLMError | None]:
     """Bounded local source-language detection via the oMLX endpoint.
 
@@ -333,6 +361,7 @@ def _detect_source_language(
             validate=_validate,
             transport=transport,
             llm_call=llm_call,
+            model=model,
         )
         return result, None
     except llm_service.LLMInvalid:
@@ -767,6 +796,7 @@ def _call_llm(
     response_format: dict | None = None,
     transport=None,
     llm_call=None,
+    model: str | None = None,
 ) -> dict:
     """One logical summarization call with a finite request state machine.
 
@@ -810,6 +840,7 @@ def _call_llm(
             temperature=config.summarization.temperature,
             max_tokens=config.summarization.max_output_tokens,
             response_format=format_arg,
+            model=model,
         )
         size = llm_service.request_payload_characters(payload)
         if size > config.summarization.max_input_characters:
@@ -831,6 +862,7 @@ def _call_llm(
                 max_tokens=config.summarization.max_output_tokens,
                 response_format=format_arg,
                 transport=transport,
+                model=model,
             )
         return validate(_parse_model_json(content))
 
@@ -867,6 +899,7 @@ def _reduce_layer(
     source_language: str,
     transport=None,
     llm_call=None,
+    model: str | None = None,
     _split_allowed: bool = True,
 ) -> dict:
     """Deterministic hierarchical reduction over actual serialized sizes.
@@ -901,6 +934,7 @@ def _reduce_layer(
             response_format=build_final_response_format() if final else build_map_response_format(),
             transport=transport,
             llm_call=llm_call,
+            model=model,
         )
     except InputTooLarge:
         if len(intermediates) < 2 or not _split_allowed:
@@ -909,17 +943,17 @@ def _reduce_layer(
         left = _reduce_layer(
             intermediates[:mid], config, allowed, final=False,
             output_language=output_language, source_language=source_language,
-            transport=transport, llm_call=llm_call,
+            transport=transport, llm_call=llm_call, model=model,
         )
         right = _reduce_layer(
             intermediates[mid:], config, allowed, final=False,
             output_language=output_language, source_language=source_language,
-            transport=transport, llm_call=llm_call,
+            transport=transport, llm_call=llm_call, model=model,
         )
         return _reduce_layer(
             [left, right], config, allowed, final=final,
             output_language=output_language, source_language=source_language,
-            transport=transport, llm_call=llm_call,
+            transport=transport, llm_call=llm_call, model=model,
             _split_allowed=False,
         )
 
@@ -933,6 +967,7 @@ def _generate_summary(
     source_language: str,
     transport=None,
     llm_call=None,
+    model: str | None = None,
 ) -> tuple[dict, int]:
     """Run the map/reduce flow; returns (canonical payload, chunk_count)."""
     allowed = {tag.name_key: tag for tag in tags}
@@ -948,6 +983,7 @@ def _generate_summary(
             response_format=build_final_response_format(),
             transport=transport,
             llm_call=llm_call,
+            model=model,
         )
         return payload, 1
 
@@ -965,12 +1001,13 @@ def _generate_summary(
                 response_format=build_map_response_format(),
                 transport=transport,
                 llm_call=llm_call,
+                model=model,
             )
         )
     final = _reduce_layer(
         intermediates, config, allowed, final=True,
         output_language=output_language, source_language=source_language,
-        transport=transport, llm_call=llm_call,
+        transport=transport, llm_call=llm_call, model=model,
     )
     return final, total
 
@@ -980,15 +1017,18 @@ def _generate_summary(
 # ---------------------------------------------------------------------------
 
 
-def config_fingerprint(config: AppConfig, tags: list[Tag], output_language: str = "") -> str:
+def config_fingerprint(
+    config: AppConfig, tags: list[Tag], output_language: str = "", *, model: str | None = None
+) -> str:
     """Safe fingerprint of the summarization-relevant configuration.
 
-    Contains model/endpoint identity, prompt/parser versions, limits,
-    configured tag identities, and output_language — never secrets or
-    prompt text.
+    Contains the exact selected model identity (``model`` override or the
+    configured default), endpoint identity, prompt/parser versions,
+    limits, configured tag identities, and output_language — never secrets
+    or prompt text.
     """
     payload = {
-        "model": config.llm.model,
+        "model": config.llm.model if model is None else model,
         "base_url": config.llm.base_url,
         "prompt_version": PROMPT_IMPLEMENTATION_VERSION,
         "parser_version": PARSER_VERSION,
@@ -1438,6 +1478,7 @@ def summarize_one(
     generation_mode: str = GenerationMode.MANUAL,
     transport=None,
     llm_call=None,
+    model: str | None = None,
 ) -> dict:
     """Summarize one recording under the caller's pipeline lock.
 
@@ -1445,6 +1486,13 @@ def summarize_one(
     ``original``, ``en``, ``zh-Hant`` — nothing else may create a
     variant. Resolved to a concrete ``output_language`` before
     generation.
+
+    ``model`` is the exact selected model for this one operation; ``None``
+    keeps ``config.llm.model`` (every existing service/CLI/batch caller).
+    An explicit override is validated against the effective allowlist and
+    threaded into every request of the operation (source-language
+    detection included) plus attempt/Summary provenance and the config
+    fingerprint. The configuration object is never mutated.
     """
     if target_language not in languages.GENERATION_SELECTORS:
         raise ConfigError(
@@ -1459,7 +1507,8 @@ def summarize_one(
     transcript = recording.transcripts.filter(is_active=True).first()
     if transcript is None:
         return _skip(recording, "no_active_transcript")
-    if not config.llm.model.strip():
+    selected_model = _resolve_selected_model(config, model)
+    if not selected_model.strip():
         raise ConfigError("no summarization model configured (llm.model is blank)")
     section = transcript.sections.filter(ordinal=0, segmented_version__isnull=True).first()
     if section is None:
@@ -1472,7 +1521,7 @@ def summarize_one(
     if target_language == "original" and not output_language:
         detection = _detect_source_language_with_attempt(
             config, recording, transcript, section,
-            transport=transport, llm_call=llm_call,
+            transport=transport, llm_call=llm_call, model=selected_model,
         )
         if not detection.language:
             # Surface the durable attempt's actual stable category
@@ -1534,11 +1583,11 @@ def summarize_one(
         recording=recording,
         stage=AttemptStage.SUMMARIZATION,
         ordinal=next_ordinal(recording, AttemptStage.SUMMARIZATION),
-        model_id=config.llm.model,
+        model_id=selected_model,
         cli_args_json={
             "kind": "omlx_summarization",
             "base_url": config.llm.base_url,
-            "model": config.llm.model,
+            "model": selected_model,
             "prompt_version": PROMPT_IMPLEMENTATION_VERSION,
             "generation_mode": generation_mode,
             "regenerate": regenerate,
@@ -1585,12 +1634,14 @@ def summarize_one(
             plan, max_total_characters=s.max_total_characters, max_chunk_count=s.max_chunk_count
         )
         tags = list(Tag.objects.filter(is_configured=True).order_by("name"))
-        fingerprint = config_fingerprint(config, tags, output_language=output_language)
+        fingerprint = config_fingerprint(
+            config, tags, output_language=output_language, model=selected_model
+        )
         payload, chunk_count = _generate_summary(
             config, plan, tags,
             output_language=output_language,
             source_language=source_language,
-            transport=transport, llm_call=llm_call,
+            transport=transport, llm_call=llm_call, model=selected_model,
         )
     except InputTooLarge as exc:
         _finish_attempt_failure(
@@ -1618,7 +1669,7 @@ def summarize_one(
         payload=payload,
         output_language=output_language,
         is_default=is_default,
-        model_id=config.llm.model,
+        model_id=selected_model,
         base_url=config.llm.base_url,
         prompt_version=PROMPT_IMPLEMENTATION_VERSION,
         fingerprint=fingerprint,
@@ -1753,6 +1804,7 @@ def summarize_section_one(
     generation_mode: str = GenerationMode.MANUAL,
     transport=None,
     llm_call=None,
+    model: str | None = None,
 ) -> dict:
     """Generate/regenerate a summary for ONE topic Section (Step 6.2).
 
@@ -1799,7 +1851,8 @@ def summarize_section_one(
         )
     if not config.summarization.enabled:
         return _skip_section(section, "summarization_disabled")
-    if not config.llm.model.strip():
+    selected_model = _resolve_selected_model(config, model)
+    if not selected_model.strip():
         raise ConfigError("no summarization model configured (llm.model is blank)")
 
     # Shared canonical validation: topic section of the ACTIVE layout of
@@ -1824,7 +1877,7 @@ def summarize_section_one(
     if target_language == "original" and not output_language:
         detection = _detect_source_language_with_attempt(
             config, recording, transcript, section,
-            transport=transport, llm_call=llm_call,
+            transport=transport, llm_call=llm_call, model=selected_model,
         )
         if not detection.language:
             # Surface the durable attempt's actual stable category. No
@@ -1884,11 +1937,11 @@ def summarize_section_one(
         recording=recording,
         stage=AttemptStage.SUMMARIZATION,
         ordinal=next_ordinal(recording, AttemptStage.SUMMARIZATION),
-        model_id=config.llm.model,
+        model_id=selected_model,
         cli_args_json={
             "kind": "omlx_section_summarization",
             "base_url": config.llm.base_url,
-            "model": config.llm.model,
+            "model": selected_model,
             "prompt_version": PROMPT_IMPLEMENTATION_VERSION,
             "generation_mode": generation_mode,
             "regenerate": regenerate,
@@ -1944,12 +1997,14 @@ def summarize_section_one(
             plan, max_total_characters=s.max_total_characters, max_chunk_count=s.max_chunk_count
         )
         tags = list(Tag.objects.filter(is_configured=True).order_by("name"))
-        fingerprint = config_fingerprint(config, tags, output_language=output_language)
+        fingerprint = config_fingerprint(
+            config, tags, output_language=output_language, model=selected_model
+        )
         payload, chunk_count = _generate_summary(
             config, plan, tags,
             output_language=output_language,
             source_language=source_language,
-            transport=transport, llm_call=llm_call,
+            transport=transport, llm_call=llm_call, model=selected_model,
         )
     except InputTooLarge as exc:
         _finish_attempt_failure(
@@ -1990,7 +2045,7 @@ def summarize_section_one(
             payload=payload,
             output_language=output_language,
             is_default=is_default,
-            model_id=config.llm.model,
+            model_id=selected_model,
             base_url=config.llm.base_url,
             prompt_version=PROMPT_IMPLEMENTATION_VERSION,
             fingerprint=fingerprint,
@@ -2137,6 +2192,7 @@ def _detect_source_language_with_attempt(
     *,
     transport=None,
     llm_call=None,
+    model: str | None = None,
 ) -> SourceLanguageDetectionResult:
     """Detect source language, creating a durable attempt in every case.
 
@@ -2154,11 +2210,11 @@ def _detect_source_language_with_attempt(
         recording=recording,
         stage=AttemptStage.SUMMARIZATION,
         ordinal=next_ordinal(recording, AttemptStage.SUMMARIZATION),
-        model_id=config.llm.model,
+        model_id=config.llm.model if model is None else model,
         cli_args_json={
             "kind": "source_language_detection",
             "base_url": config.llm.base_url,
-            "model": config.llm.model,
+            "model": config.llm.model if model is None else model,
         },
         context_json={
             "language_detection": True,
@@ -2170,7 +2226,7 @@ def _detect_source_language_with_attempt(
 
     try:
         detected, error = _detect_source_language(
-            config, transcript, transport=transport, llm_call=llm_call,
+            config, transcript, transport=transport, llm_call=llm_call, model=model,
         )
     except InputTooLarge:
         attempt.outcome = AttemptOutcome.INPUT_TOO_LARGE
