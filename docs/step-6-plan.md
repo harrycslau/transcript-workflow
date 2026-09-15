@@ -234,8 +234,9 @@ No production schema, migration, or runtime implementation was part of 6.0.
 > `workflow/services/segmentation.py` (as planned); the migration is the
 > single new reversible `workflow.0011_...` (after 0010); the hard
 > defensive topic cap is `MAX_TOPIC_SECTIONS = 200` (no config key); the
-> save route is POST-only `/recordings/<id>/transcript/save/` with the
-> existing two-step confirmation; and the opaque stale fingerprint is
+> save route is POST-only `/recordings/<id>/transcript/save/` executing on
+> the first POST (a two-step confirmation was delivered at 6.1 and has
+> since been removed — see the direct-action note below); and the opaque stale fingerprint is
 > `segmentation_fingerprint` (SELECT-only, SHA-256 over the active
 > transcript identity + segment shape + active layout state).
 > **Chosen bounded-pagination/UX details**: editing lives only on the
@@ -246,6 +247,18 @@ No production schema, migration, or runtime implementation was part of 6.0.
 > anywhere else); historical views are read-only through
 > `?v=<transcript-id>&layout=<version-id>` (the layout parameter
 > selects an explicit `SegmentedVersion` of the selected transcript).
+> **Post-delivery change (direct action):** the two-step
+> confirmation save (first POST renders a confirmation page, second
+> POST with `confirmed=1` executes) that §8.1/§8.2/§8.6/§8.10/§8.13
+> below describe
+> is SUPERSEDED: the save now executes on the FIRST POST from the
+> editor (the `segmentation_confirm.html` template, the `confirmed`
+> payload field — now rejected as unknown — and the confirmation-page
+> CSS/JS are removed; the pipeline lock + stale-fingerprint safe no-op
+> contract is unchanged; the client shows a pending disabled/relabelled
+> Save control with an optimistic `aria-live` message and the refreshed
+> page is the authoritative result). See the durable "Web actions"
+> section of `AGENTS.md`.
 > **Post-delivery change (6.3):** at the 6.1 delivery a save scheduled
 > no search/embedding sync because no section content was indexed yet;
 > since the delivered 6.3 an actual REAL layout change schedules
@@ -263,8 +276,10 @@ index, does not touch the ordinal-0 defaults, and adds no CLI.
 
 Deliver crop/split editing **integrated into the existing active
 Transcript route/template** (no separate editor screen or route; historical
-transcript versions are read-only), plus a confirm-then-execute save that
-atomically creates one new immutable segmented version (crop range plus
+transcript versions are read-only), plus a save that executes directly on
+the FIRST POST (the originally planned confirm-then-execute step is
+superseded — see the direct-action note at the head of §8) and atomically
+creates one new immutable segmented version (crop range plus
 zero-or-more topic sections). The saved crop becomes the normal Transcript
 working presentation — hiding irrelevant lead-in/trailing lines by default
 with a "Show full transcript" toggle — and, when splits exist, the retained
@@ -296,7 +311,9 @@ segmented version ("Not segmented").
 - Historical transcript versions are read-only; only the active transcript
   can be trimmed/split.
 - Boundaries are segment-aligned. The editor stages changes; nothing is
-  written until a confirmed POST executes under the pipeline lock.
+  written until the executing POST runs under the pipeline lock (the
+  save's first POST since the direct-action refinement; the originally
+  planned confirmed second POST is superseded — see the §8 head note).
 - **Clear crop** restores the full range `[0, segment_count)` and creates no
   sections by itself; a crop-only state clears to zero topic sections.
   Sections exist only where the user placed splits.
@@ -436,9 +453,12 @@ topic sections; do not create a parallel topic-section model.
   the transcript with scissors divider controls and the active segmented
   version (or "Not segmented"). Historical transcript versions are
   read-only. Server-rendered initial values + hidden state fingerprint.
-- **Confirmation** — POST-only confirm step carrying the hidden
-  fingerprint and staged payload, following the existing confirmation
-  interstitial pattern; then the confirmed POST executes.
+- **Confirmation** *(HISTORICAL — superseded by the direct-action
+  refinement; see the §8 head note)* — the original plan was a POST-only
+  confirm step carrying the hidden fingerprint and staged payload,
+  following the then-existing confirmation interstitial pattern; the save
+  now executes on the FIRST POST and no confirmation step or template
+  exists.
 - **Execution** — under the pipeline lock + `recover_interruptions` +
   fingerprint comparison; stale/lock-busy safe outcomes (existing friendly
   409 for lock busy; "state changed" no-op for fingerprint mismatch).
@@ -499,8 +519,10 @@ topic sections; do not create a parallel topic-section model.
 - Migration tests: genuine `MigrationExecutor` forward and reverse on
   isolated databases (existing ordinal-0 rows stay layout `NULL` and
   satisfy the fixed-section shape).
-- Web tests: editor GET strictly read-only; POST-only + CSRF; confirmation;
-  lock busy → 409; stale fingerprint → safe no-op; history read-only; no
+- Web tests: editor GET strictly read-only; POST-only + CSRF; direct
+  first-POST execution (the originally planned separate confirmation step
+  is superseded — see the §8 head note); lock busy → 409; stale
+  fingerprint → safe no-op; history read-only; no
   search/embedding sync scheduled on save (6.1-delivery state; 6.3 made
   a real layout change schedule exactly one parent-recording sync, with
   no-op saves still scheduling none).
@@ -538,7 +560,9 @@ topic sections; do not create a parallel topic-section model.
 
 ### 8.13 Acceptance criteria
 
-- A confirmed save creates exactly one new immutable segmented version
+- An executed save (direct first POST; the originally planned confirmed
+  second POST is superseded — see the §8 head note) creates exactly one
+  new immutable segmented version
   (crop range + sorted splits + zero-or-more topic sections) atomically;
   the prior active revision is superseded and remains readable.
 - The editor is integrated into the active Transcript route/template; there
@@ -575,7 +599,10 @@ topic sections; do not create a parallel topic-section model.
 > working tree — see the project-status handoff and the durable Step 6.2
 > invariant bullet in `AGENTS.md`. Final implementation calls: section
 > summaries live in `workflow/services/summarize.py:summarize_section_one`
-> (explicit POST-only two-step action under the pipeline lock guarded by
+> (explicit POST-only direct action — executed on the first POST from the
+> section-detail form; the delivered two-step confirmation page was later
+> removed by the direct-action refinement, see §8's note and the durable
+> "Web actions" section of `AGENTS.md` — under the pipeline lock guarded by
 > the opaque `section_state_fingerprint`, exact canonical segment-range
 > input, and `section_layout_changed` persistence-time revalidation);
 > section tags reuse the exact recording tag semantics through the
@@ -600,8 +627,9 @@ topic sections; do not create a parallel topic-section model.
 > `view=` never affects rendering nor the view cookie — and
 > invalid/forged/duplicate/non-canonical tokens fall back to the plain
 > Library using the view cookie/default only; propagated verbatim
-> through section-detail tabs, the section summary confirmation/
-> execution redirects (including the Cancel link) and the section tag
+> through section-detail tabs, the section summary executing form and its
+> execution redirect (the confirmation page and its Cancel link were later
+> removed by the direct-action refinement) and the section tag
 > redirects); temporary split titles live in
 > `workflow/services/segmentation.py` (server-derived
 > `Segment N of YYYYMMDDHHMM` visibly prefilled in the editor from a
@@ -752,8 +780,12 @@ the defaults level.
 - Rescan is ONE global POST-only, CSRF-protected action under the pipeline
   lock: recovery then exactly one `run_ingest(config)` pass (not
   `run_pipeline`), existing containment/stability/hash identity, aggregate
-  sanitized counts only, no manual relink, GET read-only; a two-step
-  confirmation is the implementation recommendation.
+  sanitized counts only, no manual relink, GET read-only; like every other
+  current web workflow action it executes on the FIRST POST from its
+  origin-page form (the earlier two-step-confirmation recommendation is
+  superseded by the direct-action contract — see `AGENTS.md` "Web actions"
+  and the §8 note; a pending disabled/relabelled control with an optimistic
+  `aria-live` message replaces the removed confirmation stage).
 - Any actual source relocation/deletion and its automation is a separate
   explicit user-approval gate with revalidation and append-only audit.
 

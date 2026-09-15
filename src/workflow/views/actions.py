@@ -2,10 +2,21 @@
 
 Design (per the approved plan):
 
-- POST only, CSRF-protected, two-step confirmation: the first POST
-  (without ``confirmed=1``) renders a confirmation interstitial that
-  states what will run, how long it may take, and what is preserved on
-  failure. The second POST (``confirmed=1``) executes.
+- POST only, CSRF-protected. Every mutating action — the recording-level
+  actions (manual route, confirm routing, transcribe, summarize/
+  regenerate, retry), the section-summary actions and the segmented-
+  version save — executes on the FIRST POST from its page form; no
+  confirmation interstitial is rendered anywhere. Each form carries the
+  state fingerprint captured at render time, so a stale or duplicate
+  submission is still the safe no-op below.
+- Every recording-level executing POST must carry exactly ONE opaque
+  state fingerprint — the canonical lowercase 64-hex SHA-256 digest
+  ``web_actions.state_fingerprint`` renders into the form. Missing,
+  empty, duplicate, malformed, oversized or uppercase values are
+  rejected with one fixed sanitized friendly 400 BEFORE any execution:
+  no pipeline lock, recovery, network or write is ever touched against
+  an unvalidated fingerprint (a canonical but stale digest keeps the
+  existing under-lock safe no-op).
 - Execution acquires the global pipeline lock (busy → 409 page), runs
   recovery, re-derives eligibility, and compares the state fingerprint
   captured when the form was rendered; a mismatch is a safe no-op.
@@ -16,25 +27,22 @@ Design (per the approved plan):
 
 from __future__ import annotations
 
+import re
+
 from django.contrib import messages as dj_messages
 from django.http import Http404
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import get_object_or_404, redirect
 from django.views.decorators.http import require_POST
 
 from workflow.models import Recording
 from workflow.services.web_actions import (
-    SUMMARIZE_MODE_LABELS,
-    SUMMARIZE_MODE_NOTES,
     ActionOutcome,
     ActionRejected,
     execute_web_action,
-    state_fingerprint,
 )
 from workflow.services.pipeline_lock import PipelineBusy
 from workflow.views.helpers import conflict_response, get_config, rejection_response
 from workflow.forms import RouteForm
-
-_CONFIRMED = "1"
 
 # Server-owned allowlist of pages an action may return to. Never a raw
 # client URL: anything outside this set falls back to recording detail.
@@ -47,6 +55,41 @@ RETURN_VIEWS = {
 def _validated_return_view(request) -> str:
     raw = (request.POST.get("return_view") or "").strip()
     return raw if raw in RETURN_VIEWS else "detail"
+
+
+# Recording-level action fingerprint input contract: exactly ONE opaque
+# state fingerprint — the canonical lowercase 64-hex SHA-256 digest
+# produced by ``web_actions.state_fingerprint`` at render time. Uppercase
+# hex is rejected (the rendered form always carries the lowercase digest).
+_FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}\Z")
+
+# ONE fixed sanitized message (with a stable code) for every rejected
+# recording-level fingerprint; never echoes the submitted value.
+INVALID_FINGERPRINT_MESSAGE = (
+    "The state fingerprint is missing or invalid — reload the page."
+)
+
+
+def _validated_fingerprint(request) -> str | None:
+    """Parse the executing POST's recording-level state fingerprint.
+
+    Returns the validated opaque digest, or ``None`` when the submission
+    does not carry exactly one lowercase 64-hex ``fingerprint`` value
+    (missing, empty, duplicate, malformed, oversized or uppercase).
+    Strictly input parsing: no lock, recovery, network, DB read or write
+    — callers reject ``None`` with a friendly 400 BEFORE ``_execute``.
+    """
+    values = request.POST.getlist("fingerprint")
+    if len(values) != 1 or not _FINGERPRINT_RE.match(values[0]):
+        return None
+    return values[0]
+
+
+def _fingerprint_rejection(request):
+    """The single fixed friendly 400 for every rejected fingerprint."""
+    return rejection_response(
+        request, INVALID_FINGERPRINT_MESSAGE, "invalid_fingerprint"
+    )
 
 
 def _redirect_outcome(
@@ -90,34 +133,6 @@ def _recording_or_404(recording_id: str) -> Recording:
     return get_object_or_404(Recording, pk=recording_id)
 
 
-def _render_confirmation(
-    request,
-    recording: Recording,
-    *,
-    action: str,
-    title: str,
-    note: str,
-    extra_hidden: dict[str, str] | None = None,
-    form=None,
-):
-    fingerprint = (request.POST.get("fingerprint") or "").strip() or state_fingerprint(recording)
-    hidden = {"fingerprint": fingerprint}
-    if extra_hidden:
-        hidden.update(extra_hidden)
-    return render(
-        request,
-        "workflow/action_confirm.html",
-        {
-            "recording": recording,
-            "action": action,
-            "title": title,
-            "note": note,
-            "hidden": hidden,
-            "form": form,
-        },
-    )
-
-
 def _execute(request, recording: Recording, action: str, **kwargs):
     """Execute under the lock; map busy/rejected outcomes to responses.
 
@@ -137,39 +152,20 @@ def _execute(request, recording: Recording, action: str, **kwargs):
 @require_POST
 def action_route(request, recording_id):
     recording = _recording_or_404(recording_id)
+    fingerprint = _validated_fingerprint(request)
+    if fingerprint is None:
+        return _fingerprint_rejection(request)
     config = get_config()
     form = RouteForm(config=config, data=request.POST)
     if not form.is_valid():
         return rejection_response(request, "Choose a valid routing profile.", "invalid_profile")
     profile_name = form.cleaned_data["profile"]
-    if request.POST.get("confirmed") != _CONFIRMED:
-        profile = config.macwhisper.profile(profile_name)
-        manual_note = (
-            " Selects the manual-only profile '{name}' ({model}) and marks the recording "
-            "ready to transcribe.".format(name=profile_name, model=profile.model if profile else "")
-            if profile is not None and profile.manual_only
-            else ""
-        )
-        note = (
-            "Appends a manual routing decision and marks the recording ready to transcribe."
-            + manual_note
-            + " If the recording already has a transcript, it stays active until a "
-            "retranscription with the new profile succeeds. This may take a while."
-        )
-        return _render_confirmation(
-            request,
-            recording,
-            action="route",
-            title=f"Route manually with '{profile_name}'?",
-            note=note,
-            extra_hidden={"profile": profile_name},
-        )
     outcome = _execute(
         request,
         recording,
         "route",
         profile_name=profile_name,
-        expected_fingerprint=request.POST.get("fingerprint") or None,
+        expected_fingerprint=fingerprint,
     )
     return _redirect_outcome(request, recording, outcome)
 
@@ -177,22 +173,14 @@ def action_route(request, recording_id):
 @require_POST
 def action_confirm_routing(request, recording_id):
     recording = _recording_or_404(recording_id)
-    if request.POST.get("confirmed") != _CONFIRMED:
-        return _render_confirmation(
-            request,
-            recording,
-            action="confirm-routing",
-            title="Confirm the active routing?",
-            note=(
-                "Marks the active routing decision as human-verified. Nothing is "
-                "retranscribed and no summary changes."
-            ),
-        )
+    fingerprint = _validated_fingerprint(request)
+    if fingerprint is None:
+        return _fingerprint_rejection(request)
     outcome = _execute(
         request,
         recording,
         "confirm-routing",
-        expected_fingerprint=request.POST.get("fingerprint") or None,
+        expected_fingerprint=fingerprint,
     )
     return _redirect_outcome(request, recording, outcome)
 
@@ -200,23 +188,14 @@ def action_confirm_routing(request, recording_id):
 @require_POST
 def action_transcribe(request, recording_id):
     recording = _recording_or_404(recording_id)
-    if request.POST.get("confirmed") != _CONFIRMED:
-        return _render_confirmation(
-            request,
-            recording,
-            action="transcribe",
-            title="Start transcription now?",
-            note=(
-                "Runs MacWhisper on the verified audio source with the routed model. "
-                "This can take a long time for long recordings. If a transcript already "
-                "exists, it stays active until the retranscription succeeds."
-            ),
-        )
+    fingerprint = _validated_fingerprint(request)
+    if fingerprint is None:
+        return _fingerprint_rejection(request)
     outcome = _execute(
         request,
         recording,
         "transcribe",
-        expected_fingerprint=request.POST.get("fingerprint") or None,
+        expected_fingerprint=fingerprint,
     )
     return _redirect_outcome(request, recording, outcome)
 
@@ -224,6 +203,9 @@ def action_transcribe(request, recording_id):
 @require_POST
 def action_summarize(request, recording_id):
     recording = _recording_or_404(recording_id)
+    fingerprint = _validated_fingerprint(request)
+    if fingerprint is None:
+        return _fingerprint_rejection(request)
     language = (request.POST.get("language") or "default").strip()
     if language not in ("default", "original", "en", "zh-Hant"):
         return rejection_response(
@@ -246,9 +228,12 @@ def action_summarize(request, recording_id):
     # (detail | summary). Missing/invalid/forged values fall back to
     # recording detail; arbitrary client URLs are never accepted.
     return_view = _validated_return_view(request)
-    # Per-language mode: the confirmation interstitial must describe the
-    # action that will actually run for THIS generation selector, not
-    # the default.
+    # Cheap pre-lock eligibility probe: the mode is only used to reject
+    # an obviously ineligible recording (no active transcript / no
+    # derivable action) BEFORE taking the pipeline lock. Execution is
+    # authoritative: the service re-derives the mode under the lock and
+    # compares it against the submitted mode (a changed state is the
+    # fingerprint/mode-guarded safe no-op, never a surprise run).
     from workflow.services.summarize import resolve_output_language
     from workflow.services.web_actions import summarize_mode as _summarize_mode
 
@@ -271,37 +256,12 @@ def action_summarize(request, recording_id):
             "Summarization is not available for this recording in its current state.",
             "ineligible_state",
         )
-    if request.POST.get("confirmed") != _CONFIRMED:
-        label = SUMMARIZE_MODE_LABELS.get(mode, "Summarize")
-        note = SUMMARIZE_MODE_NOTES.get(mode, SUMMARIZE_MODE_NOTES["first"])
-        if language == "original" and not output_language:
-            # Detection is only needed when the source is unknown.
-            note += (
-                " Target language: Original. If the source language is not known yet, "
-                "it will be detected locally first (one bounded request, retried at "
-                "most once on invalid output)."
-            )
-        elif language != "default":
-            note += f" Target language: {language}."
-        return _render_confirmation(
-            request,
-            recording,
-            action="summarize",
-            title=f"{label} — are you sure?",
-            note=note,
-            extra_hidden={
-                "mode": mode,
-                "language": language,
-                "return_view": return_view,
-                **({"return_language": return_language} if return_language else {}),
-            },
-        )
     outcome = _execute(
         request,
         recording,
         "summarize",
         requested_mode=requested_mode,
-        expected_fingerprint=request.POST.get("fingerprint") or None,
+        expected_fingerprint=fingerprint,
         language=language,
     )
     return _redirect_outcome(
@@ -313,22 +273,14 @@ def action_summarize(request, recording_id):
 @require_POST
 def action_retry(request, recording_id):
     recording = _recording_or_404(recording_id)
-    if request.POST.get("confirmed") != _CONFIRMED:
-        return _render_confirmation(
-            request,
-            recording,
-            action="retry",
-            title="Retry the failed stage?",
-            note=(
-                "Re-runs the failed pipeline stage (routing, transcription or summarization). "
-                "This may take a while and contacts the local services involved."
-            ),
-        )
+    fingerprint = _validated_fingerprint(request)
+    if fingerprint is None:
+        return _fingerprint_rejection(request)
     outcome = _execute(
         request,
         recording,
         "retry",
-        expected_fingerprint=request.POST.get("fingerprint") or None,
+        expected_fingerprint=fingerprint,
     )
     return _redirect_outcome(request, recording, outcome)
 
@@ -378,37 +330,46 @@ def _redirect_section_outcome(
 
 @require_POST
 def action_section_summarize(request, recording_id, section_id):
-    """Step 6.2 POST-only two-step section summary action.
+    """Step 6.2 POST-only section summary action (direct execution).
 
-    First POST (without ``confirmed=1``): validates the generation
-    selector/read selector/mode and renders the confirmation — NO lock,
-    NO network, NO write. Confirmed POST: schema preflight, global
-    pipeline lock, interruption recovery, live-section re-validation,
-    opaque section-fingerprint comparison (stale => safe no-op), mode
-    re-derivation, then ``summarize_section_one`` (caller-held lock
+    The section detail form's FIRST (and only) POST validates and
+    executes: the cheap pre-lock guards (generation selector, live
+    active-topic-section ownership/canonical-layout validation, and the
+    strict fingerprint/mode input contract) reject invalid submissions
+    with a friendly 400 BEFORE any pipeline lock, recovery, network or
+    write. Execution then runs schema preflight, the global pipeline
+    lock, interruption recovery, live-section re-validation, the opaque
+    section-fingerprint comparison (stale => safe no-op redirect), mode
+    re-derivation, and ``summarize_section_one`` (caller-held lock
     contract). Busy => friendly 409; failures are stable sanitized
     messages; the redirect always targets the section detail page with
-    the validated read selector. GET is a 405 via ``require_POST``.
+    the validated read selector and the validated library-return token.
+    GET is a 405 via ``require_POST``.
     """
-    from workflow.models import Section
-
     config = get_config()
     recording = _recording_or_404(recording_id)
     section = _section_or_404(recording, section_id)
+    from workflow.services.segmentation import SegmentationError, require_active_topic_section
+    from workflow.services.variant_view import build_variant_view
+    from workflow.services.web_actions import (
+        SECTION_ACTION_MODES,
+        canonical_section_fingerprint,
+        execute_section_summarize,
+        section_summarize_friendly_message,
+    )
+
     language = (request.POST.get("language") or "default").strip()
     if language not in ("default", "original", "en", "zh-Hant"):
-        from workflow.services.web_actions import section_summarize_friendly_message
-
         return rejection_response(
             request,
             section_summarize_friendly_message("unsupported_language", language=language),
             "unsupported_language",
         )
     # Validated Library-return token (Step 6.2a): carried through the
-    # confirmation and execution redirect so the section breadcrumb keeps
-    # the originating normal-Library page/state. A forged/invalid token is
-    # dropped silently (the redirect then returns to the plain section
-    # detail page).
+    # execution redirect so the section breadcrumb keeps the originating
+    # normal-Library page/state. A forged/invalid token is dropped
+    # silently (the redirect then returns to the plain section detail
+    # page).
     from workflow.services import library_return
 
     lib_return = ""
@@ -419,140 +380,69 @@ def action_section_summarize(request, recording_id, section_id):
     # Optional READ selector to return to after the action; validated
     # against the read-only section view-model (unknown falls back).
     return_language = (request.POST.get("return_language") or "").strip() or None
-    if return_language is not None:
-        from workflow.services.variant_view import build_variant_view
-
-        if build_variant_view(recording, return_language, section=section).error:
-            return_language = None
-    # Live active-topic-section guard BEFORE any lock/write (read-only
-    # canonical validation; historical sections are never actionable).
-    # The guard applies to the FIRST POST only: the confirmation page is
-    # reachable only for a LIVE actionable section. On the CONFIRMED
-    # POST the live-section re-validation happens UNDER the pipeline lock
-    # inside ``execute_section_summarize`` — a section that became
-    # historical after the confirmation is a safe stale no-op (302
-    # redirect with a warning), never a hard rejection.
-    from workflow.services.segmentation import SegmentationError, require_active_topic_section
-    from workflow.services.variant_view import build_variant_view
-    from workflow.services.web_actions import (
-        section_state_fingerprint,
-        section_summarize_friendly_message,
-    )
-
-    is_confirmed = request.POST.get("confirmed") == _CONFIRMED
-    if not is_confirmed:
-        try:
-            require_active_topic_section(section)
-        except SegmentationError as exc:
-            return rejection_response(
-                request, section_summarize_friendly_message(exc.code), exc.code
-            )
-    # Strict confirmed-POST input contract (BEFORE any pipeline lock,
+    if return_language is not None and build_variant_view(
+        recording, return_language, section=section
+    ).error:
+        return_language = None
+    # Live active-topic-section guard BEFORE any lock/work (read-only
+    # canonical validation; historical sections are never actionable —
+    # a friendly 400, never a hard rejection after a lock was taken).
+    # Execution still re-validates the LIVE section UNDER the pipeline
+    # lock inside ``execute_section_summarize``: a section that became
+    # historical between this guard and the lock is a safe stale no-op
+    # (302 redirect with a warning), never a write to read-only history.
+    try:
+        require_active_topic_section(section)
+    except SegmentationError as exc:
+        return rejection_response(
+            request, section_summarize_friendly_message(exc.code), exc.code
+        )
+    # Strict executing-POST input contract (BEFORE any pipeline lock,
     # recovery, network or write): exactly ONE canonical 64-hex opaque
     # fingerprint (upper or lower case, normalized to lowercase) and
     # exactly ONE valid section action mode. Missing/duplicate/malformed
     # values are a friendly rejection — never a run against unvalidated
     # state, never a 500.
-    from workflow.services.web_actions import (
-        SECTION_ACTION_MODES,
-        canonical_section_fingerprint,
-    )
-
-    requested_mode = None
-    fingerprint = None
-    if is_confirmed:
-        fingerprint_values = request.POST.getlist("fingerprint")
-        if len(fingerprint_values) != 1:
-            return rejection_response(
-                request,
-                "The state fingerprint is missing or invalid — reload the page.",
-                "invalid_fingerprint",
-            )
-        fingerprint = canonical_section_fingerprint(fingerprint_values[0])
-        if fingerprint is None:
-            return rejection_response(
-                request,
-                "The state fingerprint is missing or invalid — reload the page.",
-                "invalid_fingerprint",
-            )
-        mode_values = request.POST.getlist("mode")
-        if len(mode_values) != 1:
-            return rejection_response(
-                request,
-                "The submitted action mode is missing or invalid — reload the page.",
-                "invalid_mode",
-            )
-        requested_mode = (mode_values[0] or "").strip().lower()
-        if requested_mode not in SECTION_ACTION_MODES:
-            return rejection_response(
-                request,
-                "The submitted action mode is missing or invalid — reload the page.",
-                "invalid_mode",
-            )
+    fingerprint_values = request.POST.getlist("fingerprint")
+    if len(fingerprint_values) != 1:
+        return rejection_response(
+            request,
+            "The state fingerprint is missing or invalid — reload the page.",
+            "invalid_fingerprint",
+        )
+    fingerprint = canonical_section_fingerprint(fingerprint_values[0])
+    if fingerprint is None:
+        return rejection_response(
+            request,
+            "The state fingerprint is missing or invalid — reload the page.",
+            "invalid_fingerprint",
+        )
+    mode_values = request.POST.getlist("mode")
+    if len(mode_values) != 1:
+        return rejection_response(
+            request,
+            "The submitted action mode is missing or invalid — reload the page.",
+            "invalid_mode",
+        )
+    requested_mode = (mode_values[0] or "").strip().lower()
+    if requested_mode not in SECTION_ACTION_MODES:
+        return rejection_response(
+            request,
+            "The submitted action mode is missing or invalid — reload the page.",
+            "invalid_mode",
+        )
+    # Cheap pre-lock eligibility probe: the section was just verified
+    # LIVE, so a missing mode is a genuine ineligible state and is
+    # rejected here. Execution is authoritative: the service re-derives
+    # the mode under the lock and compares it against the submitted mode
+    # (a changed state is the fingerprint/mode-guarded safe no-op).
     variant = build_variant_view(recording, language, section=section)
-    mode = variant.action_mode
-    # On the FIRST (unconfirmed) POST the section is guaranteed live, so a
-    # missing mode is a genuine ineligible state and is rejected here. On
-    # the CONFIRMED POST the section may have become historical AFTER the
-    # confirmation was rendered (the fresh read above already reflects
-    # it); the service under the lock re-validates the LIVE section and
-    # re-derives the mode, so a stale section is a safe no-op there —
-    # never a hard rejection.
-    if not is_confirmed and mode is None:
+    if variant.action_mode is None:
         return rejection_response(
             request,
             "Summarization is not available for this section in its current state.",
             "ineligible_state",
         )
-    if request.POST.get("confirmed") != _CONFIRMED:
-        try:
-            fingerprint = section_state_fingerprint(recording, section)
-        except SegmentationError as exc:
-            return rejection_response(
-                request, section_summarize_friendly_message(exc.code), exc.code
-            )
-        label = SUMMARIZE_MODE_LABELS.get(mode, "Summarize")
-        note = SUMMARIZE_MODE_NOTES.get(mode, SUMMARIZE_MODE_NOTES["first"])
-        if language == "original" and not variant.resolved:
-            note += (
-                " Target language: Original. If the source language is not known yet, "
-                "it will be detected locally first (one bounded request, retried at "
-                "most once on invalid output)."
-            )
-        elif language != "default":
-            note += f" Target language: {language}."
-        hidden = {
-            "fingerprint": fingerprint,
-            "mode": mode,
-            "language": language,
-            "section_id": str(section.pk),
-        }
-        if return_language:
-            hidden["return_language"] = return_language
-        if lib_return:
-            hidden["lib_return"] = lib_return
-        from django.urls import reverse
-
-        cancel_url = reverse("section-detail", args=[recording.pk, section.pk])
-        if lib_return:
-            # Cancel returns to the section detail page WITH the already
-            # validated library-return token (never a raw/unvalidated
-            # value) so the breadcrumb keeps the originating page/state.
-            cancel_url = f"{cancel_url}?lib_return={lib_return}"
-        return render(
-            request,
-            "workflow/action_confirm.html",
-            {
-                "recording": recording,
-                "section": section,
-                "title": f"{label} this section — are you sure?",
-                "note": note,
-                "hidden": hidden,
-                "cancel_url": cancel_url,
-            },
-        )
-    from workflow.services.web_actions import execute_section_summarize
-
     try:
         outcome = execute_section_summarize(
             config,

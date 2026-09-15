@@ -406,12 +406,11 @@ def _action_availability(config, recording) -> dict:
     decision = recording.routing_decisions.filter(is_active=True).first()
     confirm_routing_available = decision is not None and not decision.routing_verified
     # The compact Routing trigger appears only where OPTIONAL route UI
-    # belongs: manual profile selection is hidden when it is already the
-    # prominent recommended action (needs-review without a confirmable
-    # decision) so the same form is never duplicated.
+    # belongs: on a needs-review recording the manual profile form is
+    # ALWAYS the immediate recommended action, so the collapsed
+    # disclosure never shows there (the same form is never duplicated).
     show_routing = route_eligible(recording) and (
         recording.processing_status != ProcessingStatus.NEEDS_REVIEW
-        or confirm_routing_available
     )
     return {
         "fingerprint": state_fingerprint(recording),
@@ -477,7 +476,7 @@ def _status_panel(recording: Recording, routing_decision) -> dict:
         return {
             "level": "warn",
             "label": "Routing needs review",
-            "detail": "Confirm the routing profile or route manually before transcription.",
+            "detail": "Route manually with the correct profile before transcription.",
         }
     if recording.processing_status == ProcessingStatus.READY_TO_TRANSCRIBE:
         return {

@@ -9,7 +9,7 @@ Proves the approved contract:
   the Library falls back to its plain state;
 - the token is generated once per normal Library render, added to the
   recording and section links, propagated verbatim through
-  section-detail tabs, section summary confirmation/execution redirects
+  section-detail tabs, the section summary direct-execution redirect
   and section tag redirects, and decoded by the recording-detail
   breadcrumb so the originating page/state is preserved;
 - direct section links (no token) still work; search results never
@@ -450,21 +450,16 @@ class TestWebToken:
         assert 'href="/recordings/"' in detail
         assert "lib_return=" not in detail
 
-    def test_section_summary_confirmation_and_redirect_preserve_token(self, client, monkeypatch):
+    def test_section_summary_direct_execution_redirect_preserves_token(self, client, monkeypatch):
+        """Phase 2: the section summary executes on the FIRST POST from
+        the section detail form; the execution redirect preserves the
+        validated library-return token so the breadcrumb keeps the
+        originating Library page/state."""
         rec, transcript, sections = _make_split_recording("web-summary")
         content = client.get("/recordings/").content.decode()
         token = self._section_link(content, rec, sections[0])
         fingerprint = section_state_fingerprint(rec, sections[0])
 
-        # First POST: the confirmation carries the token as a hidden field.
-        response = client.post(
-            f"/recordings/{rec.pk}/sections/{sections[0].pk}/summarize/",
-            {"language": "default", "mode": "first", "lib_return": token},
-        )
-        assert response.status_code == 200
-        assert f'name="lib_return" value="{token}"' in response.content.decode()
-
-        # Confirmed POST (mocked summarize): the redirect preserves it.
         def fake(config, section, regenerate=False, **kwargs):
             return {"recording_id": rec.pk, "section_id": section.pk,
                     "result": "summarized", "output_language": "en"}
@@ -472,7 +467,7 @@ class TestWebToken:
         monkeypatch.setattr("workflow.services.summarize.summarize_section_one", fake)
         response = client.post(
             f"/recordings/{rec.pk}/sections/{sections[0].pk}/summarize/",
-            {"confirmed": "1", "language": "default", "mode": "first",
+            {"language": "default", "mode": "first",
              "fingerprint": fingerprint, "lib_return": token},
         )
         assert response.status_code == 302
@@ -480,48 +475,27 @@ class TestWebToken:
             f"/recordings/{rec.pk}/sections/{sections[0].pk}/?lib_return={token}"
         )
 
-    def test_section_summary_confirmation_cancel_keeps_validated_token(self, client):
-        """The confirmation's Back and Cancel links both return to the
-        section detail page WITH the already validated token — never a
-        raw/unvalidated value — so the breadcrumb keeps the originating
-        page/state."""
+    def test_section_detail_form_carries_validated_token(self, client):
+        """The section detail form embeds the token as a hidden field so
+        the ONE executing POST submits it; a forged token on the GET is
+        never echoed into the form."""
         rec, transcript, sections = _make_split_recording("web-sum-cancel")
         content = client.get("/recordings/").content.decode()
         token = self._section_link(content, rec, sections[0])
-        response = client.post(
-            f"/recordings/{rec.pk}/sections/{sections[0].pk}/summarize/",
-            {"language": "default", "mode": "first", "lib_return": token},
-        )
-        assert response.status_code == 200
-        content = response.content.decode()
-        assert f'href="/recordings/{rec.pk}/sections/{sections[0].pk}/?lib_return={token}"' in content
-        # The ``Back to section`` anchor (not the parent recording) keeps
-        # the validated token too (and stays clickable while the
-        # synchronous request runs via the narrow ``data-confirm-exempt``
-        # marker).
-        assert (
-            f'<a href="/recordings/{rec.pk}/sections/{sections[0].pk}/?lib_return={token}" '
-            "data-confirm-exempt>Back to section</a>"
-        ) in content
-        assert f'href="/recordings/{rec.pk}/"' not in content
+        detail = client.get(
+            f"/recordings/{rec.pk}/sections/{sections[0].pk}/?lib_return={token}"
+        ).content.decode()
+        assert f'name="lib_return" value="{token}"' in detail
+        # Forged token: the form renders without any lib_return field.
+        forged = client.get(
+            f"/recordings/{rec.pk}/sections/{sections[0].pk}/?lib_return=forged"
+        ).content.decode()
+        assert 'name="lib_return"' not in forged
 
-    def test_section_summary_confirmation_cancel_drops_invalid_token(self, client):
-        """An invalid token is never echoed into the Back/Cancel URLs — it
-        falls back to the plain section-detail link."""
+    def test_section_summary_action_drops_invalid_token(self, client, monkeypatch):
+        """An invalid token is never echoed into the execution redirect —
+        it falls back to the plain section-detail location."""
         rec, transcript, sections = _make_split_recording("web-sum-cancel-bad")
-        response = client.post(
-            f"/recordings/{rec.pk}/sections/{sections[0].pk}/summarize/",
-            {"language": "default", "mode": "first", "lib_return": "forged"},
-        )
-        assert response.status_code == 200
-        content = response.content.decode()
-        assert f'href="/recordings/{rec.pk}/sections/{sections[0].pk}/"' in content
-        assert "lib_return=" not in content
-        assert "Back to recording" not in content
-        assert f'href="/recordings/{rec.pk}/"' not in content
-
-    def test_section_summary_invalid_token_is_dropped(self, client, monkeypatch):
-        rec, transcript, sections = _make_split_recording("web-sum-bad")
         fingerprint = section_state_fingerprint(rec, sections[0])
 
         def fake(config, section, regenerate=False, **kwargs):
@@ -531,7 +505,7 @@ class TestWebToken:
         monkeypatch.setattr("workflow.services.summarize.summarize_section_one", fake)
         response = client.post(
             f"/recordings/{rec.pk}/sections/{sections[0].pk}/summarize/",
-            {"confirmed": "1", "language": "default", "mode": "first",
+            {"language": "default", "mode": "first",
              "fingerprint": fingerprint, "lib_return": "forged"},
         )
         assert response.status_code == 302

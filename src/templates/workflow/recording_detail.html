@@ -31,7 +31,7 @@
           transcript and history remain preserved until then. Choosing the current
           profile only confirms the existing routing and does not retranscribe.
         </p>
-        <form method="post" action="{% url 'action-route' recording.pk %}" class="route-form">
+        <form method="post" action="{% url 'action-route' recording.pk %}" class="route-form" data-action-form="route">
           {% csrf_token %}
           <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
           <label for="id_route_profile_routing">Route manually</label>
@@ -42,6 +42,7 @@
             {% endfor %}
           </select>
           <button type="submit">Route</button>
+          <span class="action-live" data-action-live aria-live="polite"></span>
         </form>
       </div>
     </details>
@@ -62,21 +63,23 @@
   <div class="action-buttons">
     {% if recording.processing_status == 'failed' or recording.retranscription_failed %}
       {% if actions.retry_available %}
-        <form method="post" action="{% url 'action-retry' recording.pk %}">
+        <form method="post" action="{% url 'action-retry' recording.pk %}" data-action-form="retry">
           {% csrf_token %}
           <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
           <button type="submit" class="confirm-button">Retry failed stage</button>
+          <span class="action-live" data-action-live aria-live="polite"></span>
         </form>
       {% endif %}
     {% elif recording.processing_status == 'needs_review' %}
-      {% if actions.confirm_routing_available %}
-        <form method="post" action="{% url 'action-confirm-routing' recording.pk %}">
-          {% csrf_token %}
-          <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
-          <button type="submit" class="confirm-button">Confirm routing</button>
-        </form>
-      {% elif actions.route_eligible %}
-        <form method="post" action="{% url 'action-route' recording.pk %}">
+      {% comment %}Needs review: the immediate manual route form is THE
+      recommended action. A separate audit-only "Confirm routing" action
+      is deliberately not offered here — choosing the current profile in
+      this same form already confirms the routing (see the routing
+      note); one-click Confirm routing belongs to the transcribed
+      unverified state below.{% endcomment %}
+      {% if actions.route_eligible %}
+        <p class="action-note muted">Choose the profile to use for transcription. If an existing route changes, the current transcript stays active until you run and complete retranscription.</p>
+        <form method="post" action="{% url 'action-route' recording.pk %}" data-action-form="route">
           {% csrf_token %}
           <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
           <label for="id_route_profile">Route manually</label>
@@ -87,22 +90,26 @@
             {% endfor %}
           </select>
           <button type="submit" class="confirm-button">Route</button>
+          <span class="action-live" data-action-live aria-live="polite"></span>
         </form>
       {% endif %}
     {% elif recording.processing_status == 'ready_to_transcribe' %}
       {% if actions.transcribe_available %}
-        <form method="post" action="{% url 'action-transcribe' recording.pk %}">
+        <p class="action-note muted">Transcription runs locally and can take a while for long recordings; the page reloads when it finishes. Any existing transcript stays active until a new one succeeds.</p>
+        <form method="post" action="{% url 'action-transcribe' recording.pk %}" data-action-form="transcribe">
           {% csrf_token %}
           <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
           <button type="submit" class="confirm-button">Transcribe now</button>
+          <span class="action-live" data-action-live aria-live="polite"></span>
         </form>
       {% endif %}
     {% elif recording.processing_status == 'transcribed' and routing_decision and not routing_decision.routing_verified %}
       {% if actions.confirm_routing_available %}
-        <form method="post" action="{% url 'action-confirm-routing' recording.pk %}">
+        <form method="post" action="{% url 'action-confirm-routing' recording.pk %}" data-action-form="confirm-routing">
           {% csrf_token %}
           <input type="hidden" name="fingerprint" value="{{ actions.fingerprint }}">
           <button type="submit" class="confirm-button">Confirm routing</button>
+          <span class="action-live" data-action-live aria-live="polite"></span>
         </form>
       {% endif %}
     {% endif %}

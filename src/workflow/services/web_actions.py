@@ -32,6 +32,7 @@ from workflow.models import (
     ProcessingAttempt,
     ProcessingStatus,
     Recording,
+    RoutingDecision,
     Section,
     SummaryState,
     Transcript,
@@ -44,28 +45,6 @@ ROUTE_ELIGIBLE_STATUSES = (
     ProcessingStatus.READY_TO_TRANSCRIBE,
     ProcessingStatus.TRANSCRIBED,
 )
-
-# Wording shown on the confirmation interstitial per summarize mode.
-SUMMARIZE_MODE_LABELS = {
-    "first": "Summarize",
-    "retry_summary": "Retry summary",
-    "regenerate": "Regenerate summary",
-}
-
-SUMMARIZE_MODE_NOTES = {
-    "first": (
-        "Creates the first summary for this recording. This contacts the "
-        "local oMLX endpoint and may take a while for long recordings."
-    ),
-    "retry_summary": (
-        "The previous summarization attempt failed and no summary exists. "
-        "This retries it against the local oMLX endpoint and may take a while."
-    ),
-    "regenerate": (
-        "Creates a NEW summary version. The existing summary stays active "
-        "unless the replacement succeeds completely. This may take a while."
-    ),
-}
 
 # Step 6.2 section-action input contract (shared by the web view and the
 # service boundary):
@@ -132,22 +111,35 @@ class ActionOutcome:
 
 
 def state_fingerprint(recording: Recording) -> str:
-    """Stable fingerprint of the state an action form was rendered from.
+    """OPAQUE stable fingerprint of the state an action form was rendered from.
 
-    Includes the newest attempt id so that ANY completed processing
-    attempt (success or failure) invalidates an in-flight form — a
-    duplicate submission can never re-run the action against the state
-    it was confirmed from.
+    Returns the canonical lowercase 64-hex SHA-256 digest over the exact
+    deterministic JSON bytes of the bound state (sort-keys JSON, UTF-8):
+    ids, statuses, languages and the raw JSON never appear in the value —
+    only this opaque digest is ever placed in a hidden form value.
+
+    The digested state includes the newest attempt id so that ANY
+    completed processing attempt (success or failure) invalidates an
+    in-flight form — a duplicate submission can never re-run the action
+    against the state it was submitted from.
 
     Also includes every stable local input that determines language
     resolution (active transcript identity, canonical source language
     and its verifier, the resolved default and Original output
     languages with an explicit unresolved marker): a source-language
     correction does not necessarily create a ProcessingAttempt, so a
-    rendered summarize confirmation would otherwise survive a change
+    rendered summarize form would otherwise survive a change
     that silently redirects `original`/`default` to a different
-    language. Strictly read-only: database SELECTs only — no LLM
-    detection, network, subprocess, or writes.
+    language. It also binds the ACTIVE routing decision's stable
+    identity/behavior fields (decision pk + ordinal, profile_name,
+    model_id, language_arg, routing_verified, with an explicit
+    no-active marker): a routing update can append or verify a
+    decision WITHOUT changing the recording status or creating an
+    attempt, so a rendered route/confirm/transcribe form must still
+    go stale. The bounded projection never includes raw evidence,
+    confidence, reason text, verifier or timestamps. Strictly
+    read-only: database SELECTs only — no LLM detection, network,
+    subprocess, or writes.
     """
     summary = recording.current_summary()
     last_attempt_id = (
@@ -156,6 +148,35 @@ def state_fingerprint(recording: Recording) -> str:
         .values_list("pk", flat=True)
         .first()
     )
+    # Active routing decision: ONE bounded single-row stable-field
+    # projection (the partial unique constraint guarantees at most one
+    # active decision; no related rows are materialized).
+    decision_row = (
+        RoutingDecision.objects.filter(recording=recording, is_active=True)
+        .values_list(
+            "pk",
+            "ordinal",
+            "profile_name",
+            "model_id",
+            "language_arg",
+            "routing_verified",
+        )
+        .first()
+    )
+    if decision_row is None:
+        # Explicit no-active marker — distinct from any real decision.
+        routing_state: dict[str, Any] = {"active": False}
+    else:
+        pk, ordinal, profile_name, model_id, language_arg, verified = decision_row
+        routing_state = {
+            "active": True,
+            "decision_id": pk,
+            "ordinal": ordinal,
+            "profile_name": profile_name,
+            "model_id": model_id,
+            "language_arg": language_arg,
+            "routing_verified": verified,
+        }
     # Include available variant languages for staleness detection
     from workflow.models import SummaryVariantState
     from workflow.services.langresolve import (
@@ -187,19 +208,25 @@ def state_fingerprint(recording: Recording) -> str:
             "default_output": resolve_default_language(active_transcript),
             "original_output": resolve_output_language(active_transcript, "original"),
         }
-    return json.dumps(
-        {
-            "status": recording.processing_status,
-            "summary_status": recording.summary_status,
-            "retranscription_failed": recording.retranscription_failed,
-            "resummarization_failed": recording.resummarization_failed,
-            "summary_ordinal": summary.ordinal if summary is not None else None,
-            "last_attempt_id": last_attempt_id,
-            "variant_languages": variant_languages,
-            "language_state": language_state,
-        },
-        sort_keys=True,
-    )
+    # The hashed payload is the EXACT historical deterministic JSON
+    # serialization (sort_keys, default separators, UTF-8); the returned
+    # value is its opaque lowercase hex SHA-256 digest.
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "status": recording.processing_status,
+                "summary_status": recording.summary_status,
+                "retranscription_failed": recording.retranscription_failed,
+                "resummarization_failed": recording.resummarization_failed,
+                "summary_ordinal": summary.ordinal if summary is not None else None,
+                "last_attempt_id": last_attempt_id,
+                "variant_languages": variant_languages,
+                "language_state": language_state,
+                "routing_state": routing_state,
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def summarize_mode(recording: Recording, *, output_language: str = "") -> str | None:
@@ -286,12 +313,18 @@ def execute_web_action(
     recording: Recording,
     action: str,
     *,
+    expected_fingerprint: str,
     profile_name: str | None = None,
     requested_mode: str | None = None,
-    expected_fingerprint: str | None = None,
     language: str = "default",
 ) -> ActionOutcome:
     """Run one mutating web action under the global pipeline lock.
+
+    ``expected_fingerprint`` is REQUIRED: the view parser has already
+    accepted exactly one opaque lowercase 64-hex ``state_fingerprint``
+    digest BEFORE this call (missing/malformed submissions are a
+    friendly 400 before any lock). A canonical but STALE digest keeps
+    the under-lock safe no-op below.
 
     Raises :class:`PipelineBusy` when another pipeline process holds the
     lock (the view renders 409) and :class:`ActionRejected` when the
@@ -303,7 +336,7 @@ def execute_web_action(
 
         recover_interruptions(config)
         recording = Recording.objects.get(pk=recording.pk)
-        if expected_fingerprint is not None and state_fingerprint(recording) != expected_fingerprint:
+        if state_fingerprint(recording) != expected_fingerprint:
             return ActionOutcome(
                 ok=True,
                 result="state_changed",
@@ -446,7 +479,7 @@ def _action_summarize(
             "ineligible_state",
             "No active transcript for this recording.",
         )
-    # Resolve exactly as the confirmation page did. An unresolved
+    # Resolve exactly as the view's pre-lock probe did. An unresolved
     # Original (unknown source language) is a valid generation request:
     # execution performs bounded detection first.
     output_language = resolve_output_language(transcript, language)
@@ -555,7 +588,7 @@ def section_state_fingerprint(recording: Recording, section) -> str:
     - the transcript source-language resolution inputs (source language,
       verifier, resolved default and Original output languages with an
       explicit unresolved marker) — a source-language correction
-      invalidates rendered confirmations even when no attempt exists;
+      invalidates rendered action forms even when no attempt exists;
     - the section-scoped summary attempts via a SUFFICIENT append-only
       contract — the attempt COUNT (bounded aggregate) plus the LATEST
       mutable attempt's (pk, ordinal, outcome, error_code, finished_at).
@@ -732,8 +765,8 @@ def execute_section_summarize(
        page was rendered — a stale or duplicate submission is a safe
        no-op with zero DML;
     5. re-derives the per-variant action mode and compares it to the
-       submitted mode — a state change since the confirmation is a safe
-       no-op;
+       submitted mode — a state change since the form was rendered is a
+       safe no-op;
     6. only then calls ``summarize_section_one`` (caller-held lock
        contract; the service never touches the Recording-level summary
        tuple and schedules no recording search/embedding sync).
@@ -742,7 +775,7 @@ def execute_section_summarize(
     from workflow.services.segmentation import SegmentationError, require_active_topic_section
     from workflow.services.summarize import summarize_section_one
 
-    # Defensive input boundary (BEFORE the lock): the confirmed POST must
+    # Defensive input boundary (BEFORE the lock): the executing POST must
     # carry exactly one canonical 64-hex fingerprint and exactly one valid
     # section action mode; the Section must belong to the recording.
     # Anything else is a safe no-op — never a run, never a write.
@@ -873,7 +906,6 @@ def unfinished_attempt_stage(recording: Recording) -> str | None:
 _SEGMENTATION_MESSAGES = {
     "invalid_input": "The trim & split payload is malformed.",
     "invalid_fingerprint": "The state fingerprint is missing or invalid — reload the page.",
-    "stale_state": "The trim & split state changed since the page was opened — reload and try again.",
     "layout_invalid": "The stored trim & split revision is invalid.",
     "title_blank": "Every topic section needs a name.",
     "title_too_long": "A topic name is too long (at most 255 characters).",

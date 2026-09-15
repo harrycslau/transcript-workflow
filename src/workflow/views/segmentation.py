@@ -1,39 +1,37 @@
 """Step 6.1 segmented-version save action (web).
 
-One POST-only, recording/transcript-parent-scoped route with the standard
-two-step confirmation:
+One POST-only, recording/transcript-parent-scoped route that validates
+and EXECUTES on the FIRST (and only) POST from the transcript editor:
 
-- the FIRST POST (without ``confirmed=1``) strictly parses the bounded
-  staged payload, verifies the submitted transcript is the recording's
-  ACTIVE transcript, runs the shared READ-ONLY semantic validation (no
-  lock, recovery, or write), compares the submitted opaque state
-  fingerprint against a freshly computed one (stale => reject before any
-  confirmation), and only then renders the autoescaped confirmation page.
-- the CONFIRMED POST goes through ``web_actions.execute_segmentation_save``
-  (the existing schema-ready web path): exclusive pipeline lock, idempotent
+- the payload is strictly parsed and bounded (a malformed payload, a
+  missing/duplicate/forged fingerprint or an unknown field is rejected
+  BEFORE any pipeline lock, recovery, network or write);
+- the submitted transcript must be the recording's ACTIVE transcript,
+  and the shared READ-ONLY semantic validation runs before the lock
+  (no lock, no recovery, no write);
+- execution goes through ``web_actions.execute_segmentation_save`` (the
+  existing schema-ready web path): exclusive pipeline lock, idempotent
   recovery, post-lock re-derivation + read-only segmentation-fingerprint
   comparison, then ``segmentation.save_segmented_version`` (which
-  revalidates transactionally). Stale state is a safe no-op (zero DML);
-  lock busy is the existing friendly 409; every error is a fixed
-  sanitized message.
+  revalidates transactionally). A stale fingerprint is a safe no-op
+  (zero DML); lock busy is the existing friendly 409; every error is a
+  fixed sanitized message.
 
-The redirect target is ALWAYS the parent transcript page — arbitrary return
-URLs are never accepted. Topic titles / transcript text never enter URLs,
-logs, or errors.
+The redirect target is ALWAYS the parent transcript page — arbitrary
+return URLs are never accepted. Topic titles / transcript text never
+enter URLs, logs, or errors.
 """
 
 from __future__ import annotations
 
 from django.contrib import messages as dj_messages
-from django.shortcuts import get_object_or_404, redirect, render
+from django.shortcuts import get_object_or_404, redirect
 from django.views.decorators.http import require_POST
 
 from workflow.models import Recording
 from workflow.services.segmentation import (
     SegmentationError,
     parse_segmentation_payload,
-    range_label,
-    segmentation_fingerprint,
     validate_payload_for_transcript,
 )
 from workflow.services.web_actions import (
@@ -47,57 +45,6 @@ from workflow.views.helpers import conflict_response, get_config, rejection_resp
 
 def _recording_or_404(recording_id: str) -> Recording:
     return get_object_or_404(Recording, pk=recording_id)
-
-
-def _payload_summary(recording: Recording, transcript, payload: dict, timezone_name: str) -> dict:
-    """Bounded, value-free summary fields for the confirmation page.
-
-    The only user content carried is the topic title list; the template
-    renders it with normal autoescaping (never raw HTML). Blank
-    temporary titles are replaced with the SERVER-derived
-    ``Segment N of YYYYMMDDHHMM`` value so the confirmation shows what
-    will actually be saved.
-    """
-    from workflow.services.segmentation import derive_temporary_section_title
-
-    segment_count = transcript.segments.count()
-    start = payload["start"]
-    end = payload["end_exclusive"]
-    splits = payload["splits"]
-    topics = []
-    for index, title in enumerate(payload["titles"]):
-        if payload["title_is_temporary"][index] and not title:
-            topics.append(derive_temporary_section_title(recording, index + 1, timezone_name))
-        else:
-            topics.append(title)
-    return {
-        "range_label": range_label(start, end),
-        "segment_count": segment_count,
-        "cropped_above": start,
-        "cropped_below": segment_count - end,
-        "split_count": len(splits),
-        "topics": list(topics),
-    }
-
-
-def _render_confirmation(request, recording, transcript, payload: dict, timezone_name: str):
-    hidden = {
-        "fingerprint": payload["fingerprint"],
-        "transcript_id": str(payload["transcript_id"]),
-        "start": str(payload["start"]),
-        "end_exclusive": str(payload["end_exclusive"]),
-    }
-    return render(
-        request,
-        "workflow/segmentation_confirm.html",
-        {
-            "recording": recording,
-            "transcript": transcript,
-            "payload": payload,
-            "summary": _payload_summary(recording, transcript, payload, timezone_name),
-            "hidden": hidden,
-        },
-    )
 
 
 def _redirect_outcome(request, recording, outcome):
@@ -118,15 +65,17 @@ def _redirect_outcome(request, recording, outcome):
 
 @require_POST
 def action_segmentation_save(request, recording_id):
-    """POST-only two-step save of one segmented version.
+    """POST-only direct-execution save of one segmented version.
 
     GET is a 405 (``require_POST``) with zero work. The payload is strictly
     parsed and bounded here; the shared read-only validator checks the
-    semantics against the CURRENT database (no lock/recovery/write), and
-    the segmentation service remains the authority on the transactional
-    save. The first POST rejects stale fingerprints before showing any
-    confirmation; a confirmed POST without a fingerprint is rejected
-    BEFORE the pipeline lock.
+    semantics against the CURRENT database (no lock/recovery/write) — an
+    invalid payload is rejected BEFORE the pipeline lock. The opaque
+    segmentation fingerprint captured when the editor page was rendered
+    is REQUIRED on this one executing POST; the service recomputes it
+    under the lock and a mismatch is a safe no-op (never a save against
+    a state the user did not see). ``segmentation.save_segmented_version``
+    remains the authority on the transactional save.
     """
     recording = _recording_or_404(recording_id)
     config = get_config()
@@ -156,32 +105,13 @@ def action_segmentation_save(request, recording_id):
         return rejection_response(
             request, segmentation_friendly_message(exc.code), exc.code
         )
-    if payload["confirmed"]:
-        try:
-            outcome = execute_segmentation_save(
-                config,
-                recording,
-                payload,
-                expected_fingerprint=payload["fingerprint"],
-            )
-        except PipelineBusy as exc:
-            return conflict_response(request, exc.holder_pid)
-        return _redirect_outcome(request, recording, outcome)
-    # First POST: the submitted opaque fingerprint must equal the freshly
-    # computed read-only one — a stale page is rejected here, never
-    # silently re-synthesized.
     try:
-        current_fingerprint = segmentation_fingerprint(
-            recording.pk, transcript, timezone_name=config.timezone
+        outcome = execute_segmentation_save(
+            config,
+            recording,
+            payload,
+            expected_fingerprint=payload["fingerprint"],
         )
-    except SegmentationError as exc:
-        return rejection_response(
-            request, segmentation_friendly_message(exc.code), exc.code
-        )
-    if current_fingerprint != payload["fingerprint"]:
-        return rejection_response(
-            request, segmentation_friendly_message("stale_state"), "stale_state"
-        )
-    return _render_confirmation(
-        request, recording, transcript, payload, config.timezone
-    )
+    except PipelineBusy as exc:
+        return conflict_response(request, exc.holder_pid)
+    return _redirect_outcome(request, recording, outcome)

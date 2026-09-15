@@ -577,8 +577,8 @@ class TestEnhancedDetailsOverlay:
     def test_versioned_static_urls_on_detail(self, client):
         recording, _t, _s, _summary = _summary_recording()
         content = client.get(f"/recordings/{recording.pk}/").content.decode()
-        assert 'href="/static/workflow/base.css?v=5"' in content
-        assert 'src="/static/workflow/app.js?v=5" defer' in content
+        assert 'href="/static/workflow/base.css?v=6"' in content
+        assert 'src="/static/workflow/app.js?v=6" defer' in content
 
 
 class TestBulkTagEditorMarkup:
@@ -845,8 +845,8 @@ class TestDetailActionsPresentation:
         assert '<details class="enhanced-details routing-editor" id="routing-editor">' in content
         assert "Routing" in content
         # It retains the manual route form and its fingerprint, posting
-        # to the existing action-route endpoint (server confirmation
-        # interstitial + lock + revalidate unchanged).
+        # to the existing action-route endpoint (first POST executes
+        # under the lock with fingerprint revalidation).
         assert '/route/' in content
         assert 'id="id_route_profile_routing"' in content
         assert 'name="profile"' in content
@@ -855,10 +855,13 @@ class TestDetailActionsPresentation:
         assert "schedules a retranscription" in content
         assert "created only when the retranscription succeeds" in content
 
-    def test_needs_review_with_confirmable_decision_confirm_only_prominent(self, client):
-        """With an active unverified routing decision the immediate
-        recommended action is ONLY 'Confirm routing'; manual profile
-        selection moves to the collapsed Routing disclosure."""
+    def test_needs_review_manual_route_is_the_only_recommended_action(self, client):
+        """With an active unverified routing decision the recommended
+        action renders ONLY the MANUAL profile route form — the
+        audit-only one-click 'Confirm routing' is deliberately NOT a
+        secondary action there (operationally redundant: choosing the
+        current profile in the route form already confirms it), and the
+        collapsed Routing disclosure never duplicates the manual form."""
         recording, _t, _s = make_transcribed_recording(["a"], sha="pa-nr-conf")
         Recording.objects.filter(pk=recording.pk).update(
             processing_status=ProcessingStatus.NEEDS_REVIEW
@@ -871,11 +874,21 @@ class TestDetailActionsPresentation:
         )
         content = client.get(f"/recordings/{recording.pk}/").content.decode()
         assert 'aria-label="Recommended action"' in content
-        assert "Confirm routing" in content
-        # Manual profile selection is NOT prominent; it lives in Routing.
-        assert 'id="id_route_profile"' not in content
-        assert 'id="id_route_profile_routing"' in content
+        # The manual profile form is rendered immediately (no confirm-hop).
+        assert 'id="id_route_profile"' in content
+        # NO Confirm routing form in the needs-review recommended action.
+        assert "Confirm routing" not in content
+        assert "/confirm-routing/" not in content
+        # No duplicate route form in the collapsed Routing disclosure.
+        assert 'id="routing-editor"' not in content
+        assert 'id="id_route_profile_routing"' not in content
         assert 'name="fingerprint"' in content
+        # The route form carries the pending-state hooks and the concise
+        # "current transcript stays until you complete retranscription" note.
+        assert 'data-action-form="route"' in content
+        assert "stays active until you run and complete retranscription" in content
+        # The copy never implies routing itself waits or transcribes.
+        assert "Manual routing runs immediately" not in content
 
     def test_needs_review_without_decision_manual_route_only_no_duplicate(self, client):
         """With no confirmable decision the manual route is the single
@@ -970,27 +983,107 @@ class TestDetailActionsPresentation:
         assert "/summarize/" in content
 
 
-class TestConfirmFormProgressiveEnhancement:
-    """Small static contract for the shared .confirm-form enhancement:
-    it must attach a submit listener (not click-only), guard repeated
-    submits, disable and relabel the button, and never alter the no-JS
-    POST path. Kept small/maintainable because no browser JS harness
-    exists; rendering-level 'external-only JS / no inline handlers' is
-    already covered by the security tests."""
+class TestActionFormPendingEnhancement:
+    """Small static contract for the form[data-action-form] pending-state
+    enhancement: it attaches a SUBMIT listener (not click-only), cancels
+    only REPEATED submits (the first is never preventDefaulted — native
+    POST navigation proceeds), marks the form aria-busy, disables and
+    relabels ONLY the submit control (never payload-bearing
+    inputs/selects/hidden values), updates the [data-action-live]
+    aria-live region with TEMPLATE-OWNED copy (data-pending-label /
+    data-pending-message, per-action PENDING_COPY fallback), integrates
+    the segmentation editor's external visible Save control via
+    data-action-control, and restores everything on a bfcache
+    pageshow(persisted). The dead .confirm-form / data-confirm-exempt
+    interstitial JS is fully removed. No browser JS harness exists, so
+    the contract stays string-level; rendering-level 'external-only JS /
+    no inline handlers' is covered by the security tests."""
 
-    def test_app_js_confirm_form_contract(self):
+    def _source(self) -> str:
         from django.contrib.staticfiles import finders
 
         path = finders.find("workflow/app.js")
         assert path is not None
-        source = Path(path).read_text(encoding="utf-8")
-        assert ".confirm-form" in source
+        return Path(path).read_text(encoding="utf-8")
+
+    def test_app_js_action_form_submit_contract(self):
+        source = self._source()
+        # Submit listener on every direct-action form (not click-only).
+        assert 'querySelectorAll("form[data-action-form]")' in source
         assert 'addEventListener("submit"' in source
-        assert "event.preventDefault()" in source  # guards repeated submits
-        assert "button.disabled = true" in source
-        assert 'setAttribute("aria-disabled", "true")' in source
-        assert 'textContent = "Running…"' in source
+        # Duplicate submits are guarded in memory and cancelled; the
+        # first submit is never preventDefaulted.
+        assert "submitted.push(form)" in source
+        assert "event.preventDefault()" in source
+        # Only the submit control is disabled/relabelled; the form gets
+        # aria-busy and the live region receives the pending message.
+        assert "control.disabled = true" in source
+        assert "control.textContent" in source
         assert 'setAttribute("aria-busy", "true")' in source
+        assert "data-pending-label" in source
+        assert "data-pending-message" in source
+        assert "data-action-live" in source
+        # Payload-bearing fields are never touched (no reset/disable of
+        # inputs/selects/hidden values in the enhancement).
+        pending_block = source[
+            source.index("function initActionForms()") :
+            source.index("var FOCUSABLE_SELECTOR")
+        ]
+        assert "form.reset()" not in pending_block
+        assert 'querySelectorAll("input' not in pending_block
+        assert 'querySelectorAll("select' not in pending_block
+        assert "disabled = true" not in pending_block.replace(
+            "control.disabled = true", ""
+        )
+        # No fetch/HTMX/polling; the action stays a native POST.
+        assert "fetch(" not in pending_block
+        assert "XMLHttpRequest" not in pending_block
+
+    def test_app_js_no_dead_confirm_form_js_remains(self):
+        source = self._source()
+        # The confirmation interstitial and its whole JS contract are
+        # gone: no .confirm-form, no data-confirm window.confirm helper,
+        # no data-confirm-exempt anchor handling, no blanket in-form
+        # anchor disabling.
+        assert ".confirm-form" not in source
+        assert "confirm-form-link-disabled" not in source
+        assert "data-confirm-exempt" not in source
+        assert 'form[data-confirm]' not in source
+        assert "window.confirm" not in source
+        assert "initConfirmForms" not in source
+        assert "initConfirmButtons" not in source
+
+    def test_app_js_pageshow_bfcache_reset_contract(self):
+        source = self._source()
+        # bfcache restore: pageshow(persisted) restores the original
+        # label/disabled/aria-busy/live text and re-allows submission.
+        assert 'addEventListener("pageshow"' in source
+        assert "event.persisted" in source
+        assert "state.control.disabled = state.disabled" in source
+        assert "state.control.textContent = state.label" in source
+        assert 'state.form.removeAttribute("aria-busy")' in source
+        assert 'state.live.textContent = ""' in source
+        assert "submitted.splice(at, 1)" in source
+
+    def test_app_js_segmentation_save_integration(self):
+        """The visible Save revision button is type=button OUTSIDE the
+        hidden save form and the payload is built programmatically, so
+        the editor must submit through requestSubmit() (which fires the
+        shared submit-event enhancement) instead of the event-bypassing
+        submit()."""
+        source = self._source()
+        editor = source[source.index("function initSegmentationControls()") :]
+        assert "saveForm.requestSubmit()" in editor
+        # Graceful degradation on a browser without requestSubmit.
+        assert "typeof saveForm.requestSubmit ===" in editor
+        # The enhancement resolves the EXTERNAL visible control through
+        # the form's data-action-control binding.
+        pending_block = source[
+            source.index("function initActionForms()") :
+            source.index("var FOCUSABLE_SELECTOR")
+        ]
+        assert "data-action-control" in pending_block
+        assert "document.getElementById(externalId)" in pending_block
 
 
 class TestNestedKeyPoints:

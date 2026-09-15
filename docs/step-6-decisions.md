@@ -272,8 +272,12 @@ rediscovery/attachment after hash proof. GET remains strictly read-only.
   proof", never "relink".
 - The UI result is aggregate sanitized counts only: no paths, hashes, IDs,
   raw exceptions or content. Lock busy uses the existing friendly 409. GET
-  does no work. A two-step confirmation is the approved/recommended 6.4
-  interaction, not a 6.1 deliverable: **Rescan itself remains 6.4, not
+  does no work. A two-step confirmation was the originally recommended 6.4
+  interaction; it is **SUPERSEDED** by the direct-action contract (all
+  mutating web workflow actions execute on the FIRST POST from their
+  origin-page form — `AGENTS.md` "Web actions"; §7a/§9 notes below): Rescan
+  follows the same direct-execution pattern unless a confirmation step is
+  explicitly re-approved at 6.4. **Rescan itself remains 6.4, not
   6.1**.
 - **6.4 UX placement is deferred.** The approved policy above is retained
   in full, but no retention / Keep Audio / Rescan screen or control is
@@ -347,8 +351,14 @@ The approved interaction is:
   full-recording; the Transcript working view follows the saved crop.
 - **One confirmed immutable revision.** Saving commits one new revision
   containing the crop range plus the optional explicit splits/topics.
-  Confirmation is required; an unchanged payload is a no-op; **Reset**
-  restores the current active version; prior revisions/history are preserved.
+  Confirmation was originally required; it is **SUPERSEDED by the
+  direct-action contract**: the save now executes on the FIRST POST from
+  the editor (no confirmation stage; a pending disabled/relabelled Save
+  control with an optimistic `aria-live` message; the stale-fingerprint
+  safe no-op and pipeline-lock protection are unchanged — see `AGENTS.md`
+  "Web actions" and the note in §6). An unchanged payload is a no-op;
+  **Reset** restores the current active version; prior revisions/history
+  are preserved.
   New split-created sections start without summaries/tags in later 6.2; no
   carry-forward. Save/Reset controls stay compact (a small bar), not a large
   editor panel. **History belongs on History**, not as a large list on
@@ -502,8 +512,10 @@ Bounded to structure/history only. The concrete implementation plan is
   (D9, E1, §10).
 - Missing-file behavior is status + the one global POST-only Rescan under
   the pipeline lock; no manual relink; GET read-only; aggregate sanitized
-  counts only; two-step confirmation recommended at implementation (D12,
-  §6).
+  counts only; the earlier two-step-confirmation recommendation is
+  SUPERSEDED by the direct-action contract — Rescan executes on the first
+  POST from its origin form like every current web workflow action unless
+  a confirmation step is explicitly re-approved at 6.4 (D12, §6).
 
 ### Phase 6.5 — launchd scheduling
 
@@ -533,9 +545,11 @@ A bounded follow-up to 6.2 delivered in the working tree (migration
   token rides the normal-Library recording AND section links
   (recording-backed title links in card/table, the section-card parent
   Recording link and the section title links) and propagates verbatim
-  through section-detail tabs, the section summary confirmation/
-  execution redirects (including the confirmation CANCEL link, built
-  only from the already validated token) and the section tag redirects;
+  through section-detail tabs, the section summary executing form and its
+  execution redirect (the confirmation page and its CANCEL link, part of
+  the delivered 6.2a/6.2 two-step pattern, were later removed by the
+  direct-action refinement — see `AGENTS.md` "Web actions") and the
+  section tag redirects;
   `recording_detail` validates an optional `lib_return` through the
   shared decoder and, when valid, restores the originating page/state
   through its top-left `← Library` breadcrumb

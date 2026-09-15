@@ -150,12 +150,3 @@ class RouteForm(forms.Form):
             suffix = " (manual-only)" if profile.manual_only else ""
             choices.append((profile.name, f"{profile.name}{suffix} — model {profile.model}, language {language}"))
         self.fields["profile"].choices = choices
-
-
-class ActionConfirmForm(forms.Form):
-    """Hidden state echoed by every action form (fingerprint + extras)."""
-
-    fingerprint = forms.CharField(required=False, widget=forms.HiddenInput)
-    confirmed = forms.CharField(required=False, widget=forms.HiddenInput)
-    mode = forms.CharField(required=False, widget=forms.HiddenInput)
-    profile = forms.CharField(required=False, widget=forms.HiddenInput)

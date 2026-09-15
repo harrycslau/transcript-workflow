@@ -4,8 +4,9 @@ Proves the approved web behaviour:
 - recording-detail and summary pages offer Default / English /
   Traditional Chinese / Original plus existing concrete variants (e.g.
   Finnish) and render ONLY the selected variant's summary;
-- per-state Generate / Retry / Regenerate POST actions with the
-  language preserved through the confirmation interstitial;
+- per-state Generate / Retry / Regenerate POST actions executed on the
+  first POST, with the complete action state (generation selector, read
+  return selector and return page) carried by the rendered form itself;
 - export/Copy links preserve the selected language;
 - variant isolation (generating one variant never replaces another);
 - unresolved-Original GET is strictly read-only (zero external effects,
@@ -17,7 +18,7 @@ Proves the approved web behaviour:
 
 from __future__ import annotations
 
-import json
+import re
 
 import pytest
 from django.db import connection
@@ -27,7 +28,7 @@ from django.test.utils import CaptureQueriesContext
 from factories import make_summary_version, make_transcribed_recording
 from test_summarize import final_summary_json, make_llm_config
 from workflow.models import Recording, SummaryVariantState
-from workflow.services.web_actions import state_fingerprint
+from workflow.services.web_actions import state_fingerprint, summarize_mode
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("forbid_external_effects")]
 
@@ -187,18 +188,29 @@ class TestPerStateActions:
         assert "original language" in content
         assert "Generate" in content
 
-    def test_confirmation_preserves_language(self, client):
+    def test_single_post_preserves_language(self, client, monkeypatch):
+        """One-POST flow: the FIRST submission runs immediately with the
+        submitted language and the redirect preserves the variant."""
         recording, _t, _s, _en, _zh = _multilingual_recording()
+        captured = {}
+
+        def fake_summarize(config, rec, *, target_language="default", **kw):
+            captured["target_language"] = target_language
+            return {"recording_id": rec.pk, "result": "summarized",
+                    "output_language": target_language}
+
+        monkeypatch.setattr(
+            "workflow.services.summarize.summarize_one", fake_summarize
+        )
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {"mode": "first", "language": "zh-Hant", "fingerprint": state_fingerprint(recording)},
         )
-        assert response.status_code == 200  # confirmation interstitial
-        content = response.content.decode()
-        assert 'name="language" value="zh-Hant"' in content
-        assert "Traditional Chinese" in content or "zh-Hant" in content
+        assert response.status_code == 302  # executed directly — no interstitial
+        assert captured["target_language"] == "zh-Hant"
+        assert "language=zh-Hant" in response["Location"]
 
-    def test_confirmed_generation_preserves_variant_isolation(
+    def test_single_post_generation_preserves_variant_isolation(
         self, client, monkeypatch
     ):
         """Generating zh-Hant must not replace the English summary."""
@@ -223,7 +235,7 @@ class TestPerStateActions:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "first", "language": "zh-Hant",
+                "mode": "first", "language": "zh-Hant",
                 "fingerprint": state_fingerprint(recording),
             },
         )
@@ -249,7 +261,7 @@ class TestPerStateActions:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "first", "language": "zh-Hant",
+                "mode": "first", "language": "zh-Hant",
                 "fingerprint": state_fingerprint(recording),
             },
         )
@@ -260,7 +272,7 @@ class TestPerStateActions:
         recording, _t, _s, _en, _zh = _multilingual_recording()
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"confirmed": "1", "mode": "first", "language": "sv",
+            {"mode": "first", "language": "sv",
              "fingerprint": state_fingerprint(recording)},
         )
         assert response.status_code == 400
@@ -279,7 +291,7 @@ class TestPerStateActions:
         )
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"confirmed": "1", "mode": "first", "language": "zh-Hant",
+            {"mode": "first", "language": "zh-Hant",
              "fingerprint": fingerprint},
         )
         assert response.status_code == 302  # safe no-op redirect
@@ -295,7 +307,7 @@ class TestPerStateActions:
         with pipeline_lock(config):
             response = client.post(
                 f"/recordings/{recording.pk}/summarize/",
-                {"confirmed": "1", "mode": "first", "language": "zh-Hant",
+                {"mode": "first", "language": "zh-Hant",
                  "fingerprint": state_fingerprint(recording)},
             )
         assert response.status_code == 409
@@ -336,7 +348,7 @@ class TestReadSelectorVersusGenerationSelector:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "regenerate", "language": "original",
+                "mode": "regenerate", "language": "original",
                 "return_language": "fi", "return_view": "summary",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -347,18 +359,24 @@ class TestReadSelectorVersusGenerationSelector:
         # the action originated from.
         assert "/summary/?language=fi" in response["Location"]
 
-    def test_finnish_tab_confirmation_keeps_return_selector(self, client):
+    def test_finnish_tab_single_post_keeps_return_selector(self, client, monkeypatch):
+        """One-POST flow: the Finnish tab's form submits the derived
+        GENERATION selector plus the READ return selector in ONE request,
+        and the redirect returns to the Finnish tab."""
         recording, _t, _s, _en, _zh = _multilingual_recording()
         _make_finnish_variant(recording)
+        monkeypatch.setattr(
+            "workflow.services.summarize.summarize_one",
+            lambda config, rec, **kw: {"recording_id": rec.pk, "result": "summarized",
+                                       "output_language": "fi"},
+        )
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {"mode": "regenerate", "language": "original", "return_language": "fi",
              "fingerprint": state_fingerprint(recording)},
         )
-        assert response.status_code == 200  # confirmation interstitial
-        content = response.content.decode()
-        assert 'name="language" value="original"' in content
-        assert 'name="return_language" value="fi"' in content
+        assert response.status_code == 302  # executed directly — no interstitial
+        assert response["Location"].endswith("/?language=fi")
 
     def test_unrepresentable_concrete_tab_is_read_only(self, client):
         """A concrete variant that no approved generation selector
@@ -397,7 +415,7 @@ class TestReadSelectorVersusGenerationSelector:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "first", "language": "en",
+                "mode": "first", "language": "en",
                 "return_language": "drop%20table--",  # invalid selector
                 "fingerprint": state_fingerprint(recording),
             },
@@ -474,11 +492,11 @@ class TestSummaryPageActions:
         assert "Svensk titel" in content
         assert "action-summarize" not in content
 
-    def test_summary_page_confirmed_action_executes_and_preserves_tab(
+    def test_summary_page_action_executes_and_preserves_tab(
         self, client, monkeypatch
     ):
-        """A confirmed POST from the summary page runs with the hidden
-        generation selector and returns to the selected read tab."""
+        """The summary page POST runs with the hidden generation selector and
+        returns to the selected read tab (one POST, no interstitial)."""
         recording, _t, _s, _en, _zh = _multilingual_recording()
         captured = {}
 
@@ -493,7 +511,7 @@ class TestSummaryPageActions:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "first", "language": "zh-Hant",
+                "mode": "first", "language": "zh-Hant",
                 "return_language": "zh-Hant",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -518,7 +536,7 @@ class TestReturnView:
         content = _detail(client, recording, "zh-Hant").content.decode()
         assert 'name="return_view" value="detail"' in content
 
-    def test_confirmed_summary_action_returns_to_summary_page(
+    def test_summary_action_returns_to_summary_page(
         self, client, monkeypatch
     ):
         recording, _t, _s, _en, _zh = _multilingual_recording(with_zh=True)
@@ -531,7 +549,7 @@ class TestReturnView:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "regenerate", "language": "zh-Hant",
+                "mode": "regenerate", "language": "zh-Hant",
                 "return_language": "zh-Hant", "return_view": "summary",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -539,7 +557,7 @@ class TestReturnView:
         assert response.status_code == 302
         assert "/summary/?language=zh-Hant" in response["Location"]
 
-    def test_confirmed_detail_action_returns_to_detail_page(
+    def test_detail_action_returns_to_detail_page(
         self, client, monkeypatch
     ):
         recording, _t, _s, _en, _zh = _multilingual_recording(with_zh=True)
@@ -552,7 +570,7 @@ class TestReturnView:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "regenerate", "language": "zh-Hant",
+                "mode": "regenerate", "language": "zh-Hant",
                 "return_language": "zh-Hant", "return_view": "detail",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -562,17 +580,24 @@ class TestReturnView:
         assert "/summary/" not in location
         assert "language=zh-Hant" in location
 
-    def test_confirmation_interstitial_preserves_return_view(self, client):
+    def test_single_post_preserves_return_view(self, client, monkeypatch):
+        """One-POST flow: the generation selector and the return page/
+        read selector all ride the SAME executing request (the redirect,
+        not a rendered interstitial, is the only hop)."""
         recording, _t, _s, _en, _zh = _multilingual_recording(with_zh=True)
+        monkeypatch.setattr(
+            "workflow.services.summarize.summarize_one",
+            lambda config, rec, **kw: {"recording_id": rec.pk,
+                                       "result": "summarized",
+                                       "output_language": "zh-Hant"},
+        )
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {"mode": "regenerate", "language": "zh-Hant", "return_view": "summary",
              "return_language": "zh-Hant", "fingerprint": state_fingerprint(recording)},
         )
-        assert response.status_code == 200
-        content = response.content.decode()
-        assert 'name="return_view" value="summary"' in content
-        assert 'name="language" value="zh-Hant"' in content
+        assert response.status_code == 302  # executed directly — no interstitial
+        assert "/summary/?language=zh-Hant" in response["Location"]
 
     def test_invalid_return_view_falls_back_to_detail(self, client, monkeypatch):
         recording, _t, _s, _en, _zh = _multilingual_recording(with_zh=True)
@@ -585,7 +610,7 @@ class TestReturnView:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "regenerate", "language": "zh-Hant",
+                "mode": "regenerate", "language": "zh-Hant",
                 "return_view": "javascript:alert(1)",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -607,7 +632,7 @@ class TestReturnView:
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
             {
-                "confirmed": "1", "mode": "regenerate", "language": "zh-Hant",
+                "mode": "regenerate", "language": "zh-Hant",
                 "return_view": "http://evil.example/steal",
                 "fingerprint": state_fingerprint(recording),
             },
@@ -632,7 +657,7 @@ def _make_finnish_variant(recording):
 class TestFingerprintBindsLanguageResolution:
     """A source-language correction can change the resolved default/
     Original generation target WITHOUT creating a ProcessingAttempt or
-    changing the action mode. The confirmation fingerprint must bind
+    changing the action mode. The action fingerprint must bind
     the language-resolution inputs, not just the mode."""
 
     def _fi_recording(self, sha="fp-1"):
@@ -647,10 +672,10 @@ class TestFingerprintBindsLanguageResolution:
         transcript.language_observed = code
         transcript.save(update_fields=["language_observed"])
 
-    def _post_confirmed(self, client, recording, fingerprint):
+    def _post_generate(self, client, recording, fingerprint):
         return client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"confirmed": "1", "mode": "first", "language": "original",
+            {"mode": "first", "language": "original",
              "fingerprint": fingerprint},
             follow=True,
         )
@@ -659,7 +684,7 @@ class TestFingerprintBindsLanguageResolution:
         self, client, monkeypatch
     ):
         """Both variants missing, both modes `first`, no new attempt:
-        the stale confirmation must still be rejected with the
+        the stale submission must still be rejected with the
         state-changed behaviour and ZERO summarization calls."""
         recording, transcript, _section = self._fi_recording()
         # Both concrete variants pre-exist as MISSING so the current
@@ -675,14 +700,14 @@ class TestFingerprintBindsLanguageResolution:
         old_fingerprint = state_fingerprint(recording)
 
         def forbidden(*args, **kwargs):
-            raise AssertionError("stale confirmation must not summarize")
+            raise AssertionError("stale submission must not summarize")
 
         monkeypatch.setattr(
             "workflow.services.summarize.summarize_one", forbidden
         )
         self._set_source(transcript, "sv")
 
-        response = self._post_confirmed(client, recording, old_fingerprint)
+        response = self._post_generate(client, recording, old_fingerprint)
 
         assert response.status_code == 200  # followed redirect
         assert "changed since the form was opened" in response.content.decode()
@@ -691,7 +716,7 @@ class TestFingerprintBindsLanguageResolution:
         self, client, monkeypatch
     ):
         """Both variants current, both modes `regenerate`, variant-language
-        set unchanged: the stale confirmation is still rejected."""
+        set unchanged: the stale submission is still rejected."""
         recording, transcript, section = self._fi_recording()
         for language in ("en", "fi", "sv"):
             make_summary_version(recording, transcript, section, output_language=language)
@@ -702,19 +727,19 @@ class TestFingerprintBindsLanguageResolution:
         old_fingerprint = state_fingerprint(recording)
 
         def forbidden(*args, **kwargs):
-            raise AssertionError("stale confirmation must not summarize")
+            raise AssertionError("stale submission must not summarize")
 
         monkeypatch.setattr(
             "workflow.services.summarize.summarize_one", forbidden
         )
         self._set_source(transcript, "sv")
 
-        response = self._post_confirmed(client, recording, old_fingerprint)
+        response = self._post_generate(client, recording, old_fingerprint)
 
         assert "changed since the form was opened" in response.content.decode()
 
     def test_fresh_fingerprint_after_correction_is_accepted(self, client, monkeypatch):
-        """Positive control: a confirmation rendered AFTER the correction
+        """Positive control: a form rendered AFTER the correction
         runs and targets the newly resolved language."""
         recording, transcript, _section = self._fi_recording()
         captured = {}
@@ -732,7 +757,7 @@ class TestFingerprintBindsLanguageResolution:
 
         response = client.post(
             f"/recordings/{recording.pk}/summarize/",
-            {"confirmed": "1", "mode": "first", "language": "original",
+            {"mode": "first", "language": "original",
              "fingerprint": fresh},
         )
         assert response.status_code == 302
@@ -761,12 +786,28 @@ class TestFingerprintBindsLanguageResolution:
         ]
         assert non_select == []
 
-    def test_unresolved_original_is_explicitly_fingerprinted(self):
+    def test_unresolved_original_state_changes_opaque_fingerprint(self):
+        """The unresolved/original language-resolution state is BOUND
+        by the fingerprint without being exposed: resolving an
+        unresolved Original flips the opaque digest even though no
+        attempt exists and the derived action mode is unchanged."""
         recording, transcript, _s = self._fi_recording()
         self._set_source(transcript, "")
-        fingerprint = json.loads(state_fingerprint(recording))
-        assert fingerprint["language_state"]["original_output"] == ""
-        assert fingerprint["language_state"]["default_output"] == "en"
+        unresolved = state_fingerprint(recording)
+        assert re.fullmatch(r"[0-9a-f]{64}", unresolved)
+        assert summarize_mode(recording) == "first"
+        # Source language appears: Original now resolves to the source.
+        # Only the language-resolution state moved — no attempt, no
+        # variant row, no mode change.
+        self._set_source(transcript, "fi")
+        resolved = state_fingerprint(recording)
+        assert re.fullmatch(r"[0-9a-f]{64}", resolved)
+        assert resolved != unresolved
+        assert summarize_mode(recording) == "first"
+        # Opacity: bound language values, field names and raw JSON never
+        # appear in the value (a hex-only digest cannot carry them).
+        for secret in ("fi", "{", "language_state", "original_output"):
+            assert secret not in resolved
 
 
 class TestGetPurityAndExports:

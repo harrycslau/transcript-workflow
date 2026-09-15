@@ -35,70 +35,123 @@
     });
   }
 
-  function initConfirmButtons() {
-    // Extra client-side confirmation for expensive actions; the server
-    // always renders its own confirmation interstitial, so this is only
-    // a convenience when JS is available.
-    var buttons = document.querySelectorAll('form[data-confirm] button[type="submit"]');
-    Array.prototype.forEach.call(buttons, function (button) {
-      button.addEventListener("click", function (event) {
-        var message = button.closest("form").getAttribute("data-confirm");
-        if (message && !window.confirm(message)) {
-          event.preventDefault();
-        }
-      });
-    });
-  }
+  // ---- Direct-action forms: pending-state progressive enhancement ----
+  // Every mutating action (route, confirm-routing, transcribe, summarize,
+  // retry, segmentation-save) executes on the FIRST POST from its page
+  // form — there is no confirmation interstitial. While the synchronous
+  // POST navigation is in flight this enhancement:
+  //
+  //   * cancels repeated submit events on an already-submitted form (the
+  //     FIRST submit is NEVER preventDefaulted — it is an ordinary native
+  //     POST; no fetch/HTMX/polling is involved and without JS every form
+  //     remains a plain POST form);
+  //   * marks the form aria-busy;
+  //   * disables and relabels ONLY the submit control — payload-bearing
+  //     inputs/selects/hidden values are never disabled or mutated before
+  //     native form serialization completes;
+  //   * writes the pending message into the form's [data-action-live]
+  //     aria-live region (when the visible region lives OUTSIDE a hidden
+  //     form — the segmentation editor bar — the form's submit control
+  //     and live region are bound by data-action-control / matched by the
+  //     data-action-live="<action>" value instead).
+  //
+  // Pending copy: the summarize and segmentation-save templates own
+  // theirs via data-pending-label on the submit control and
+  // data-pending-message on the live region (exact per-action/per-mode
+  // wording — summarize modes differ); the route, confirm-routing,
+  // transcribe and retry templates carry no data-pending-* attributes
+  // and use the fixed per-action PENDING_COPY fallback map below.
+  //
+  // A bfcache "back" restores the page with the stale running UI (and,
+  // because bfcache keeps the JS heap, with the in-memory submitted
+  // marks still set), so a pageshow(persisted) handler restores the
+  // original labels, disabled state, aria-busy and live text and
+  // re-allows submitting again.
+  var PENDING_COPY = {
+    "route": { label: "Routing…", message: "Routing — reloading when it finishes." },
+    "confirm-routing": { label: "Confirming…", message: "Confirming the routing — reloading when it finishes." },
+    "transcribe": { label: "Transcribing…", message: "Transcription is running — this can take a while. The page reloads when it finishes." },
+    "summarize": { label: "Summarizing…", message: "Summarization is running — this can take a while." },
+    "retry": { label: "Retrying…", message: "Retrying the failed stage — this can take a while." },
+    "segmentation-save": { label: "Saving…", message: "Saving the new layout revision…" },
+  };
 
-  // Progressive enhancement for the shared .confirm-form submit: the FIRST
-  // submit proceeds normally (native POST -> redirect -> GET preserved)
-  // while its submit button is disabled and relabelled "Running…" and the
-  // form is marked busy; repeated submit events are guarded in memory so
-  // the action is never submitted twice. The synchronous POST is a normal
-  // browser navigation, so every navigation anchor INSIDE the form must
-  // also become non-actionable while it is running: leaving the page
-  // mid-request aborts the browser connection. ONE deliberate, narrowly
-  // scoped exception: the Section confirmation's ``Back to section``
-  // anchor (``[data-confirm-exempt]``) stays enabled/clickable while the
-  // request runs — the user explicitly accepts that navigating away
-  // mid-request may abort the connection. Cancel and every other anchor
-  // keep the full disable behaviour. When JS is absent the form is an
-  // ordinary POST form — no inline handlers, no CSP change.
-  function initConfirmForms() {
-    var submitted = new WeakSet();
-    var forms = document.querySelectorAll(".confirm-form");
+  function initActionForms() {
+    var submitted = [];
+    var restorations = [];
+
+    function resolveControl(form) {
+      var control = form.querySelector('button[type="submit"]');
+      if (!control) {
+        var externalId = form.getAttribute("data-action-control");
+        if (externalId) {
+          control = document.getElementById(externalId);
+        }
+      }
+      return control;
+    }
+    function resolveLive(form, kind) {
+      var live = form.querySelector("[data-action-live]");
+      if (!live && kind) {
+        // External region bound by its data-action-live="<action>" value
+        // (rendered visible outside the hidden form itself).
+        live = document.querySelector('[data-action-live="' + kind + '"]');
+      }
+      return live;
+    }
+
+    var forms = document.querySelectorAll("form[data-action-form]");
     Array.prototype.forEach.call(forms, function (form) {
       form.addEventListener("submit", function (event) {
-        if (submitted.has(form)) {
+        if (submitted.indexOf(form) !== -1) {
           event.preventDefault();
           return;
         }
-        submitted.add(form);
-        var button = form.querySelector('button[type="submit"]');
-        if (button) {
-          button.disabled = true;
-          button.setAttribute("aria-disabled", "true");
-          button.textContent = "Running…";
+        submitted.push(form);
+        var kind = form.getAttribute("data-action-form");
+        var copy = PENDING_COPY[kind] || { label: "Running…", message: "Running…" };
+        var control = resolveControl(form);
+        var live = resolveLive(form, kind);
+        if (control) {
+          restorations.push({
+            form: form,
+            control: control,
+            live: live,
+            label: control.textContent,
+            disabled: control.disabled,
+          });
+          control.disabled = true;
+          control.setAttribute("aria-disabled", "true");
+          control.textContent =
+            control.getAttribute("data-pending-label") || copy.label;
         }
         form.setAttribute("aria-busy", "true");
-        // Disable every navigation anchor inside the form except the
-        // narrowly scoped ``[data-confirm-exempt]`` escape: remove
-        // non-exempt links from the tab order, suppress clicks, and give
-        // them a visible disabled state. The submit button alone cannot
-        // prevent an in-flight Back/Cancel from aborting the request.
-        var links = form.querySelectorAll('a[href]');
-        Array.prototype.forEach.call(links, function (link) {
-          if (link.hasAttribute("data-confirm-exempt")) {
-            return;
-          }
-          link.setAttribute("tabindex", "-1");
-          link.setAttribute("aria-disabled", "true");
-          link.classList.add("confirm-form-link-disabled");
-          link.addEventListener("click", function (event) {
-            event.preventDefault();
-          });
-        });
+        if (live) {
+          live.textContent =
+            live.getAttribute("data-pending-message") || copy.message;
+        }
+        // First submit proceeds: the native POST navigation starts.
       });
+    });
+
+    window.addEventListener("pageshow", function (event) {
+      if (!event.persisted || !restorations.length) {
+        return;
+      }
+      Array.prototype.forEach.call(restorations, function (state) {
+        state.control.disabled = state.disabled;
+        state.control.removeAttribute("aria-disabled");
+        state.control.textContent = state.label;
+        state.form.removeAttribute("aria-busy");
+        if (state.live) {
+          state.live.textContent = "";
+        }
+        var at = submitted.indexOf(state.form);
+        if (at !== -1) {
+          submitted.splice(at, 1);
+        }
+      });
+      restorations.length = 0;
     });
   }
 
@@ -290,11 +343,12 @@
   // Cropped rows are hidden (never dimmed); topic inputs appear inline
   // only when splits exist (N splits => N+1 topics; zero splits => none).
   // Save submits the bounded staged metadata (range + sorted splits +
-  // titles, max 200 topics) to the POST-only two-step save route; the
-  // server renders the confirmation. All values are read/written via
-  // DOM text/value properties — never innerHTML — and the JSON payload
-  // comes from the server's json_script block. Without JS the page is a
-  // normal read-only transcript: the toggle and editor never run.
+  // titles, max 200 topics) to the POST-only direct-execution save route;
+  // the server validates and executes on this first POST (no confirmation
+  // page). All values are read/written via DOM text/value properties —
+  // never innerHTML — and the JSON payload comes from the server's
+  // json_script block. Without JS the page is a normal read-only
+  // transcript: the toggle and editor never run.
   function initSegmentationControls() {
     var container = document.getElementById("transcript-doc");
     if (!container) return;
@@ -866,8 +920,17 @@
       renderAll();
     });
 
-    // Save: ONE confirmed immutable revision via the POST-only two-step
-    // route. The server renders the confirmation before any mutation.
+    // Save: ONE immutable revision via the POST-only direct-execution
+    // route. The server validates and executes on this first POST.
+    // The staged hidden inputs are (re)built FIRST, then the form is
+    // submitted through requestSubmit() so the shared
+    // form[data-action-form] submit handler runs: its duplicate-submit
+    // guard, the aria-busy mark, the disable/relabel of the VISIBLE
+    // #edit-save control (bound via data-action-control) and the
+    // data-action-live message all apply to this programmatic submit
+    // too. The enhancement never touches the payload-bearing inputs,
+    // so nothing is dropped; a very old browser without requestSubmit
+    // still saves through the plain native submit() (no pending UI).
     function clearPayloadInputs() {
       var existing = saveForm.querySelectorAll(
         'input[name="split"], input[name="title"], input[name="title_is_temporary"]'
@@ -904,7 +967,11 @@
       if (startInput) startInput.value = String(staged.start);
       if (endInput) endInput.value = String(staged.end);
       allowLeave = true;
-      saveForm.submit();
+      if (typeof saveForm.requestSubmit === "function") {
+        saveForm.requestSubmit();
+      } else {
+        saveForm.submit();
+      }
     });
 
     // Standard dirty-state leave warning (browser-owned dialog); a real
@@ -921,16 +988,14 @@
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", function () {
       initCopyButtons();
-      initConfirmButtons();
-      initConfirmForms();
+      initActionForms();
       initModalDetails();
       initTagFilters();
       initSegmentationControls();
     });
   } else {
     initCopyButtons();
-    initConfirmButtons();
-    initConfirmForms();
+    initActionForms();
     initModalDetails();
     initTagFilters();
     initSegmentationControls();

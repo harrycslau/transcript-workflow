@@ -4,8 +4,12 @@
    DESIGN PROTOTYPE, not production code.
    View toggle, sort-aware grouping, localStorage, table render.
    v6: Recording Detail contains the complete summary; language
-   variant tabs, Copy Markdown and Regenerate confirmation work
-   directly on the detail screen. Transcript and History remain
+   variant tabs, Copy Markdown and Regenerate work directly on the
+   detail screen. Workflow actions (regenerate, routing, trim & split
+   save) are DIRECT actions — no confirmation dialogs anywhere: the
+   control disables/relabels with an optimistic aria-live pending
+   message, then a static completed state stands in for the refreshed
+   page. Transcript and History remain
    separate navigable screens through the shared showScreen
    navigation; no sticky action bar.
    ============================================================ */
@@ -346,25 +350,75 @@ document.addEventListener('DOMContentLoaded', () => {
     showScreen('library', { restoreScroll: true });
   });
 
-  // ---- Confirmation dialog ----
-  document.querySelectorAll('[data-confirm]').forEach(trigger => {
-    trigger.addEventListener('click', e => {
-      e.preventDefault();
-      e.stopPropagation();
-      const overlay = document.querySelector('.confirm-overlay');
-      if (overlay) { overlay.style.visibility = 'visible'; overlay.style.pointerEvents = 'auto'; }
-    });
-  });
-  document.querySelectorAll('.confirm-cancel').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const overlay = document.querySelector('.confirm-overlay');
-      if (overlay) { overlay.style.visibility = 'hidden'; overlay.style.pointerEvents = 'none'; }
+  // ---- Direct actions (no confirmation stage) ----
+  // Production executes every workflow action (regenerate summary,
+  // routing, segmented-version save) on the FIRST request from its
+  // origin page: the progressive-enhancement JS disables and relabels
+  // ONLY the submit control, marks the region aria-busy and writes an
+  // optimistic pending message into an aria-live region; the
+  // authoritative result is the redirect + refreshed GET (there is no
+  // progress reporting and no polling anywhere). This static
+  // prototype mirrors that visible contract with one small shared
+  // helper: pending (disabled/relabelled control + live message) and
+  // then a completed state standing in for the refreshed page.
+  function runDirectAction(opts) {
+    const { button, live, scope, onDone, duration = 1600 } = opts;
+    if (button.dataset.busy === '1') return; // duplicate presses are blocked
+    button.dataset.busy = '1';
+    const originalLabel = button.textContent;
+    if (scope) scope.setAttribute('aria-busy', 'true');
+    button.disabled = true;
+    button.setAttribute('aria-disabled', 'true');
+    button.textContent = button.dataset.pendingLabel || 'Running…';
+    if (live) live.textContent = live.dataset.pendingMessage || 'Running…';
+    window.setTimeout(() => {
+      if (scope) scope.removeAttribute('aria-busy');
+      button.disabled = false;
+      button.removeAttribute('aria-disabled');
+      button.textContent = originalLabel;
+      delete button.dataset.busy;
+      if (live) live.textContent = '';
+      if (onDone) onDone();
+    }, duration);
+  }
+
+  // ---- Regenerate summary: direct action on the detail screen ----
+  // Pending: the button disables/relabels and the live region shows the
+  // optimistic message (template-owned copy, exactly like production's
+  // data-pending-label / data-pending-message attributes). Completed:
+  // the refreshed-page state — the variant note shows the new current
+  // generation for the language variant selected when the action was
+  // clicked (production regenerates the chosen tab's language) and the
+  // live region carries the outcome, mirroring the success message the
+  // real app shows after POST→redirect→GET.
+  let summaryStamp = 'generated 1 Sep 2026, 15:12';
+  const regenerateBtn = document.getElementById('regenerate-btn');
+  const regenerateStatus = document.getElementById('regenerate-status');
+  const summaryVariantNote = document.querySelector('.variant-note');
+  function setVariantNote(tabName) {
+    if (summaryVariantNote) {
+      summaryVariantNote.textContent =
+        `Showing the ${tabName} \u00b7 ${summaryStamp} \u00b7 current`;
+    }
+  }
+  regenerateBtn.addEventListener('click', () => {
+    const activeTab = document.querySelector('.variant-tab.active');
+    const variantLabel = activeTab ? activeTab.textContent.trim() : 'Default (English)';
+    runDirectAction({
+      button: regenerateBtn,
+      live: regenerateStatus,
+      scope: regenerateBtn.closest('.summary-actions'),
+      onDone() {
+        summaryStamp = 'regenerated just now';
+        setVariantNote(`${variantLabel} variant`);
+        regenerateStatus.textContent =
+          `New ${variantLabel} summary is current — the previous version stays in History.`;
+      },
     });
   });
 
   // ---- Summary language variant tabs on Recording Detail (visual state only) ----
   document.querySelectorAll('.variant-tabs').forEach(tabs => {
-    const note = tabs.parentElement.querySelector('.variant-note');
     tabs.querySelectorAll('.variant-tab').forEach(tab => {
       tab.addEventListener('click', () => {
         tabs.querySelectorAll('.variant-tab').forEach(t => {
@@ -372,7 +426,7 @@ document.addEventListener('DOMContentLoaded', () => {
           t.classList.toggle('active', isActive);
           t.setAttribute('aria-selected', String(isActive));
         });
-        if (note) note.textContent = `Showing the ${tab.textContent.trim()} variant \u00b7 generated 1 Sep 2026, 15:12 \u00b7 current`;
+        setVariantNote(`${tab.textContent.trim()} variant`);
       });
     });
   });
@@ -446,7 +500,14 @@ document.addEventListener('DOMContentLoaded', () => {
     return { open, close };
   }
 
-  // ---- Processing actions dialog (prototype proposal) ----
+  // ---- Routing dialog (prototype proposal): direct action ----
+  // One chooser view, no confirmation stage: pressing "Route now"
+  // executes immediately (pending: the button disables/relabels and
+  // the dialog's aria-live region shows the optimistic message;
+  // completed: a static result message stands in for the refreshed
+  // Recording Detail page the real app returns to). Nothing is
+  // actually scheduled or polled — the short timer only demonstrates
+  // the visible pending→completed contract.
   const processingOverlay = document.getElementById('processing-actions-dialog');
   const processingRadios = Array.from(document.querySelectorAll('input[name="routing-profile"]'));
   const PROCESSING_PROFILES = {
@@ -454,50 +515,30 @@ document.addEventListener('DOMContentLoaded', () => {
     cantonese: { name: 'cantonese', current: false },
     mandarin: { name: 'mandarin', current: false },
   };
-
-  function processingView(name) { return document.getElementById('pa-' + name); }
-
-  function showProcessingView(name) {
-    ['chooser', 'confirm', 'done'].forEach(v => { processingView(v).hidden = v !== name; });
-    const heading = processingView(name).querySelector('h3');
-    if (heading && heading.id) processingOverlay.setAttribute('aria-labelledby', heading.id);
-    const first = focusableIn(processingView(name))[0];
-    if (first) first.focus();
-  }
+  const processingApply = document.getElementById('processing-apply');
+  const processingStatus = document.getElementById('processing-status');
 
   setupDialog(processingOverlay, {
     trigger: 'processing-actions-trigger',
     onOpen() {
-      showProcessingView('chooser');
       processingRadios.forEach(r => { r.checked = r.value === 'european'; });
     },
   });
 
-  document.getElementById('processing-continue').addEventListener('click', () => {
+  processingApply.addEventListener('click', () => {
     const selected = processingRadios.find(r => r.checked);
+    if (!selected) return;
     const profile = PROCESSING_PROFILES[selected.value];
-    const confirmTitle = document.getElementById('processing-confirm-title');
-    const confirmLead = document.getElementById('processing-confirm-lead');
-    const bullets = document.getElementById('processing-confirm-bullets');
-    if (profile.current) {
-      confirmTitle.textContent = 'Keep current routing?';
-      confirmLead.textContent = `The ${profile.name} routing is already confirmed. Keeping it causes no processing change and no retranscription.`;
-      bullets.innerHTML = '<li>No retranscription is scheduled.</li><li>The current transcript and full history stay untouched.</li>';
-    } else {
-      confirmTitle.textContent = 'Reroute and retranscribe?';
-      confirmLead.textContent = `Switch routing to the ${profile.name} profile and schedule a retranscription.`;
-      bullets.innerHTML = '<li>A new transcript version is created only after the retranscription succeeds.</li><li>The current transcript and the full history remain preserved.</li>';
-    }
-    showProcessingView('confirm');
-  });
-
-  document.getElementById('processing-confirm-btn').addEventListener('click', () => {
-    const selected = processingRadios.find(r => r.checked);
-    const profile = PROCESSING_PROFILES[selected.value];
-    document.getElementById('processing-done-lead').textContent = profile.current
-      ? `Routing remains confirmed as ${profile.name}. No processing change.`
-      : `Reroute to ${profile.name} with retranscription recorded as confirmed.`;
-    showProcessingView('done');
+    runDirectAction({
+      button: processingApply,
+      live: processingStatus,
+      scope: processingOverlay.querySelector('.dialog'),
+      onDone() {
+        processingStatus.textContent = profile.current
+          ? `Routing confirmed as ${profile.name} — no processing change.`
+          : `Rerouted to ${profile.name} — the recording is ready to transcribe with it; the current transcript stays active until a retranscription succeeds.`;
+      },
+    });
   });
 
   // ---- Tag editor dialog (prototype proposal) ----
@@ -674,8 +715,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // Baseline: a clean, full transcript (no trim, no splits) so the reference
-  // layout stays clean until the user edits. Confirmed saves create fictional
-  // revisions; the History screen owns the revision list.
+  // layout stays clean until the user edits. Saves create fictional
+  // revisions directly (pending state, then the completed saved view); the
+  // History screen owns the revision list.
   let activeState = makeState();
   let staged = cloneState(activeState);
 
@@ -1038,27 +1080,22 @@ document.addEventListener('DOMContentLoaded', () => {
     renderAll();
   });
 
-  // ---- Save: one confirmed immutable revision ----
-  function updateConfirmSummary() {
-    const summary = document.getElementById('segmented-confirm-summary');
-    const sections = deriveSections(staged.start, staged.end, staged.splits);
-    const parts = [];
-    if (staged.start > 0) parts.push('crops ' + staged.start + ' line' + (staged.start === 1 ? '' : 's') + ' above');
-    if (staged.end < END_BOUNDARY) parts.push('crops ' + (SEGMENT_COUNT - staged.end) + ' line' + (SEGMENT_COUNT - staged.end === 1 ? '' : 's') + ' below');
-    const sectionPart = sections.length === 0
-      ? 'no topic sections (crop only)'
-      : sections.length + ' topic section' + (sections.length === 1 ? '' : 's') + ': ' +
-        sections.map(sec => '“' + (staged.titles.get(keyOf(sec)) || '') + '”').join(', ');
-    summary.textContent = 'Working range: ' + inclusiveRangeText(staged.start, staged.end) + '.' +
-      (parts.length ? ' ' + parts.join(', ') + '.' : '') + ' ' + sectionPart + '.';
-  }
-
-  const segConfirmDialog = setupDialog(document.getElementById('segmented-version-confirm-dialog'), {});
-
+  // ---- Save: one immutable revision, executed directly (no confirmation stage) ----
+  // Mirrors the production single executing POST from the editor's form:
+  // pending (Save disables/relabels, the bar's aria-live region shows the
+  // optimistic message), then the completed state — the saved cropped
+  // working view plus the new active History row, the prototype stand-in
+  // for the refreshed Transcript page (production has no progress
+  // reporting and no polling; the POST navigation itself is the wait).
+  const editSaveStatus = document.getElementById('edit-save-status');
   editSave.addEventListener('click', () => {
     if (!validateStaged().ok) return;
-    updateConfirmSummary();
-    segConfirmDialog.open();
+    runDirectAction({
+      button: editSave,
+      live: editSaveStatus,
+      scope: editModeBar,
+      onDone() { commitRevision(); },
+    });
   });
 
   function commitRevision() {
@@ -1090,12 +1127,6 @@ document.addEventListener('DOMContentLoaded', () => {
     segmentedHistoryBody.prepend(row);
     setEditMode(false);
   }
-
-  document.getElementById('segmented-confirm-btn').addEventListener('click', () => {
-    if (!validateStaged().ok) { segConfirmDialog.close(); return; }
-    commitRevision();
-    segConfirmDialog.close();
-  });
 
   cropViewToggle.addEventListener('click', () => {
     viewFullTranscript = !viewFullTranscript;

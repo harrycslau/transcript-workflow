@@ -12,15 +12,16 @@ Proves (per the approved Step 6.1 contract):
   cropped rows by default with a Show-full toggle hook and an empty-page
   message; zero splits => zero topics; N splits => N+1 titles in the
   staged metadata; titles/segment text are never unescaped;
-- the save route is POST-only + CSRF; the FIRST POST strictly parses the
-  bounded payload, runs the shared READ-ONLY semantic validation and
-  compares the submitted opaque fingerprint (stale/invalid => reject
-  BEFORE any confirmation), then renders the autoescaped confirmation
-  (no lock, no write); the CONFIRMED POST runs under the pipeline lock
-  with a post-lock fingerprint comparison (stale => safe no-op, lock
-  busy => 409), a no-op for unchanged payloads, sanitized failures, and a
-  redirect that always targets the parent transcript; corrupt/oversized
-  stored layouts fail closed;
+- the save route is POST-only + CSRF and executes on the FIRST (and
+  only) POST — no confirmation interstitial exists any more: the payload
+  is strictly parsed and the shared READ-ONLY semantic validation + the
+  active-transcript guard reject an invalid payload with 400 BEFORE any
+  pipeline lock, recovery or write; execution then runs under the
+  pipeline lock with a post-lock segmentation-fingerprint comparison
+  (stale => safe no-op redirect, lock busy => 409), a no-op for
+  unchanged payloads, sanitized failures, and a redirect that always
+  targets the parent transcript; corrupt/oversized stored layouts fail
+  closed; the removed ``confirmed`` flag is rejected as an unknown field;
 - History owns a bounded newest-first table of segmented revisions with
   topic counts from ONE annotation (no N+1), safe read-only v+layout links
   and no title dumping.
@@ -107,6 +108,23 @@ class TestEditorVisibility:
         assert 'id="boundary-action-dialog" hidden' in content
         assert 'id="segmentation-editor-state"' in content
         assert 'name="fingerprint"' in content
+        # Direct-execution markup hooks (phase 2 + pending UX): the save
+        # form executes on its single POST, so it carries the
+        # pending-state marker, and because the form itself is hidden
+        # the VISIBLE Save control and the aria-live region bind to it
+        # via data-action-control / the data-action-live="<action>"
+        # value (template-owned pending copy on both).
+        assert 'data-action-form="segmentation-save"' in content
+        assert 'data-action-control="edit-save"' in content
+        assert content.count('data-action-live') == 1
+        assert 'data-action-live="segmentation-save"' in content
+        assert 'aria-live="polite"' in content
+        assert 'data-pending-label="Saving revision…"' in content
+        assert "data-pending-message=" in content
+        # Concise inline note above the Save controls: a save creates an
+        # IMMUTABLE revision while the full transcript/audio stay.
+        assert "Saving creates a new IMMUTABLE layout revision" in content
+        assert "the full transcript and source audio are never modified" in content
         # The crop-toggle is ALWAYS rendered (the JS editable classification
         # depends on it), even on the initial full/no-crop page.
         assert 'id="crop-view-toggle"' in content
@@ -741,14 +759,12 @@ class TestSaveActionBasics:
         )
         assert response.status_code == 403
 
-    def test_confirmation_renders_without_lock_or_write(self, client, monkeypatch):
+    def test_save_executes_on_first_post_no_confirmation(self, client, monkeypatch):
+        """The save POST VALIDATES AND EXECUTES on the first (and only)
+        POST: no confirmation page is rendered, the revision is created,
+        and the response is the parent-transcript redirect."""
         recording, transcript, _ = _transcript(sha="seg-confirm")
         fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
-
-        def busy(*args, **kwargs):
-            raise AssertionError("the confirmation step must not take the pipeline lock")
-
-        monkeypatch.setattr("workflow.services.web_actions.pipeline_lock", busy)
         response = client.post(
             f"/recordings/{recording.pk}/transcript/save/",
             {
@@ -760,20 +776,20 @@ class TestSaveActionBasics:
                 "fingerprint": fingerprint,
             },
         )
-        assert response.status_code == 200
-        content = response.content.decode()
-        assert "Save this trim &amp; split revision?" in content
-        assert "segments 2–7" in content
-        assert "1 split, 2 named sections" in content
-        # No mutation happened.
-        assert SegmentedVersion.objects.count() == 0
-        # The confirmation carries the full hidden payload back.
-        assert 'name="split" value="4"' in content
-        assert 'name="title" value="A"' in content
-        assert 'name="title" value="B"' in content
-        assert 'name="confirmed" value="1"' in content
+        assert response.status_code == 302
+        assert not any(
+            "segmentation_confirm" in (t.name or "") for t in response.templates
+        )
+        assert "Save this trim &amp; split revision?" not in response.content.decode()
+        assert b'name="confirmed"' not in response.content
+        version = SegmentedVersion.objects.get(transcript=transcript, is_active=True)
+        assert (version.start_segment_ordinal, version.end_segment_ordinal_exclusive) == (2, 8)
+        assert [s.title for s in version.sections.order_by("ordinal")] == ["A", "B"]
 
-    def test_confirmation_escapes_topic_titles(self, client):
+    def test_executed_save_escapes_topic_titles(self, client):
+        """Titles are user content stored (and later rendered) exactly as
+        submitted — the removed confirmation page never re-echoed them
+        unescaped, and the working view keeps them autoescaped."""
         recording, transcript, _ = _transcript(sha="seg-xss-confirm")
         fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         response = client.post(
@@ -787,45 +803,22 @@ class TestSaveActionBasics:
                 "fingerprint": fingerprint,
             },
         )
-        content = response.content.decode()
-        assert "<script>alert(1)</script>" not in content
-        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in content
-        assert SegmentedVersion.objects.count() == 0
+        assert response.status_code == 302
+        version = SegmentedVersion.objects.get(transcript=transcript, is_active=True)
+        assert [s.title for s in version.sections.order_by("ordinal")] == [
+            "<script>alert(1)</script>",
+            "&lt;b&gt;safe&lt;/b&gt;",
+        ]
+        page = client.get(f"/recordings/{recording.pk}/transcript/").content.decode()
+        assert "<script>alert(1)</script>" not in page
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
 
-    def test_stale_fingerprint_rejected_before_confirmation(self, client, monkeypatch):
-        """The FIRST POST must reject a stale page BEFORE any confirmation:
-        the submitted opaque fingerprint is compared against a freshly
-        computed one — never silently re-synthesized. No lock, no DML."""
-        recording, transcript, _ = _transcript(sha="seg-stale-first")
-        stale = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
-        # State changes after the page was rendered.
-        _save(recording, transcript, 1, 5, [], [])
-
-        def no_lock(*args, **kwargs):
-            raise AssertionError("no pipeline lock may be taken on the first POST")
-
-        monkeypatch.setattr("workflow.services.web_actions.pipeline_lock", no_lock)
-        response = client.post(
-            f"/recordings/{recording.pk}/transcript/save/",
-            {
-                "transcript_id": str(transcript.pk),
-                "start": "2",
-                "end_exclusive": "8",
-                "fingerprint": stale,
-            },
-        )
-        assert response.status_code == 400
-        assert "state changed" in response.content.decode().lower()
-        # The page-render-time revision is untouched.
-        assert SegmentedVersion.objects.filter(transcript=transcript).count() == 1
-        assert SegmentedVersion.objects.get(transcript=transcript, is_active=True).revision == 1
-
-    def test_semantically_invalid_payload_rejected_before_confirmation(
+    def test_semantically_invalid_payload_rejected_before_lock(
         self, client, monkeypatch
     ):
-        """The FIRST POST validates semantics READ-ONLY (no lock/recovery/
-        write): invalid ranges/splits/titles reject with 400 and never
-        reach the confirmation page or any mutation."""
+        """The executing POST validates semantics READ-ONLY BEFORE the
+        lock (no lock/recovery/write): invalid ranges/splits/titles
+        reject with 400 and never reach any mutation."""
         recording, transcript, _ = _transcript(sha="seg-invalid-first")
         fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
 
@@ -865,7 +858,8 @@ class TestSaveActionBasics:
             )
             assert response.status_code == 400, overrides
             assert expected in response.content.decode().lower(), overrides
-            assert "Save this trim &amp; split revision?" not in response.content.decode()
+            # No mutation, no 200 interstitial, no lock acquired.
+            assert response.status_code != 200, overrides
         assert SegmentedVersion.objects.count() == 0
 
     def test_malformed_payloads_rejected_without_write(self, client):
@@ -909,8 +903,10 @@ class TestSaveActionBasics:
         self, client
     ):
         """The bounded parse is strict: duplicate singleton fields, unknown
-        fields, malformed fingerprints, and a ``confirmed`` value other
-        than exactly one ``1`` are rejected with no write."""
+        fields and malformed fingerprints are rejected with no write. The
+        removed two-step-confirmation ``confirmed`` flag is now an UNKNOWN
+        field — rejected in every form (any value, including the legacy
+        ``1``, and duplicates)."""
         recording, transcript, _ = _transcript(sha="seg-strict")
         fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         base = {"transcript_id": str(transcript.pk), "fingerprint": fingerprint}
@@ -940,62 +936,43 @@ class TestSaveActionBasics:
                 dict(base, fingerprint=bad, start="0", end_exclusive="5"),
             )
             assert response.status_code == 400, bad
-        # ``confirmed`` must be absent or exactly one ``1``.
-        for bad_confirmed in ("2", "0", "yes", ""):
+        # The legacy ``confirmed`` protocol is GONE: the field is an
+        # unknown field in every value and cardinality.
+        for confirmed in ("1", "2", "0", "yes", "", ["1", "1"]):
             response = client.post(
                 f"/recordings/{recording.pk}/transcript/save/",
-                dict(base, start="0", end_exclusive="5", confirmed=bad_confirmed),
+                dict(base, start="0", end_exclusive="5", confirmed=confirmed),
             )
-            assert response.status_code == 400, bad_confirmed
-        response = client.post(
-            f"/recordings/{recording.pk}/transcript/save/",
-            dict(base, start="0", end_exclusive="5", confirmed=["1", "1"]),
-        )
-        assert response.status_code == 400
+            assert response.status_code == 400, confirmed
         assert SegmentedVersion.objects.count() == 0
 
-    def test_confirmed_without_fingerprint_rejected_before_lock(self, client, monkeypatch):
-        """A confirmed POST without the required opaque fingerprint is
-        rejected BEFORE the pipeline lock is ever taken."""
+    def test_fingerprint_required_before_lock(self, client, monkeypatch):
+        """The one executing POST REQUIRES the opaque fingerprint: a
+        missing/duplicate/malformed value is rejected BEFORE the pipeline
+        lock is ever taken and with zero DML."""
         recording, transcript, _ = _transcript(sha="seg-nofp")
 
         def no_lock(*args, **kwargs):
             raise AssertionError("the pipeline lock must not be taken without a fingerprint")
 
         monkeypatch.setattr("workflow.services.web_actions.pipeline_lock", no_lock)
-        response = client.post(
-            f"/recordings/{recording.pk}/transcript/save/",
-            {
-                "transcript_id": str(transcript.pk),
-                "start": "0",
-                "end_exclusive": "5",
-                "confirmed": "1",
-            },
-        )
-        assert response.status_code == 400
-        assert "fingerprint" in response.content.decode().lower()
-        assert SegmentedVersion.objects.count() == 0
-
-    def test_missing_fingerprint_rejected_on_first_post(self, client, monkeypatch):
-        """The FIRST POST also REQUIRES the opaque fingerprint: a missing
-        value is rejected before any confirmation, lock, or DML."""
-        recording, transcript, _ = _transcript(sha="seg-nofp-first")
-
-        def no_lock(*args, **kwargs):
-            raise AssertionError("no pipeline lock may be taken without a fingerprint")
-
-        monkeypatch.setattr("workflow.services.web_actions.pipeline_lock", no_lock)
-        response = client.post(
-            f"/recordings/{recording.pk}/transcript/save/",
-            {
-                "transcript_id": str(transcript.pk),
-                "start": "2",
-                "end_exclusive": "8",
-            },
-        )
-        assert response.status_code == 400
-        assert "fingerprint" in response.content.decode().lower()
-        assert "Save this trim &amp; split revision?" not in response.content.decode()
+        for bad_fingerprint_data in (
+            {},
+            {"fingerprint": ["", ""]},
+            {"fingerprint": "not-a-fingerprint"},
+        ):
+            response = client.post(
+                f"/recordings/{recording.pk}/transcript/save/",
+                {
+                    "transcript_id": str(transcript.pk),
+                    "start": "0",
+                    "end_exclusive": "5",
+                    **bad_fingerprint_data,
+                },
+            )
+            assert response.status_code == 400, bad_fingerprint_data
+            assert "fingerprint" in response.content.decode().lower()
+            assert response.status_code != 200
         assert SegmentedVersion.objects.count() == 0
 
     def test_non_active_transcript_rejected(self, client):
@@ -1047,7 +1024,7 @@ class TestSaveActionBasics:
 
 
 class TestSaveExecution:
-    def test_confirmed_save_creates_revision_and_redirects(self, client):
+    def test_save_creates_revision_and_redirects(self, client):
         recording, transcript, _ = _transcript(sha="seg-save-ok")
         fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
         response = client.post(
@@ -1059,7 +1036,6 @@ class TestSaveExecution:
                 "split": ["4"],
                 "title": ["Intro", "Main"],
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 302
@@ -1075,7 +1051,7 @@ class TestSaveExecution:
             ordinal=0, segmented_version__isnull=True
         ).count() == 1
 
-    def test_confirmed_save_is_noop_for_unchanged_payload(self, client):
+    def test_save_is_noop_for_unchanged_payload(self, client):
         recording, transcript, _ = _transcript(sha="seg-noop")
         _save(recording, transcript, 2, 8, [4], ["Intro", "Main"])
         fingerprint = segmentation_fingerprint(recording.pk, transcript, timezone_name="Europe/Helsinki")
@@ -1088,7 +1064,6 @@ class TestSaveExecution:
                 "split": ["4"],
                 "title": ["Intro", "Main"],
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 302
@@ -1107,7 +1082,6 @@ class TestSaveExecution:
                 "start": "0",
                 "end_exclusive": "10",
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 302
@@ -1125,7 +1099,6 @@ class TestSaveExecution:
                 "start": "2",
                 "end_exclusive": "8",
                 "fingerprint": stale,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 302
@@ -1150,7 +1123,6 @@ class TestSaveExecution:
                 "start": "0",
                 "end_exclusive": "5",
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 409
@@ -1172,7 +1144,6 @@ class TestSaveExecution:
                 "split": ["4"],
                 "title": ["A", "B"],
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 302
@@ -1191,7 +1162,6 @@ class TestSaveExecution:
                 "split": ["5"],
                 "title": ["A", "B"],
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         versions = list(
@@ -1203,8 +1173,8 @@ class TestSaveExecution:
         assert versions[1].is_active is True
         assert versions[1].superseded_at is None
 
-    def test_confirmed_save_service_rejection_is_sanitized(self, client, monkeypatch):
-        """A confirmed-POST failure inside the locked execution yields a
+    def test_save_service_rejection_is_sanitized(self, client, monkeypatch):
+        """A save-POST failure inside the locked execution yields a
         fixed sanitized failure, a safe parent redirect, and zero DML —
         never a raw exception/SQL/ids page."""
         from workflow.services.segmentation import SegmentationError
@@ -1227,7 +1197,6 @@ class TestSaveExecution:
                 "split": ["5"],
                 "title": ["A", "B"],
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 302
@@ -1263,7 +1232,6 @@ class TestSaveExecution:
                 "split": ["4"],
                 "title": ["A", "B"],
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 302
@@ -1784,11 +1752,18 @@ class TestStaticEditorJsContract:
         source = self._editor_source()
         editor = source[source.index("function initSegmentationControls()"):]
         # Save writes the bounded staged metadata into hidden inputs and
-        # submits the server-rendered form (the server renders the
-        # confirmation BEFORE any mutation; no fetch/XHR anywhere in the
-        # editor).
+        # submits the server-rendered form through requestSubmit() so
+        # the shared form[data-action-form] pending enhancement runs
+        # (duplicate guard, aria-busy, disable/relabel of the VISIBLE
+        # Save control, live message) on this programmatic submit too;
+        # the payload inputs are built BEFORE submitting and never
+        # touched by the enhancement. A browser without requestSubmit
+        # still saves via the plain native submit() (no pending UI).
+        # No fetch/XHR anywhere in the editor.
         assert "saveForm.appendChild(input)" in editor
-        assert "saveForm.submit()" in editor
+        assert "saveForm.requestSubmit()" in editor
+        assert "typeof saveForm.requestSubmit ===" in editor
+        assert "saveForm.submit()" in editor  # documented fallback path
         assert "fetch(" not in editor
         assert "XMLHttpRequest" not in editor
         # The dirty-state leave warning is a browser-owned dialog and a

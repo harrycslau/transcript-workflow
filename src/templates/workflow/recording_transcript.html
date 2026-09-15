@@ -52,13 +52,14 @@
 {% if editable %}
 <div class="edit-mode-bar" id="edit-mode-bar" hidden>
   <span class="edit-status" id="edit-status" role="status" aria-live="polite">No changes yet.</span>
-  <span class="edit-help muted">Editing applies to the visible segments on this page — navigating away discards unsaved edits. The full transcript and source audio are never modified.</span>
+  <span class="edit-help muted">Editing applies to the visible segments on this page — navigating away discards unsaved edits. Saving creates a new IMMUTABLE layout revision; the full transcript and source audio are never modified.</span>
   <div class="edit-actions">
     <button type="button" class="btn-sm" id="edit-clear-crop" disabled>Clear crop</button>
     <button type="button" class="btn-sm" id="edit-reset" disabled>Reset</button>
-    <button type="button" class="btn-sm btn-primary" id="edit-save" disabled>Save revision</button>
+    <button type="button" class="btn-sm btn-primary" id="edit-save" disabled data-pending-label="Saving revision…">Save revision</button>
+    <span class="action-live" data-action-live="segmentation-save" aria-live="polite" data-pending-message="Saving the new immutable revision — the previous layout stays active."></span>
   </div>
-  <form method="post" action="{% url 'action-segmentation-save' recording.pk %}" id="segmentation-save-form" class="segmentation-save-form" hidden>
+  <form method="post" action="{% url 'action-segmentation-save' recording.pk %}" id="segmentation-save-form" class="segmentation-save-form" data-action-form="segmentation-save" data-action-control="edit-save" hidden>
     {% csrf_token %}
     <input type="hidden" name="fingerprint" id="segmentation-fingerprint-input" value="{{ fingerprint }}">
     <input type="hidden" name="transcript_id" value="{{ transcript.pk }}">

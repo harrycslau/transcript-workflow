@@ -387,7 +387,7 @@ class TestParser:
 
 
 # ---------------------------------------------------------------------------
-# Web: editor payload + two-step save with flags
+# Web: editor payload + one-POST direct-execution save with flags
 # ---------------------------------------------------------------------------
 
 
@@ -429,7 +429,7 @@ class TestWebEditor:
         assert state["titles"] == ["Custom A", "Segment 2 of 202609120930"]
         assert state["title_is_temporary"] == [False, True]
 
-    def test_first_post_renders_flags_and_derived_titles(self, client):
+    def test_save_creates_derived_sections(self, client):
         rec, transcript, _f = _recording(recorded=datetime(2026, 9, 12, 9, 30, tzinfo=ZoneInfo(TZ)))
         fingerprint = segmentation_fingerprint(rec.pk, transcript, timezone_name=TZ)
         response = client.post(
@@ -442,43 +442,22 @@ class TestWebEditor:
                 "title": ["", ""],
                 "title_is_temporary": ["1", "1"],
                 "fingerprint": fingerprint,
-            },
-        )
-        assert response.status_code == 200
-        content = response.content.decode()
-        # The confirmation shows the SERVER-derived names (never blanks).
-        assert "Segment 1 of 202609120930" in content
-        assert "Segment 2 of 202609120930" in content
-        # The hidden payload carries the exact flags back.
-        assert 'name="title_is_temporary" value="1"' in content
-        assert content.count('name="title_is_temporary"') == 2
-        assert SegmentedVersion.objects.count() == 0  # no mutation
-
-    def test_confirmed_save_creates_derived_sections(self, client):
-        rec, transcript, _f = _recording(recorded=datetime(2026, 9, 12, 9, 30, tzinfo=ZoneInfo(TZ)))
-        fingerprint = segmentation_fingerprint(rec.pk, transcript, timezone_name=TZ)
-        response = client.post(
-            f"/recordings/{rec.pk}/transcript/save/",
-            {
-                "transcript_id": str(transcript.pk),
-                "start": "0",
-                "end_exclusive": "6",
-                "split": ["2"],
-                "title": ["", ""],
-                "title_is_temporary": ["1", "1"],
-                "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 302
+        # Direct execution: no confirmation interstitial is rendered.
+        assert not any(
+            "segmentation_confirm" in (t.name or "") for t in response.templates
+        )
         version = SegmentedVersion.objects.get(transcript=transcript, is_active=True)
         sections = list(version.sections.order_by("ordinal"))
+        # The stored rows carry the SERVER-derived names (never blanks).
         assert [(s.title, s.title_is_temporary) for s in sections] == [
             ("Segment 1 of 202609120930", True),
             ("Segment 2 of 202609120930", True),
         ]
 
-    def test_confirmed_save_rejects_forged_flag(self, client):
+    def test_save_rejects_forged_flag(self, client):
         rec, transcript, _f = _recording(sha="tt-web-forge")
         fingerprint = segmentation_fingerprint(rec.pk, transcript, timezone_name=TZ)
         response = client.post(
@@ -491,16 +470,15 @@ class TestWebEditor:
                 "title": ["Not derived", "B"],
                 "title_is_temporary": ["1", "0"],
                 "fingerprint": fingerprint,
-                "confirmed": "1",
             },
         )
         assert response.status_code == 400
         assert "auto-named" in response.content.decode().lower()
         assert SegmentedVersion.objects.count() == 0
 
-    def test_confirmed_save_still_locked_and_schedules_no_sync(self, client):
+    def test_save_still_locked_and_schedules_no_sync(self, client):
         """The temporary-title save keeps the exact Step 6.1 contract:
-        confirmed saves run under the global pipeline lock (busy => 409)
+        saves run under the global pipeline lock (busy => 409)
         and schedule NO recording search/embedding sync."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
@@ -518,7 +496,6 @@ class TestWebEditor:
             "title": ["", ""],
             "title_is_temporary": ["1", "1"],
             "fingerprint": fingerprint,
-            "confirmed": "1",
         }
         # Busy lock => friendly 409, nothing written.
         holder = pipeline_lock(get_config())
@@ -530,7 +507,7 @@ class TestWebEditor:
             holder.__exit__(None, None, None)
         assert SegmentedVersion.objects.count() == 0
 
-        # Uncontended confirmed save: no search/embedding document writes.
+        # Uncontended save: no search/embedding document writes.
         with CaptureQueriesContext(connection) as ctx:
             response = client.post(f"/recordings/{rec.pk}/transcript/save/", data)
         assert response.status_code == 302

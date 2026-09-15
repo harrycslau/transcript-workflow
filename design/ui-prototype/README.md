@@ -23,18 +23,22 @@ open design/ui-prototype/index.html
   scissors on the inter-segment divider lines (no panel and no modal). Clicking a scissors
   opens a small action dialog — Split here / Crop from here / Crop to here /
   Remove split; crop-only needs no topics, and splits create inline-named
-  sections. Save confirms one immutable revision; history lives on the History
+  sections. **Save revision** executes directly (pending state on the control,
+  then the saved immutable revision — no confirmation dialog); history lives on the History
   screen. Historical transcript versions are read-only.
-- **Routing** in the detail header opens a modal chooser to reroute and
-  retranscribe with a different routing profile, or confirm the current routing
-  (prototype-only, static — nothing is scheduled or polled)
+- **Routing** in the detail header opens a chooser to reroute with a different
+  routing profile or confirm the current routing; **Route now** executes the
+  action immediately (prototype-only, static — nothing is scheduled or polled;
+  a pending state on the button is followed by a static completed state)
 - **+ Add tag** opens the tag editor dialog: filter configured tags in compact
   rows, toggle assignments, and create prototype-only custom tags with
   **Create and add**
 - Each separate screen has a **Back to Recording overview** control
 - **Back to Library** preserves query, filters, and scroll position
 - **Copy Markdown** / **Copy transcript** use the clipboard when available
-- **Regenerate summary** opens the existing confirmation dialog
+- **Regenerate summary** runs as a direct action: the button disables and
+  relabels with an optimistic `aria-live` pending message, then a completed
+  state appears (there is no confirmation dialog)
 - View preference (Card/Table) is saved to `localStorage`
 - Press `/` to focus search from anywhere
 - **Technical details** / **Summary provenance** collapse with native `<details>` elements (no JavaScript)
@@ -55,7 +59,8 @@ contains the **complete summary** in a Markdown-like document flow:
   document and switch visual state as before.
 - A contextual utility row next to the Summary heading carries
   **Copy Markdown**, **Download .md**, **Plain text** and
-  **Regenerate summary** (the existing confirmation dialog).
+  **Regenerate summary** (a direct action with a pending state then a
+  completed state — no confirmation dialog).
 - An optional collapsed **Summary provenance** block keeps
   variant/model/version/generation details available without noise.
 
@@ -109,18 +114,21 @@ links in the Recording Detail header. It opens an accessible modal chooser that
 clearly shows the current routing (european profile · auto · verified) and lets
 the user pick a routing profile:
 
-- Choosing a **different profile** (cantonese / mandarin) schedules a
-  retranscription with that profile. The chooser explains that a new transcript
-  version is created **only after** the retranscription succeeds, and that the
-  current transcript and full history remain preserved.
+- Choosing a **different profile** (cantonese / mandarin) reroutes now and
+  leaves the recording ready to retranscribe with it. The chooser explains that
+  a new transcript version is created **only after** the retranscription
+  succeeds, and that the current transcript and full history remain preserved.
 - Choosing the **current profile** keeps the already-confirmed routing — no
   processing change and no retranscription.
 
-The primary button demonstrates **Continue to confirmation**, which updates the
-dialog to a prototype confirmation state with copy tailored to the selected
-profile, followed by a static "confirmation recorded" state. The prototype
-explicitly does **not** simulate background or polling behaviour — no work is
-scheduled in the background.
+The primary button is **Route now** — a direct action with **no confirmation
+stage**: pressing it disables/relabels the button and shows an optimistic
+`aria-live` pending message, then a static completed state with copy tailored
+to the selected profile (production performs one immediate POST and shows the
+outcome on the refreshed Recording Detail page). The prototype explicitly does
+**not** simulate background or polling behaviour — no work is scheduled in the
+background and the short timer only demonstrates the visible pending→completed
+contract.
 
 ### 2. Tag editor dialog + custom tag creation
 
@@ -194,14 +202,18 @@ are not prototyped now.
 - **Clear crop** restores the full transcript. Splits already made by the user
   are retained (sections are created by splits, never by a crop), so a
   crop-only state clears to a plain full transcript with zero sections.
-- **One staged immutable revision.** Any crop/split/topic edit marks "not saved
-  yet". **Reset** restores the current active revision; **Save revision**
-  (disabled while invalid) opens the existing accessible confirmation dialog
-  summarizing the crop range and the optional sections. Confirming creates one
-  fictional new revision; an unchanged payload is a no-op.
+- **One staged immutable revision, saved directly.** Any crop/split/topic edit
+  marks "not saved yet". **Reset** restores the current active revision;
+  **Save revision** (disabled while invalid or while a save is already running)
+  executes immediately — **no confirmation dialog**: the button disables and
+  relabels ("Saving revision…") and the bar's `aria-live` region shows the
+  optimistic pending message, then the completed state appears (the saved
+  cropped working view plus the new active History row, mirroring production's
+  single executing POST followed by the refreshed page). An unchanged payload
+  is a no-op.
 - **History belongs on History.** The revision list lives on the History screen
   as a captioned table (revision, saved, working range, sections, status);
-  confirming a save appends a row there and marks the prior active row
+  a save appends a row there and marks the prior active row
   superseded. The table is illustrative — this static prototype only displays
   rows and does not provide navigable/readable historical views (production
   6.1 will provide recording-scoped read-only access to prior revisions).
@@ -306,6 +318,11 @@ obsolete Summary-screen markup and dead selectors are removed.
   checkbox rows and a `role="status"` live region for its status message
 - Mobile layout stacks both dialogs using the existing tokens and
   breakpoints (full-width action buttons, stacked create row)
+- The direct-action demos (regenerate, Route now, Save revision) use a
+  `role="status"` `aria-live` region for the optimistic pending/completed
+  message plus `aria-busy` on the running region, and block duplicate
+  presses while running — the same visible contract as production's
+  `form[data-action-form]` enhancement
 
 ## Current production behaviours preserved
 
@@ -313,7 +330,11 @@ obsolete Summary-screen markup and dead selectors are removed.
 - Concrete existing variants readable
 - Only approved generation selectors creating variants
 - Current summary retained after failed regeneration
-- Explicit confirmation before regeneration (modal)
+- Workflow actions (regenerate, routing, save revision) execute directly on
+  the first request — no confirmation dialog; the submit control
+  disables/relabels with an optimistic `aria-live` pending state, and the
+  completed result arrives on the refreshed page (no progress polling; the
+  prototype stands in for it with a short timer)
 - Manual tag editing
 - Date and tag browsing
 - Copy-friendly Markdown/plain-text exports

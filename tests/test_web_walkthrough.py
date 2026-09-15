@@ -90,7 +90,7 @@ def test_walkthrough():
     actions_mod.execute_web_action = fake_exec
     try:
         r = c.post(f"/recordings/{recording.pk}/summarize/",
-                   {"confirmed": "1", "mode": "regenerate", "fingerprint": fp})
+                   {"mode": "regenerate", "fingerprint": fp})
     finally:
         actions_mod.execute_web_action = real_exec
     assert r.status_code == 302 and seen["action"] == "summarize"
@@ -104,7 +104,7 @@ def test_walkthrough():
     wa.pipeline_lock = busy
     try:
         r = c.post(f"/recordings/{recording.pk}/confirm-routing/",
-                   {"confirmed": "1", "fingerprint": fp})
+                   {"fingerprint": fp})
     finally:
         wa.pipeline_lock = real_lock
     assert r.status_code == 409

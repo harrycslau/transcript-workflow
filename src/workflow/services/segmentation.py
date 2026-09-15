@@ -83,7 +83,6 @@ MAX_TOPIC_TITLE_LENGTH = 255
 _MESSAGES = {
     "invalid_input": "invalid segmentation input",
     "invalid_fingerprint": "invalid or missing state fingerprint",
-    "stale_state": "The trim & split state changed since the page was opened — reload and try again.",
     "layout_invalid": "The stored trim & split revision is invalid.",
     "title_blank": "topic title is blank",
     "title_too_long": "topic title is too long",
@@ -924,7 +923,7 @@ def segmentation_fingerprint(
       rendered save form.
 
     The value is OPAQUE: titles/ids never appear in the hidden form value.
-    The confirmed save re-computes this after the pipeline lock and treats
+    The executing save re-computes this after the pipeline lock and treats
     any mismatch as a safe no-op, so a stale or duplicate form can never
     save against a state the user did not see.
     """
@@ -998,9 +997,8 @@ def validate_payload_for_transcript(
       title is corrupt).
 
     The fingerprint STALENESS comparison is deliberately NOT part of this
-    helper: the first POST compares it in the view before showing the
-    confirmation; the confirmed POST recomputes it after the pipeline lock
-    (stale => safe no-op conflict).
+    helper: the executing POST recomputes it after the pipeline lock
+    (stale => safe no-op).
     """
     if recording.pk != transcript.recording_id:
         raise SegmentationError("transcript_not_found")
@@ -1043,7 +1041,7 @@ def validate_payload_for_transcript(
             raise SegmentationError("invalid_input")
 
     # Existing current state: the active layout must be canonical (fail
-    # closed on corrupt stored state before any confirmation/execution;
+    # closed on corrupt stored state before any execution;
     # a corrupt temporary row raises layout_invalid here).
     current = (
         SegmentedVersion.objects.using(using)
@@ -1087,8 +1085,7 @@ _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 # Fields the Step 6.1 save route accepts. ``split``/``title`` are the only
 # repeated fields (bounded); everything else must appear exactly once
-# (``csrfmiddlewaretoken`` at most once; ``confirmed`` absent or exactly
-# one ``1``).
+# (``csrfmiddlewaretoken`` at most once).
 _ALLOWED_FIELDS = frozenset(
     {
         "csrfmiddlewaretoken",
@@ -1096,7 +1093,6 @@ _ALLOWED_FIELDS = frozenset(
         "start",
         "end_exclusive",
         "fingerprint",
-        "confirmed",
         "split",
         "title",
         "title_is_temporary",
@@ -1129,7 +1125,6 @@ def parse_segmentation_payload(data) -> dict:
     - exactly one each of ``transcript_id`` / ``start`` / ``end_exclusive``
       / ``fingerprint`` (canonical ASCII-decimal ints; the fingerprint a
       canonical 64-lowercase-hex SHA-256);
-    - ``confirmed`` absent or exactly one ``1``;
     - ``csrfmiddlewaretoken`` at most once (CSRF control);
     - ``split`` (<= ``MAX_TOPIC_SECTIONS - 1``), ``title``
       (<= ``MAX_TOPIC_SECTIONS``) and ``title_is_temporary``
@@ -1137,14 +1132,15 @@ def parse_segmentation_payload(data) -> dict:
       every ``title_is_temporary`` value is exactly ``1`` or ``0`` and —
       when present — the count must exactly equal the title count
       (absent flags normalize to all ``0`` = custom, the legacy default);
-    - unknown fields rejected.
+    - unknown fields rejected (the removed two-step-confirmation
+      ``confirmed`` flag included — the save executes on this one POST).
 
     Returns
     ``{"transcript_id", "start", "end_exclusive", "splits", "titles",
-    "title_is_temporary", "fingerprint", "confirmed"}``. Semantic
-    validation against the database is deliberately NOT here — see
-    :func:`validate_payload_for_transcript` (first POST) and
-    :func:`save_segmented_version` (confirmed, transactional).
+    "title_is_temporary", "fingerprint"}``. Semantic validation against
+    the database is deliberately NOT here — see
+    :func:`validate_payload_for_transcript` (view, before the lock) and
+    :func:`save_segmented_version` (executing, transactional).
     """
     if not hasattr(data, "get") or not hasattr(data, "getlist"):
         raise SegmentationError("invalid_input")
@@ -1162,17 +1158,9 @@ def parse_segmentation_payload(data) -> dict:
     fingerprint_values = data.getlist("fingerprint")
     if len(fingerprint_values) != 1:
         # Missing OR duplicated fingerprint: same stable category, and
-        # rejected before any lock on the confirmed path.
+        # rejected before any lock on the executing path.
         raise SegmentationError("invalid_fingerprint")
     fingerprint = _require_fingerprint(fingerprint_values[0])
-
-    confirmed_values = data.getlist("confirmed")
-    if confirmed_values:
-        if len(confirmed_values) != 1 or confirmed_values[0] != "1":
-            raise SegmentationError("invalid_input")
-        confirmed = True
-    else:
-        confirmed = False
 
     split_values = data.getlist("split")
     title_values = data.getlist("title")
@@ -1214,5 +1202,4 @@ def parse_segmentation_payload(data) -> dict:
         "titles": titles,
         "title_is_temporary": flags,
         "fingerprint": fingerprint,
-        "confirmed": confirmed,
     }

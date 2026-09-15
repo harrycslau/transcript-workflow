@@ -38,7 +38,8 @@ urlpatterns = [
     path("recordings/<uuid:recording_id>/transcript/", recordings.recording_transcript, name="recording-transcript"),
     path("recordings/<uuid:recording_id>/history/", recordings.recording_history, name="recording-history"),
 
-    # Step 6.1 segmented-version save (POST-only, two-step confirmation).
+    # Step 6.1 segmented-version save (POST-only, executes on the first
+    # POST; no confirmation interstitial).
     path(
         "recordings/<uuid:recording_id>/transcript/save/",
         segmentation.action_segmentation_save,
@@ -46,7 +47,8 @@ urlpatterns = [
     ),
 
     # Step 6.2 topic-section detail (read route) and its summary action
-    # (POST-only, two-step confirmation). Section pks are BigAutoField
+    # (POST-only, executes on the first POST; no confirmation
+    # interstitial). Section pks are BigAutoField
     # ints; the parent Recording scope is enforced in the views.
     path(
         "recordings/<uuid:recording_id>/sections/<int:section_id>/",
@@ -101,7 +103,8 @@ urlpatterns = [
         name="section-tag-remove",
     ),
 
-    # Pipeline actions (POST, two-step confirmation).
+    # Pipeline actions (POST; execute on the first POST, no confirmation
+    # interstitial).
     path("recordings/<uuid:recording_id>/route/", actions.action_route, name="action-route"),
     path(
         "recordings/<uuid:recording_id>/confirm-routing/",

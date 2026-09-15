@@ -533,13 +533,13 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 
 .warning-banner { background: var(--color-warn-bg); border: 1px solid var(--color-warn); border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4); font-size: var(--fs-sm); color: var(--color-warn); font-weight: 500; margin-bottom: var(--sp-4); display: flex; align-items: center; gap: var(--sp-2); }
 
-.confirm-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.3); display: flex; align-items: center; justify-content: center; z-index: 200; }
-.confirm-dialog { background: var(--color-surface); border-radius: var(--radius-lg); box-shadow: 0 8px 32px rgba(0,0,0,0.12); padding: var(--sp-6); max-width: 420px; width: 90%; }
-.confirm-dialog h3 { font-size: var(--fs-lg); margin-bottom: var(--sp-3); }
-.confirm-dialog p { font-size: var(--fs-sm); color: var(--color-text-2); margin-bottom: var(--sp-5); }
-.confirm-actions { display: flex; gap: var(--sp-3); justify-content: flex-end; }
-.confirm-summary { background: var(--color-surface-2); border-radius: var(--radius-md); padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-4); font-size: var(--fs-sm); color: var(--color-text-2); }
-.confirm-summary strong { color: var(--color-text); }
+/* Direct-action pending/completed status regions (production
+   .action-live). The regions stay rendered (never display:none) so
+   screen readers announce the optimistic pending message and the
+   completed result. */
+.action-live { font-size: var(--fs-xs); font-weight: 600; color: var(--color-text-2); align-self: center; }
+.edit-actions .action-live:not(:empty) { flex-basis: 100%; }
+.dialog .action-live:not(:empty) { margin: var(--sp-4) 0 var(--sp-5); }
 
 /* ============================================================
    PROTOTYPE DIALOGS — accessible modal/pop-out (prototype only)
@@ -577,8 +577,6 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   background: var(--color-surface-2); border-radius: var(--radius-md);
   padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-5);
 }
-.dialog-bullets { list-style: disc; margin: 0 0 var(--sp-5); padding-left: var(--sp-6); font-size: var(--fs-sm); color: var(--color-text-2); }
-.dialog-bullets li { margin: var(--sp-2) 0; }
 .dialog-actions { display: flex; gap: var(--sp-3); justify-content: flex-end; flex-wrap: wrap; }
 .dialog-field-label { display: block; font-size: var(--fs-sm); font-weight: 600; color: var(--color-text-2); margin-bottom: var(--sp-2); }
 .dialog-input {

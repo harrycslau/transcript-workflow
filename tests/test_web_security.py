@@ -139,8 +139,8 @@ def test_versioned_static_assets(client):
     (an unversioned URL could keep serving a stale cached script
     against the new templates)."""
     content = client.get("/recordings/").content.decode("utf-8")
-    assert '/static/workflow/base.css?v=5' in content
-    assert '/static/workflow/app.js?v=5' in content
+    assert '/static/workflow/base.css?v=6' in content
+    assert '/static/workflow/app.js?v=6' in content
 
 
 class TestSecretHygiene:

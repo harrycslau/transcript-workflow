@@ -129,6 +129,66 @@ Non-negotiable principles:
   existing parent-recording sync from the section summarize/tag/
   segmentation writers (see the Step 6.3 bullet).
 
+## Web actions (direct execution, no confirmation interstitial)
+
+- EVERY mutating web workflow action — manual route, Confirm routing,
+  Transcribe, summarize Generate/Retry/Regenerate (recording-level and
+  section-level), Retry failed stage, and the segmented-version save —
+  executes on the FIRST POST from its origin-page form. No confirmation
+  interstitial exists or is rendered anywhere: the
+  `action_confirm.html`/`segmentation_confirm.html` templates and
+  `ActionConfirmForm` are removed, no payload carries a `confirmed`
+  flag (the strict segmentation parser rejects it as an unknown
+  field), and there is no second POST. In the `needs_review` web state
+  the immediate manual-route form IS the recommended primary action —
+  never blocked behind an audit-only "Confirm routing" step (choosing
+  the current profile in that same form confirms the routing); the
+  one-click Confirm routing remains only for the
+  transcribed-but-unverified state.
+- The client-side pending UI is progressive enhancement in
+  `src/static/workflow/app.js` (`form[data-action-form]`): the FIRST
+  submit is never cancelled (an ordinary native POST navigation),
+  repeated submit events on an already-submitted form are blocked, and
+  while the request runs the enhancement disables and relabels ONLY
+  the submit control, marks the form `aria-busy` and writes the
+  optimistic pending message into the form's `[data-action-live]`
+  `aria-live` region (the hidden segmentation form binds the visible
+  external control/region via `data-action-control` /
+  `data-action-live="<action>"`). Summarize and segmentation-save
+  pending copy is TEMPLATE-OWNED via
+  `data-pending-label`/`data-pending-message` (summarize modes differ);
+  the route, confirm-routing, transcribe and retry templates carry no
+  `data-pending-*` attributes and use the fixed per-action fallback map.
+  Payload-bearing inputs are never
+  disabled or mutated; there is no fetch/HTMX, no real progress
+  reporting and no polling — the synchronous POST navigation IS the
+  wait, and the AUTHORITATIVE result is the action's redirect plus the
+  refreshed strictly-read-only GET (flash messages). A bfcache
+  "back" (`pageshow` persisted) restores the original control label,
+  enabled state, `aria-busy` and live text and re-allows submitting.
+  Without JS every action form is a plain POST form; the CSP is
+  unchanged. The obsolete confirmation-page machinery (the
+  `initConfirmForms` in-flight anchor-disabling and its
+  `[data-confirm-exempt]` escape hatch) is gone: navigation anchors are
+  never disabled.
+- Direct execution does NOT weaken the service-side safety contract:
+  POST-only + CSRF; the opaque state fingerprint captured at render
+  time travels on the executing POST — every recording-level action
+  POST must carry EXACTLY ONE canonical lowercase 64-hex
+  `state_fingerprint` digest (the SHA-256 of the deterministic bound-
+  state JSON; missing/duplicate/empty/malformed/oversized/uppercase is
+  one fixed sanitized friendly 400 BEFORE any lock/recovery/network/
+  write) — a stale or duplicate submission with a canonical digest is
+  still the safe under-lock no-op with zero DML; the exclusive pipeline
+  lock +
+  `recover_interruptions()` still guard mutations, eligibility,
+  section/layout and source state are revalidated live before the
+  write, and results stay versioned (transcript/summary/layout
+  history) with prior actives kept on failure. Cheap pre-lock
+  eligibility/validation probes reject obviously invalid submissions
+  before any lock/network; execution under the lock remains
+  authoritative.
+
 ## Content identity, versioning, active-record invariants
 
 - `Recording` = content identity (SHA-256, unique). `AudioSource` =
@@ -247,15 +307,24 @@ Non-negotiable principles:
 - The action-state fingerprint binds EVERY stable input that determines
   language resolution (active transcript id, canonical source language
   and its verifier, resolved default and Original output languages with
-  an explicit unresolved marker) in addition to recording state,
-  attempts and variant languages — a source-language correction
-  invalidates rendered confirmations even when no attempt is created
-  and the action mode is unchanged. Fingerprinting is read-only
-  (SELECTs only).
+  an explicit unresolved marker) and the ACTIVE routing decision's
+  stable identity/behavior (decision pk/ordinal, profile_name,
+  model_id, language_arg, routing_verified; explicit no-active marker;
+  never raw evidence, confidence, verifier or timestamps) in addition
+  to recording state, attempts and variant languages — a
+  source-language correction or a routing update that changes neither
+  the processing status nor an attempt invalidates rendered action
+  forms even when no attempt is created and the action mode is
+  unchanged. The value is OPAQUE: a canonical
+  lowercase 64-hex SHA-256 digest over the exact deterministic bound-
+  state JSON bytes (ids, languages and the raw JSON never appear in
+  it). Fingerprinting is read-only (SELECTs only).
 - Actions return to their origin page via a server-owned allowlist
-  token (`return_view`: `detail | summary`) carried through the
-  confirmation interstitial; missing/invalid/forged values fall back to
-  recording detail. Arbitrary client URLs are never accepted.
+  token (`return_view`: `detail | summary`) carried by the executing
+  action form and honored on the redirect (there is no confirmation
+  interstitial — see the Web actions section); missing/invalid/forged
+  values fall back to recording detail. Arbitrary client URLs are
+  never accepted.
 - Summary `output_language` is the variant identity key
   (`uniq_active_summary_in_output_language`); `Summary.language` is the
   canonicalized detected source language, not the variant key —
@@ -1176,7 +1245,8 @@ bullet below) and **Step 5D Ask with Citations is delivered too**
   must be SAVED BEFORE NAVIGATION (browser dirty-leave warning; NO
   browser draft persistence); the saved crop is the normal working
   presentation (cropped rows hidden, "Show full transcript" toggle). Save
-  is a two-step POST (confirmation then execution) under the pipeline
+  executes on the FIRST POST from the editor (no confirmation page —
+  see the Web actions section) under the pipeline
   lock + `recover_interruptions` guarded by the opaque stale fingerprint
   (stale/duplicate submissions are safe no-ops; lock busy is the friendly
   409). GET stays strictly read-only; historical transcript versions and
@@ -1240,20 +1310,19 @@ bullet below) and **Step 5D Ask with Citations is delivered too**
     recording-scope assignments only (`section__isnull=True`) — section
     tags are indexed solely in their own section-summary documents.
   - **Section summaries** (`workflow/services/summarize.py:
-    summarize_section_one`): an EXPLICIT per-section action (POST-only
-    two-step confirmation under the shared pipeline lock +
-    `recover_interruptions`, guarded by the OPAQUE bounded
-    `section_state_fingerprint` — SELECT-only; stale/duplicate
-    submissions are safe no-ops, lock busy is the friendly 409). The
-    confirmation's `Back to section` anchor carries the narrowly scoped
-    `data-confirm-exempt` marker and STAYS enabled/clickable while the
-    synchronous request runs — the user explicitly accepts that
-    navigating away mid-request may abort the connection (a dev-server
-    Broken pipe response write is possible) — while the submit button
-    still disables/relabels, duplicate submits stay blocked, and the
-    Cancel link and every other confirmation anchor keep the full
-    disable behaviour (`app.js` `initConfirmForms` skips only
-    `[data-confirm-exempt]` anchors). The
+    summarize_section_one`): an EXPLICIT per-section action (POST-only,
+    executed on the FIRST POST from the section-detail form — no
+    confirmation interstitial, see the Web actions section — under the
+    shared pipeline lock + `recover_interruptions`, guarded by the
+    OPAQUE bounded `section_state_fingerprint` — SELECT-only;
+    stale/duplicate submissions are safe no-ops, lock busy is the
+    friendly 409). While the request runs, the shared `app.js`
+    direct-action enhancement disables/relabels the submit control and
+    shows the optimistic `aria-live` pending state; in-flight
+    navigation anchors are no longer disabled (the removed
+    confirmation-page `data-confirm-exempt`/`Back to section` escape
+    hatch and the `initConfirmForms` anchor-disabling machinery do not
+    exist). The
     target must be a TOPIC Section of the ACTIVE transcript's ACTIVE
     layout (shared `segmentation.require_active_topic_section`); fixed,
     historical, cross-parent and malformed-layout targets are stable
@@ -1338,9 +1407,11 @@ bullet below) and **Step 5D Ask with Citations is delivered too**
     added to the normal-Library recording AND section links
     (recording-backed title links in card/table, the section-card parent
     Recording link and the section title links) and propagated verbatim
-    through section-detail tabs, the section summary confirmation/
-    execution redirects (including the confirmation CANCEL link, built
-    only from the already validated token) and the section tag redirects;
+    through section-detail tabs, the section summary executing form and
+    its execution redirect (the token travels only on the validated
+    action form and is echoed back only from the already validated
+    value — the removed confirmation page and its CANCEL link no
+    longer exist) and the section tag redirects;
     `recording_detail` validates an optional `lib_return` through the
     shared decoder and, when valid, restores the originating page/state
     through its top-left `← Library` breadcrumb

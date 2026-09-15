@@ -15,9 +15,17 @@ submits itself as a generation target. The form posts:
   action (validated against the read-only view-model by the view);
 - return_view: the page to return to (allowlist token, never a URL);
 - mode: the expected per-language action mode.
+
+Both the recording-level and the section-scoped summarize forms execute
+their action on this first POST (no server-side confirmation step), so
+both carry the pending-state hooks (``data-action-form`` marker +
+``aria-live`` status region) for the submit JavaScript. The pending
+label/message are TEMPLATE-OWNED here because the copy varies with the
+per-language action mode; a regenerate additionally carries the concise
+keeps-current-on-failure inline note.
 {% endcomment %}
 {% if variant.action_selector and variant.action_mode %}
-<form method="post" action="{% if action_url %}{{ action_url }}{% else %}{% url 'action-summarize' recording.pk %}{% endif %}" class="inline-form">
+<form method="post" action="{% if action_url %}{{ action_url }}{% else %}{% url 'action-summarize' recording.pk %}{% endif %}" class="inline-form" data-action-form="summarize">
   {% csrf_token %}
   {% if library_return_token %}<input type="hidden" name="lib_return" value="{{ library_return_token }}">{% endif %}
   <input type="hidden" name="fingerprint" value="{% if actions %}{{ actions.fingerprint }}{% elif section_actions %}{{ section_actions.fingerprint }}{% endif %}">
@@ -25,8 +33,12 @@ submits itself as a generation target. The form posts:
   <input type="hidden" name="language" value="{{ variant.action_selector }}">
   <input type="hidden" name="return_language" value="{{ variant.requested }}">
   <input type="hidden" name="return_view" value="{{ return_view|default:'detail' }}">
-  <button type="submit">
+  {% if variant.action_mode == 'regenerate' %}<span class="action-note muted">The current summary stays active unless the new version is created completely.</span>{% endif %}
+  <button type="submit"
+          data-pending-label="{% if variant.action_mode == 'first' %}Generating…{% elif variant.action_mode == 'retry_summary' %}Retrying…{% else %}Regenerating…{% endif %}">
     {% if variant.action_mode == 'first' %}Generate{% elif variant.action_mode == 'retry_summary' %}Retry{% else %}Regenerate{% endif %}
   </button>
+  <span class="action-live" data-action-live aria-live="polite"
+        data-pending-message="{% if variant.action_mode == 'first' %}Generating the first summary — this can take a while.{% elif variant.action_mode == 'retry_summary' %}Retrying the summary — this can take a while.{% else %}Regenerating — the current summary stays active unless the new version succeeds.{% endif %}"></span>
 </form>
 {% endif %}

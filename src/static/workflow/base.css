@@ -209,7 +209,13 @@ button:hover, .link-button:hover { background: var(--bg); }
 .link-button { border: none; color: var(--accent); padding: 0 0.2em; text-decoration: underline; }
 .link-button.danger { color: var(--danger); }
 .confirm-button { font-weight: 700; }
-.confirm-form-link-disabled { opacity: 0.5; cursor: not-allowed; }
+/* Direct-action form pending state (app.js form[data-action-form]
+   enhancement) and the concise inline action notes. The aria-live
+   regions stay rendered (never display:none) so announcements work. */
+.action-live { font-size: 0.8125rem; font-weight: 600; color: var(--color-text-2); }
+.edit-actions .action-live:not(:empty) { flex-basis: 100%; }
+.action-note { font-size: 0.8125rem; }
+.action-buttons .action-note { margin: 0; }
 
 /* ============================================================
    LIBRARY FILTER AREA — two rows, no caption
@@ -1307,18 +1313,6 @@ ol.key-points > li::before {
 .boundary-action-buttons .btn-sm { justify-content: flex-start; width: 100%; text-align: left; }
 .boundary-action-buttons .btn-sm[hidden] { display: none; }
 .boundary-action-buttons .btn-sm:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* Confirmation page summary (autoescaped values only) */
-.segmentation-confirm-summary {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 0.3rem 1rem;
-  font-size: 0.9rem;
-  margin: 1rem 0;
-}
-.segmentation-confirm-summary dt { color: var(--color-text-3); }
-.segmentation-confirm-summary dd { margin: 0; }
-.segmentation-confirm-topics { margin: 0.35rem 0 0; padding-left: 1.25rem; }
 
 /* ============================================================
    RESPONSIVE

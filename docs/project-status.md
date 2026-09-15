@@ -1,6 +1,10 @@
-# Project status — implementation handoff (Step 6.3 section content in the search/embedding/Ask stack delivered)
+# Project status — implementation handoff (Step 6.3 section content in the search/embedding/Ask stack delivered; direct-action web workflow delivered on top)
 
-This file reflects the repository through the delivered Step 6.3:
+This file reflects the repository through the delivered Step 6.3 plus the
+delivered **direct-action web workflow** refinement on top of it (all
+mutating web workflow actions now execute on the first POST from their
+origin-page forms — see the direct-action section below and the durable
+"Web actions" section of `AGENTS.md`):
 Step 4, the
 post-incident routing/transcription fixes, the multilingual summary
 corrective round, the production Library UI (Step 5A.1), the search
@@ -53,8 +57,17 @@ The `design/ui-prototype/` directory
 remains the approved v6 design source (fictional data); the production
 Recording Detail, Transcript and History pages now implement that
 design. The
-working tree is independently full-suite verified: **3100 collected
-and 3100 passed** (only the known `audioop` deprecation warning), with
+working tree is independently full-suite verified: **3157 collected
+and 3157 passed** (the recorded Step 6.3 handoff state was 3100; the
+committed `run --now` CLI round that followed took the clean baseline
+to 3112, the direct-action test rounds — new executing-POST/
+pending-hook tests plus the rewritten two-step-confirmation tests
+across nine web test files — took the tree to an intermediate 3119,
+the fingerprint input hardening round added a further 33 tests after
+that state to an intermediate 3152, and the routing-state fingerprint
+binding round added a further 5 tests, bringing the current tree to
+**3157** (net +45 over 3112); only the known `audioop` deprecation
+warning), with
 `manage.py check`, `makemigrations --check` (NO new migration; 0013
 still the head) and `git diff --check` clean.
 No real-database
@@ -63,11 +76,12 @@ never applied to a real database by this work). This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
 
-## Handoff audit — 2026-09-13 (updated for the Step 6.3 delivery)
+## Handoff audit — 2026-09-15 (updated for the direct-action web workflow refinement)
 
 Updates the previous audits (the Step 5C state, the Step 5D state,
-the v6 detail/transcript/history redesign state, the Step 6.2 state
-and the Step 6.2a state) in place to record that (1) the Step 5D
+the v6 detail/transcript/history redesign state, the Step 6.2 state,
+the Step 6.2a state and the Step 6.3 state) in place to record that
+(1) the Step 5D
 Ask-with-Citations flow
 is now implemented in the working tree, (2) the production Library
 search was unified into a single global top-bar query input: a native
@@ -95,8 +109,18 @@ item mode: the unchanged segment/ordinal-0-summary evidence plus
 canonical active section-summary prose), section
 content converges through the existing post-commit sync, and **no new
 migration exists** (0013 stays the head) (see the Step 6.3 section
-below). The full suite is
-independently verified at the current state (**3100 passed**). No
+below), and (8) the **direct-action web workflow refinement is
+delivered in the working tree on top of Step 6.3** — every mutating
+web workflow action now executes on the FIRST POST from its
+origin-page form with no confirmation interstitial anywhere (the
+`action_confirm.html`/`segmentation_confirm.html` templates,
+`ActionConfirmForm` and the `confirmed` payload field are removed; the
+progressive-enhancement pending UI replaces the old confirmation-page
+JS; the `needs_review` state offers the immediate manual-route form as
+the primary action with no audit-only Confirm routing blocker) — see
+the Direct-action web workflow section below and the durable "Web
+actions" section of `AGENTS.md`. The full suite is
+independently verified at the current state (**3157 passed**). No
 real-database migration or user data operation is claimed (the 0011/0012/0013
 migrations are never applied to a real database by this work); the work
 and its tests are in the working tree.
@@ -106,6 +130,7 @@ and its tests are in the working tree.
 - Python 3.12 / `uv` (Hatchling build backend) / Django 5.2 LTS /
   SQLite / minimal dependencies; no Git tags/releases, no visible CI
   configuration; implementation complete through Step 6.3 plus the
+  **direct-action web workflow refinement on top**, the
   **v6 Recording Detail / Transcript /
   History production redesign**, the **Step 6.1 segmented
   versions**, the **Step 6.2 section-level summaries/tags +
@@ -126,8 +151,8 @@ and its tests are in the working tree.
   document-oriented Recording Detail / Transcript / History redesign,
   and Step 6.1: `SegmentedVersion` + topic `Section` rows (migration
   0011) with `workflow/services/segmentation.py` as the sole
-  writer/validator, the POST-only two-step save under the pipeline
-  lock with the opaque stale fingerprint, the active-Transcript-page
+   writer/validator, the POST-only direct-execution save under the pipeline
+   lock with the opaque stale fingerprint, the active-Transcript-page
   scissors editor (page-local staging, save-before-navigation, no
   browser draft persistence), read-only `?v=`/`&layout=` historical
   views, the bounded History revision list, and Step 6.2:
@@ -149,22 +174,36 @@ and its tests are in the working tree.
     plumbing, item mode across every keyword/semantic/hybrid SEARCH
     surface (web + CLI), the Ask DOCUMENT-LEVEL section-summary
     prose-only evidence admission (Ask never runs item mode),
-    the sync hooks on the existing post-commit writer, and NO new
-    migration.
-  The `design/ui-prototype/` directory remains the approved v6 design
-  source (fictional data); the production Recording Detail, Transcript
-  and History pages now implement that design — see the v6 section
-  below.
+     the sync hooks on the existing post-commit writer, and NO new
+     migration; and the direct-action refinement: all mutating web
+     actions (route, confirm-routing, transcribe, recording/section
+     summarize, retry, segmented-version save) execute on the FIRST
+     POST from their origin-page forms with the `form[data-action-form]`
+     pending enhancement replacing the removed confirmation pages, and
+     the prototype mirrors the same pending→completed contract.
+   The `design/ui-prototype/` directory remains the approved v6 design
+   source (fictional data); the production Recording Detail, Transcript
+   and History pages now implement that design — see the v6 section
+   below; the prototype itself was updated for the direct-action
+   refinement (all confirmation stages/dialogs removed).
 - Current verification (independently confirmed, CURRENT state): the
-  full suite passes — **3100 collected and
-  3100 passed** (the Step 6.2a bug-fix state was 2857 — historical;
+  full suite passes — **3157 collected and
+  3157 passed** (the Step 6.2a bug-fix state was 2857 — historical;
   the Step 6.3 delta is **243 tests**: the four new Step 6.3 files
   `tests/test_search_index_section_summaries.py`,
   `tests/test_semantic_item_search.py`, `tests/test_search_fusion_items.py`
   and `tests/test_search_cli_items.py` (**134 in the new files**) plus
   **109 additions** across the search-web/search-modes/search-CLI,
   ask, library-items, segmentation, section summarize/tags, migration
-  and semantic regressions), with the only warning the
+  and semantic regressions; the committed `run --now` CLI round then
+  took the clean baseline to 3112, and the direct-action refinement
+  adds a net **+45** over that baseline — the executing-POST
+  no-interstitial, pending-hook and needs-review tests replacing the
+  old two-step-confirmation tests across nine web test files reached
+  the intermediate 3119 (+7), the fingerprint input hardening then
+  added 33 tests after that state to reach the intermediate 3152, and
+  the routing-state fingerprint binding added a further 5 tests —
+  reaching the current 3157), with the only warning the
   known `audioop` DeprecationWarning (Python 3.12, removal slated for
   3.13); `manage.py check`, `makemigrations --check` (NO new
   migration; 0013 still the head) and `git diff --check` pass.
@@ -229,6 +268,105 @@ and its tests are in the working tree.
   (`0007`–`0013` application is not reported). Local config values and
   secrets are intentionally omitted from this handoff.
 
+## Direct-action web workflow actions (delivered in the working tree, on top of Step 6.3)
+
+**Scope delivered** (durable contract in the `AGENTS.md` "Web actions"
+section): every mutating web workflow action — manual route, Confirm
+routing, Transcribe, summarize Generate/Retry/Regenerate (recording-
+level and section-level), Retry failed stage, and the Step 6.1
+segmented-version save — now executes on the FIRST POST from its
+origin-page form. The two-step confirmation pattern (first POST renders
+a confirmation interstitial, second POST with `confirmed=1` executes)
+is removed everywhere.
+
+- **Removed**: `workflow/action_confirm.html` and
+  `workflow/segmentation_confirm.html`; `ActionConfirmForm`
+  (`workflow/forms.py`); the `_render_confirmation`/`_payload_summary`
+  helpers and all `confirmed`-flag branches in
+  `views/actions.py`/`views/segmentation.py`; the `SUMMARIZE_MODE_LABELS`/
+  `SUMMARIZE_MODE_NOTES` confirmation copy tables; the segmentation
+  payload's `confirmed` field (the strict parser now REJECTS it as an
+  unknown field) and its `stale_state` view-side message (stale state
+  stays the safe no-op under the lock); the confirmation-page summary
+  CSS (`.segmentation-confirm-*`) and the obsolete
+  `initConfirmButtons` (`window.confirm`) / `initConfirmForms`
+  (`.confirm-form` in-flight anchor-disabling with the
+  `[data-confirm-exempt]` `Back to section` escape hatch) JS.
+- **Pending UI (progressive enhancement only)**: `app.js`
+  `form[data-action-form]` blocks repeated submits (the FIRST submit is
+  never cancelled — it is the ordinary native POST navigation),
+  disables/relabels ONLY the submit control, marks the form
+  `aria-busy` and writes the optimistic pending message into the form's
+  `[data-action-live]` `aria-live` region; the hidden segmentation
+  form binds the visible `#edit-save` control and the bar's live region
+  via `data-action-control` / `data-action-live="segmentation-save"`
+  and submits through `requestSubmit()` so the enhancement applies to
+  the programmatic submit too. Summarize and segmentation-save pending
+  copy is template-owned via
+  `data-pending-label`/`data-pending-message` (summarize modes differ;
+  the regenerate form additionally carries a concise keeps-current
+  inline note); the route/confirm-routing/transcribe/retry templates
+  carry no `data-pending-*` attributes and use the fixed per-action
+  fallback map. A bfcache
+  `pageshow(persisted)` restores labels/enabled state/`aria-busy`/live
+  text and re-allows submitting. There is NO fetch/HTMX, no real
+  progress reporting and no polling; without JS every form is a plain
+  POST form and the CSP is unchanged (static assets are cache-bumped to
+  `?v=6`).
+- **Safety contract unchanged**: POST-only + CSRF; the opaque render-time
+  fingerprint (recording / section / segmentation) travels on the
+  executing POST — every recording-level action POST must carry exactly
+  one canonical lowercase 64-hex `state_fingerprint` digest (SHA-256 of
+  the deterministic bound-state JSON; a missing/duplicate/empty/
+  malformed/oversized/uppercase value is one fixed sanitized friendly
+  400 BEFORE any lock/recovery/network/write); a stale or duplicate
+  submission with a canonical digest is a safe no-op with
+  zero DML; the exclusive pipeline lock + `recover_interruptions()`
+  still guard mutations; eligibility, section/layout and source state
+  are revalidated live under the lock before the write (cheap pre-lock
+  probes reject obviously invalid submissions first; the summarize
+  view-side mode probe only rejects ineligibility BEFORE the lock —
+  execution re-derives the mode authoritatively); results stay
+  versioned with prior actives kept on failure. The `needs_review` web
+  state now shows the immediate manual-route form as THE recommended
+  primary action (no collapsed duplicate routing disclosure, no
+  audit-only Confirm routing step blocking it — choosing the current
+  profile in that same form confirms the routing); one-click Confirm
+  routing remains for the transcribed-but-unverified state.
+- **Ownership boundaries preserved**: `segmentation.save_segmented_version`
+  remains the ONLY layout writer; `execute_web_action`/
+  `execute_section_summarize` remain the ONLY action executors; all
+  post-commit search/embedding sync contracts are untouched. GETs stay
+  strictly read-only.
+- **Files**: production — `src/static/workflow/app.js`,
+  `src/static/workflow/base.css`, `src/templates/base.html`,
+  `src/templates/workflow/_variant_action.html`,
+  `recording_detail.html`, `recording_transcript.html` (+ the two
+  deleted confirm templates), `src/workflow/forms.py`,
+  `urls.py`, `services/segmentation.py`, `services/web_actions.py`,
+  `views/actions.py`, `views/recordings.py`, `views/segmentation.py`;
+  tests — `tests/test_web_actions.py`, `tests/test_web_detail.py`,
+  `tests/test_web_section_summarize.py`, `tests/test_web_segmentation.py`,
+  `tests/test_multilingual_web.py`, `tests/test_library_return_token.py`,
+  `tests/test_temporary_section_titles.py`, `tests/test_web_security.py`,
+  `tests/test_web_walkthrough.py`; design/docs — the
+  `design/ui-prototype/` files (confirmation dialogs removed, direct
+  pending→completed demonstration) plus `AGENTS.md`, this file,
+  `README.md`, `docs/step-6-plan.md` and `docs/step-6-decisions.md`
+  wording. No migration, no config key, no dependency change.
+
+**Verification (independently confirmed, CURRENT working-tree state)**:
+full suite **3157 collected and 3157 passed** (net +45 over the 3112
+clean HEAD baseline — the direct-action test rounds to the
+intermediate 3119, then +33 from the fingerprint input hardening
+after that state to the intermediate 3152, then +5 from the
+routing-state fingerprint binding — see the handoff audit at the
+top), only the known
+`audioop` warning; `manage.py check`, `makemigrations --check` (NO new
+migration; 0013 still the head) and `git diff --check` clean. No
+real-database migration, no commit and no real audio/network operation
+is claimed; all tests are mocked/network-free.
+
 ## Step 4 v6 — Recording Detail / Transcript / History redesign (delivered in the working tree)
 
 **Scope delivered** (durable contract in `AGENTS.md`): the approved v6
@@ -268,7 +406,7 @@ implements it.
   `attempt_summary_for_display`; sources show safe original filenames
   only (never paths); audio status says present/missing only.
 - **Preserved invariants**: all multilingual generation semantics
-  (action selector, return language/view, fingerprint, confirmation,
+  (action selector, return language/view, fingerprint, direct-action
   POST behavior) and the standalone summary route plus historical
   summary/transcript routes stay operational; every GET remains
   strictly read-only (SELECT only); all text autoescaped, external CSS
@@ -282,8 +420,8 @@ was 2203 — historical; the v6 delta is 35 tests across
 (25 additions)), only the known `audioop` warning; `manage.py check`
 and `makemigrations --check` (NO migration) and `git diff --check`
 clean. No real-database migration or real network call is claimed; no
-new commit/HEAD. The CURRENT working-tree state is **3100 collected
-and 3100 passed** — see the current audit at the top of this file.
+new commit/HEAD. The CURRENT working-tree state is **3157 collected
+and 3157 passed** — see the current audit at the top of this file.
 
 ## Step 6.1 — Segmented versions: logical trim + topic layout/history (delivered in the working tree)
 
@@ -334,12 +472,14 @@ came with Step 6.3, now delivered), and no CLI.
   trim & splits"): pressing Edit reveals scissors on the inter-segment
   divider lines; staged changes stay page-local and must be saved before
   navigation (browser dirty-leave warning; no browser draft
-  persistence). Save is a two-step POST (`/recordings/<id>/transcript/
-  save/`, `workflow/views/segmentation.py`) — confirmation then
-  execution via `web_actions.execute_segmentation_save` under the shared
+  persistence). Save executes on the first POST (`/recordings/<id>/transcript/
+  save/`, `workflow/views/segmentation.py`) — direct execution via
+  `web_actions.execute_segmentation_save` under the shared
   pipeline lock + `recover_interruptions`, guarded by the opaque stale
   fingerprint (stale/duplicate submissions are safe no-ops; lock busy is
-  the friendly 409). The saved crop is the normal working presentation
+  the friendly 409; the two-step confirmation added at the 6.1 delivery was
+  removed by the direct-action refinement — see the Direct-action section
+  above). The saved crop is the normal working presentation
   (cropped rows hidden, "Show full transcript" toggle). GET stays
   strictly read-only; historical transcript versions (`?v=`) and
   explicit layouts (`&layout=<version-id>`) are read-only through the
@@ -373,7 +513,7 @@ only the known `audioop` warning; `manage.py check`,
 `makemigrations --check` (0011) and `git diff --check` clean. No
 real-database migration or user data operation is claimed; no new
 commit/HEAD — the work and its tests are in the working tree. The
-CURRENT working-tree state is **3100 collected and 3100 passed** — see
+CURRENT working-tree state is **3157 collected and 3157 passed** — see
 the current audit at the top of this file.
 
 ## Step 6.2 — Section-level summaries and tags + derived Library items (delivered in the working tree)
@@ -433,9 +573,11 @@ been delivered (see the Step 6.3 section below). 6.4
    (the Library tag chips and the
    recording metadata aux text never include section-scoped tags).
 - **Section summaries** (`workflow/services/summarize.py:
-  summarize_section_one`): an EXPLICIT per-section action — POST-only
-  two-step confirmation (`/recordings/<id>/sections/<sid>/summarize/`,
-  `views/actions.py:action_section_summarize`) under the shared
+  summarize_section_one`): an EXPLICIT per-section action — POST-only,
+  executed on the first POST from the section-detail form
+  (`/recordings/<id>/sections/<sid>/summarize/`,
+  `views/actions.py:action_section_summarize`; no confirmation
+  interstitial — see the Direct-action section above) under the shared
   pipeline lock + `recover_interruptions`, guarded by the OPAQUE bounded
   `section_state_fingerprint` (SELECT-only, binds active transcript/
   layout/section identity + language-resolution inputs + a sufficient
@@ -524,7 +666,7 @@ and `git diff --check` clean. The focused Step 6.1/6.2 section set
 four Step 6.1 segmentation test files) passed. No real-database
 migration or user data operation is claimed; no new commit/HEAD — the
 work and its tests are in the working tree, uncommitted. The
-CURRENT working-tree state is **3100 collected and 3100 passed** — see
+CURRENT working-tree state is **3157 collected and 3157 passed** — see
 the Step 6.3 section below.
 
 ## Step 6.2a — Safe Library return, temporary split titles, derived display title, section duration (delivered in the working tree)
@@ -556,9 +698,11 @@ the delivered Step 6.3 (see the Step 6.3 section below). Migration
   The token is added to the normal-Library recording AND section links
   (recording-backed title links in card/table, the section-card parent
   Recording link and the section title links) and propagated VERBATIM
-  through section-detail tabs, the section summary confirmation/
-  execution redirects (including the confirmation CANCEL link, built
-  only from the already validated token) and the section tag redirects;
+  through section-detail tabs, the section summary executing form and
+  its execution redirect (the token travels only on the validated form
+  and is echoed back only from the already validated value — the removed
+  confirmation page and its CANCEL link no longer exist) and the section
+  tag redirects;
   ``recording_detail`` validates an optional ``lib_return`` through the
   shared decoder and, when valid, restores the originating page/state
   through its top-left ``← Library`` breadcrumb
@@ -683,8 +827,8 @@ web set is **255 passed**
 `makemigrations --check` (0013) and `git diff --check` clean. No
 real-database migration or user data operation is claimed; no new
 commit/HEAD — the work and its tests are in the working tree,
-uncommitted. The CURRENT working-tree state is **3100 collected and
-3100 passed** — see the Step 6.3 section below.
+uncommitted. The CURRENT working-tree state is **3157 collected and
+3157 passed** — see the Step 6.3 section below.
 
 ## Step 6.3 — Section content in the search/embedding/Ask stack, Library-item search everywhere (delivered in the working tree)
 
@@ -809,7 +953,8 @@ migration** — 0013 stays the head; the version bump is code-only.
   semantic/hybrid/Ask fail closed until a compatible active generation
   exists. Incremental sync keeps both indexes current afterwards.
 
-**Verification (independently confirmed, CURRENT state)**: full suite
+**Verification (independently confirmed, historical Step 6.3 delivery
+state)**: full suite
 **3100 collected and 3100 passed** (the Step 6.2a bug-fix state was
 2857 — historical; the Step 6.3 delta is **243 tests**: the four new
 Step 6.3 files `tests/test_search_index_section_summaries.py`,
@@ -921,7 +1066,7 @@ warning; `manage.py check`, `makemigrations --check` (NO migration) and
 `git diff --check` clean. No real network, no real MacWhisper/oMLX, no
 user data, no real embedding/chat network calls; the real
 `config/config.yaml` untouched; no real-database migration is claimed.
-The CURRENT working-tree state is **3100 collected and 3100 passed** —
+The CURRENT working-tree state is **3157 collected and 3157 passed** —
 see the current audit at the top of this file.
 Step 6.1 (segmented versions), Step 6.2 (section-level
 summaries/tags + Library items), Step 6.2a and Step 6.3 (section
@@ -2091,15 +2236,22 @@ in place (all verified by genuine workflow tests):
   variant state + action mode + derived generation selector, unresolved-
   Original status, all tab options (Default/English/Traditional
   Chinese/Original + existing concrete variants such as Finnish).
-  Language preserved through confirmation and POST→redirect→GET;
-  actions return to their origin page via a server-owned
-  `return_view` allowlist token (`detail | summary`); the action-state
-  fingerprint binds every language-resolution input (transcript id,
-  canonical source language + verifier, resolved default and Original
-  outputs with an explicit unresolved marker), so a source-language
-  correction invalidates rendered confirmations even with no new
-  attempt and an unchanged action mode; summary history shows output
-  language; GET remains strictly read-only (test-proven).
+  Language preserved through the executing POST→redirect→GET
+  (a later refinement removed the interim confirmation page — see the
+  Direct-action section above); actions return to their origin page via a
+  server-owned
+   `return_view` allowlist token (`detail | summary`); the action-state
+   fingerprint binds every language-resolution input (transcript id,
+   canonical source language + verifier, resolved default and Original
+   outputs with an explicit unresolved marker) and the ACTIVE routing
+   decision's stable identity/behavior (decision pk/ordinal,
+   profile_name, model_id, language_arg, routing_verified; explicit
+   no-active marker; never raw evidence or timestamps), so a
+   source-language correction or a routing update that changes neither
+   the processing status nor an attempt invalidates rendered action
+   forms even with no new attempt and an unchanged action mode; summary
+   history shows output language; GET remains strictly read-only
+   (test-proven).
 - **Source-language provenance**: one deterministic rule in
   `validate_final_payload(…, source_language=…)` — a known canonical
   Transcript source is authoritative for `Summary.language` (the
@@ -2117,7 +2269,7 @@ in place (all verified by genuine workflow tests):
   genuine `MigrationExecutor` tests on isolated per-test SQLite
   databases (historical 0006 fixtures, forward + reverse).
 - Tests: 985 passing (final corrective pass: +19 focused regression
-  tests binding the confirmation fingerprint to language resolution,
+  tests binding the action-state fingerprint to language resolution,
   authoritative source-language provenance, and validated return-view
   redirects). `manage.py check`,
   `makemigrations --check`, `git diff --check` clean.
@@ -2254,14 +2406,17 @@ required.)
   row-locking + idempotent re-select, never via the redundant
   constraint.
 
-### Web actions (POST only, two-step confirmation)
+### Web actions (POST only, direct execution)
 
 - `workflow/services/web_actions.py`: every action acquires the SAME
   global pipeline `flock` (busy → friendly 409 page), runs
   `recover_interruptions()` (stage-aware), re-derives eligibility from
   current DB state, and compares a state fingerprint
   (`processing_status`, summary markers, current-summary ordinal,
-  newest attempt id) captured at form render; mismatch = safe no-op
+  newest attempt id, the ACTIVE routing decision's stable
+  identity/behavior — pk/ordinal, profile, model, language_arg,
+  verified flag with an explicit no-active marker, never raw
+  evidence) captured at form render; mismatch = safe no-op
   "state changed". Synchronous execution; no queues.
 - Eligibility matrix: route (routing/needs_review/ready_to_transcribe/
   transcribed/routing-failed; transcribing and other states ineligible;
@@ -2271,15 +2426,22 @@ required.)
   succeeds), confirm-routing (idempotent, targets the active decision),
   transcribe (only ready_to_transcribe; duplicate POSTs can never
   retranscribe — fingerprint/eligibility reject), summarize
-  (server-derived first/retry/regenerate wording), retry (failed /
+  (server-derived first/retry/regenerate mode), retry (failed /
   retranscription_failed / summary_failed / resummarization_failed).
 - `manual_route` (CLI + web shared): eligibility restricted to the
   matrix above with clean ConfigError otherwise; same-profile on ANY
   eligible status verifies in place without appending.
-- First POST renders a confirmation interstitial (duration, what is
-  preserved on failure, retry-vs-summarize-vs-regenerate wording);
-  second POST (`confirmed=1`, CSRF) executes; POST→redirect→GET with
-  flash messages.
+- Every action executes on the FIRST POST from its origin-page form
+  (CSRF-protected); there is NO confirmation interstitial (the
+  two-step `confirmed=1` pattern, the `action_confirm.html`/
+  `segmentation_confirm.html` templates and `ActionConfirmForm` were
+  removed by the direct-action refinement — see the Direct-action web
+  workflow section and the durable `AGENTS.md` "Web actions" section).
+  Execution is a single POST→redirect→GET with flash messages; the
+  client shows a pending (disabled/relabelled submit + optimistic
+  `aria-live`) state during the synchronous navigation. In the
+  `needs_review` web state the immediate manual-route form is the
+  primary action (no audit-only Confirm routing blocker).
 
 ### Review dashboard
 
@@ -2579,8 +2741,30 @@ Production Library UI are delivered.
 
 ## Tests and verification status
 
-- Current (Step 6.3 search/embedding/Ask stack tree,
-  independently full-suite verified): the full suite passes — **3100
+- Current (direct-action web workflow + fingerprint hardening tree,
+  independently full-suite verified): the full suite passes — **3157
+  collected and 3157 passed**
+  (the committed `run --now` CLI round took the Step 6.3 3100 state to
+  3112, the direct-action test rounds — executing-POST
+  no-interstitial, pending-hook and needs-review tests replacing the
+  two-step-confirmation tests across `tests/test_web_actions.py`,
+  `tests/test_web_detail.py`, `tests/test_web_section_summarize.py`,
+  `tests/test_web_segmentation.py`, `tests/test_multilingual_web.py`,
+  `tests/test_library_return_token.py`,
+  `tests/test_temporary_section_titles.py`, `tests/test_web_security.py`
+  and `tests/test_web_walkthrough.py` — reached the intermediate 3119
+  (net +7), the fingerprint input hardening then added 33 tests after
+  that state, reaching the intermediate 3152, and the routing-state
+  fingerprint binding added a further 5 tests, reaching the current
+  3157; net +45 over the clean HEAD baseline),
+  with the only warning the known `audioop` DeprecationWarning (Python
+  3.12, removal slated for 3.13); `manage.py check`,
+  `makemigrations --check` (NO new migration; 0013 still the head) and
+  `git diff --check` pass. No
+  real-database migration or user data operation is claimed; no new
+  commit/HEAD.
+- Historical (Step 6.3 search/embedding/Ask stack tree,
+  independently full-suite verified at the time): the full suite passed — **3100
   collected and 3100 passed**
   (the Step 6.3 delta is **243 tests**: 134 across the four new Step
   6.3 files `tests/test_search_index_section_summaries.py`,
@@ -2640,13 +2824,18 @@ Production Library UI are delivered.
   to `tests/test_semantic_search.py` (the document-level evidence
   surface) and 1 addition to `tests/test_migration_readiness.py` (the
   `ask` command in the ORM-command preflight inventory);
-  `tests/test_web_security.py` gained `/ask/` in its CSP and
-  secret-hygiene sweeps), with the only warning the known
-  `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
-  `manage.py check`, `makemigrations --check` (NO migration) and
-   `git diff --check` pass. The full-suite states (CURRENT first) are
-   **3100** (Step 6.3 — current), 2857
-   (Step 6.2a bug-fix; 2819 before it), 2722
+   `tests/test_web_security.py` gained `/ask/` in its CSP and
+   secret-hygiene sweeps), with the only warning the known
+   `audioop` DeprecationWarning (Python 3.12, removal slated for 3.13);
+   `manage.py check`, `makemigrations --check` (NO migration) and
+    `git diff --check` pass. The full-suite states (CURRENT first) are
+    **3157** (direct-action web workflow + routing-state fingerprint
+    binding — current), 3152
+    (the fingerprint input hardening round — intermediate), 3119
+    (the direct-action test rounds — intermediate), 3112
+    (the committed `run --now` CLI round — intermediate), 3100
+    (Step 6.3), 2857
+    (Step 6.2a bug-fix; 2819 before it), 2722
    (Step 6.2 after the UI refinement; the initial Step
    6.2 delivery was 2714), 2507
    (Step 6.1), 2235

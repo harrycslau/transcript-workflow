@@ -468,11 +468,13 @@ Recording-level default state.
 The web interface mirrors this on the recording detail AND summary
 pages: language tabs (Default / English / Traditional Chinese /
 Original plus existing variants such as Finnish), per-variant state,
-Generate/Retry/Regenerate actions with language-preserving
-confirmation, and language-preserving Copy/Markdown/text/JSON export
-links. Action confirmations bind every input that determines language
-resolution (a source-language correction invalidates an already-open
-confirmation), and actions return to the page they originated from
+Generate/Retry/Regenerate actions with language-preserving redirects,
+and language-preserving Copy/Markdown/text/JSON export links. Every
+action executes directly on the first POST from its origin-page form
+— no confirmation interstitial — while the submit button shows a
+pending state; action forms bind every input that determines language
+resolution (a source-language correction invalidates an already
+rendered form), and actions return to the page they originated from
 (detail or summary) with the selected language. All GET requests are
 strictly read-only.
 
