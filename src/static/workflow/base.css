@@ -139,6 +139,49 @@ body {
   height: 32px;
 }
 .topbar-btn:hover { background: var(--color-surface-2); color: var(--color-text); text-decoration: none; }
+/* Global Run now / Open inbox controls render as accent (primary) action
+   buttons in the header: same height/radius as the neutral topbar links
+   but the existing accent background + white text, with an accent hover.
+   No content-area layout styles are applied. */
+.topbar-action-form {
+  display: inline-flex;
+  align-items: center;
+  margin: 0;
+}
+.topbar-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.75rem;
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-md);
+  background: var(--color-accent);
+  color: #fff;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  white-space: nowrap;
+  height: 32px;
+  cursor: pointer;
+}
+.topbar-action-btn:hover {
+  background: var(--color-accent-2);
+  border-color: var(--color-accent-2);
+  color: #fff;
+}
+/* In-flight pending state: the control is really disabled by app.js and
+   must look disabled while keeping its accent identity (never hidden,
+   never width-shifting, never an active-looking hover). */
+.topbar-action-btn:disabled,
+.topbar-action-btn[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.topbar-action-btn:disabled:hover,
+.topbar-action-btn[aria-disabled="true"]:hover {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+}
 .topbar-btn .badge {
   background: var(--color-warn);
   color: #fff;
@@ -1341,6 +1384,17 @@ ol.key-points > li::before {
   /* Brand name hides; nav button labels stay visible so every link has
      readable content on mobile. */
   .topbar-brand-name { display: none; }
+  /* Five controls plus the brand may not fit on the first row: let the
+     navigation group shrink and scroll horizontally (bounded) instead of
+     overflowing the page. Controls are never hidden or disabled. */
+  .topbar-right {
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    flex-shrink: 1;
+  }
+  .topbar-action-form { flex-shrink: 0; }
   .topbar-search {
     order: 3;
     flex: 1 1 100%;

@@ -2017,7 +2017,10 @@ class TestParityAndAccessibility:
         # static (role=status), so nothing spams announcements per row.
         assert content.count("aria-live") == 1
         assert 'aria-live="polite"' in content
-        assert "aria-live" not in content[content.index('role="status"') :]
+        # No live region inside the search results themselves (the
+        # static results header is a role=status, but not aria-live).
+        results_at = content.index('<div class="results-header" role="status">')
+        assert "aria-live" not in content[results_at:]
         # The segment chip stays a keyboard-reachable link with label text.
         assert re.search(
             r'<a class="match-chip match-segment" href="[^"]*"[^>]*>segment · ', content

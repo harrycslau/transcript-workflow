@@ -543,6 +543,25 @@ uv run brain serve --host 127.0.0.1 --port 9000
   page, semantic/hybrid run and navigate POST-only, all over the same
   read-only engines with `<mark>` highlights and transcript jump links
   — see the Library search section below.
+- `POST /recordings/run-now/` and `POST /recordings/open-inbox/` — the
+  two global controls, rendered directly in the standard fixed header on
+  every normal page (Library, recording detail, transcript, section
+  detail, History, Ask, Review, Status, …) as the leftmost controls in
+  the top-right group, in the order **Run now**, **Open inbox**, **Ask**,
+  **Review**, **Status**. They use the green/accent action-button style
+  (same header dimensions). Both are plain POST forms, CSRF-protected,
+  with no confirmation step and no live region; while the native POST
+  runs, the submit button is disabled and relabeled (`Run now` →
+  `Running…`, `Open inbox` → `Opening…`). **Run now** is the web
+  equivalent of `brain run --now`: after a read-only migration-readiness
+  check it holds the exclusive pipeline lock and runs one full ingest →
+  route → transcribe → summarize pass; a busy pipeline is a friendly
+  409, and a stale database schema is a friendly actionable error naming
+  `uv run python src/manage.py migrate`. **Open inbox** opens only the
+  server-configured inbox folder in Finder (fixed `/usr/bin/open` argv,
+  no shell, no client path/destination). Open inbox success flashes
+  nothing; both report failures with one fixed sanitized flash. GET
+  requests are 405 and do no work.
 - `GET /status/` — the status page (app version, storage availability,
   MacWhisper/oMLX configuration, selected models, pipeline counts).
   Page loads run only lightweight local checks; they never launch

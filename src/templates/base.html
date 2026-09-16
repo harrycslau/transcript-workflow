@@ -29,6 +29,14 @@
       {% if effective_view %}<input type="hidden" name="view" value="{{ effective_view }}">{% endif %}
     </form>
     <div class="topbar-right">
+      <form method="post" action="{% url 'run-now' %}" class="topbar-action-form" data-action-form="run-now">
+        {% csrf_token %}
+        <button type="submit" class="topbar-action-btn">Run now</button>
+      </form>
+      <form method="post" action="{% url 'open-inbox' %}" class="topbar-action-form" data-action-form="open-inbox">
+        {% csrf_token %}
+        <button type="submit" class="topbar-action-btn">Open inbox</button>
+      </form>
       <a class="topbar-btn" href="{% url 'ask' %}">Ask</a>
       <a class="topbar-btn" href="{% url 'review' %}">Review{% if review_count %}<span class="badge" aria-label="{{ review_count }} recordings need review">{{ review_count }}</span>{% endif %}</a>
       <a class="topbar-btn" href="{% url 'status' %}"><span class="btn-label">Status</span></a>

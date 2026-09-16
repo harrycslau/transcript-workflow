@@ -7,7 +7,16 @@ mismatched URL is a 404 — never cross-recording access.
 
 from django.urls import path
 
-from workflow.views import actions, ask, exports, recordings, review, segmentation, tags
+from workflow.views import (
+    actions,
+    ask,
+    exports,
+    global_actions,
+    recordings,
+    review,
+    segmentation,
+    tags,
+)
 from workflow import views
 
 urlpatterns = [
@@ -18,6 +27,12 @@ urlpatterns = [
     # Ask with citations (Step 5D). GET renders the form and does zero
     # health/embedding/chat work; POST executes the read-only Ask.
     path("ask/", ask.ask_view, name="ask"),
+
+    # Global Library actions (POST-only, direct first POST; GET is a 405
+    # with zero work): Run now (a full `brain run --now` pass) and Open
+    # inbox (Finder on the configured inbox). No confirmation interstitial.
+    path("recordings/run-now/", global_actions.run_now, name="run-now"),
+    path("recordings/open-inbox/", global_actions.open_inbox_view, name="open-inbox"),
 
     path("recordings/", recordings.recording_list, name="recordings"),
     # Read-only archived Recordings list (Step "archive"): linked from the

@@ -37,9 +37,10 @@
 
   // ---- Direct-action forms: pending-state progressive enhancement ----
   // Every mutating action (route, confirm-routing, transcribe, summarize,
-  // retry, segmentation-save) executes on the FIRST POST from its page
-  // form — there is no confirmation interstitial. While the synchronous
-  // POST navigation is in flight this enhancement:
+  // retry, segmentation-save, archive/restore and the global Library
+  // Run now / Open inbox controls) executes on the FIRST POST from its
+  // page form — there is no confirmation interstitial. While the
+  // synchronous POST navigation is in flight this enhancement:
   //
   //   * cancels repeated submit events on an already-submitted form (the
   //     FIRST submit is NEVER preventDefaulted — it is an ordinary native
@@ -60,7 +61,10 @@
   // data-pending-message on the live region (exact per-action/per-mode
   // wording — summarize modes differ); the route, confirm-routing,
   // transcribe and retry templates carry no data-pending-* attributes
-  // and use the fixed per-action PENDING_COPY fallback map below.
+  // and use the fixed per-action PENDING_COPY fallback map below. The
+  // global Library Run now / Open inbox topbar forms render no live
+  // region, so for them only the submit-button label changes (their
+  // PENDING_COPY message stays empty — no pending text is ever shown).
   //
   // A bfcache "back" restores the page with the stale running UI (and,
   // because bfcache keeps the JS heap, with the in-memory submitted
@@ -76,6 +80,8 @@
     "segmentation-save": { label: "Saving…", message: "Saving the new layout revision…" },
     "archive": { label: "Archiving…", message: "Archiving this recording — the page reloads when it finishes." },
     "restore": { label: "Restoring…", message: "Restoring this recording — the page reloads when it finishes." },
+    "run-now": { label: "Running…", message: "" },
+    "open-inbox": { label: "Opening…", message: "" },
   };
 
   function initActionForms() {

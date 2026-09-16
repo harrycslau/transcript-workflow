@@ -78,7 +78,8 @@ added a further 42 focused tests to 3243, the reversible-Section-
 archive round added a further 44 tests to 3287, the web summary
 model-selector/copy round added a further 46 tests to 3333, and the
 Review awaiting-summary canonical-split exclusion round adds a further
-9 tests to the current **3342**; only the
+9 tests to 3342; the global header **Run now / Open inbox** controls
+round adds a further 29 tests to the current **3371**; only the
 known `audioop` deprecation warning), with
 `manage.py check`, `makemigrations --check` (0015 is the new head) and
 `git diff --check` clean.
@@ -87,6 +88,72 @@ migration or user data operation is claimed (the 0011/0012/0013/0014/0015
 migrations are never applied to a real database by this work). This file is
 a snapshot, not a durable instruction
 file; `AGENTS.md` holds the standing rules.
+
+## Global header controls — Run now / Open inbox (delivered in the working tree)
+
+A bounded global web-action round on top of the archive/summarize work;
+no migration, no CLI feature, no dependency change and no config change.
+
+- **Rendering**: both controls render directly in the STANDARD base
+  header (`base.html`) on EVERY normal page (Library, recording detail,
+  transcript, section detail, History, Ask, Review, Status, …) as the
+  LEFTMOST controls within `.topbar-right`, ordered **Run now**,
+  **Open inbox**, **Ask**, **Review**, **Status** (no `{% block %}` hook,
+  no Library-only override). They are two ordinary POST forms
+  (`form[data-action-form="run-now"]` / `"open-inbox"`) with a
+  `csrf_token`, styled as accent (primary) header buttons via the
+  dedicated `.topbar-action-btn` class (existing `--color-accent`
+  background + white text, `--color-accent-2` hover,
+  header-compatible height/radius). They render NO live region and NO
+  visible pending text: the only pending feedback is the submit-button
+  label changing (`Run now` → `Running…`, `Open inbox` → `Opening…`)
+  while `app.js` really sets `control.disabled = true`; a
+  `.topbar-action-btn:disabled` opacity/not-allowed rule (with a
+  disabled hover that restores the accent, never the active hover) makes
+  the disabled state visible; a `.topbar-action-form` reset keeps the
+  layout neutral. Plain POST forms without JS; bfcache restore reuses
+  the existing pageshow reset. On mobile the `.topbar-right` group is
+  bounded and horizontally scrollable (`min-width: 0`) so five controls
+  plus the brand never overflow the page.
+- **Run now** (`workflow/views/global_actions.py:run_now`, route
+  `POST /recordings/run-now/`): the exact semantic equivalent of
+  `brain run --now`. A read-only
+  `brainlib.migrations.unapplied_migrations()` inspection runs BEFORE
+  even reloading config from disk and before any lock/recovery/file/
+  network/ORM pipeline work; pending or
+  uninspectable migrations are one fixed sanitized actionable 400 naming
+  `uv run python src/manage.py migrate` with zero config/lock/pipeline
+  calls.
+  Otherwise it holds the exclusive pipeline lock and calls
+  `run_pipeline(config, respect_stability_window=False)`; `run_pipeline`
+  performs `recover_interruptions` itself, so the view never duplicates
+  recovery. Busy lock is the existing friendly 409. No state fingerprint
+  is needed. Success is one fixed flash; any failure is one fixed
+  sanitized flash — the raw pipeline report (ingest paths) and the
+  exception are never flashed, rendered or logged. PRG back to the
+  plain Library.
+- **Open inbox** (`workflow/services/open_inbox.py` +
+  `open_inbox_view`, route `POST /recordings/open-inbox/`): opens ONLY
+  the server-loaded `config.storage.inbox` (must be a directory) in
+  Finder through a fixed argv array
+  `["/usr/bin/open", <configured inbox>]` — no shell, no PATH lookup, no
+  configurable executable, no `file://` URL and no client path/URL/
+  destination. Timeout 5 s, stdout/stderr suppressed (never read/
+  decoded/surfaced), return code checked; missing dir/`OSError`/
+  `TimeoutExpired`/nonzero are one fixed sanitized message. No pipeline
+  lock, recovery, ORM work or migration preflight. A successful dispatch
+  flashes NOTHING (plain PRG redirect); only failures flash the fixed
+  sanitized error.
+- **GET purity**: both routes are `require_POST`; GET is a 405 with zero
+  work (no config load, no subprocess). Ordinary Library GETs stay
+  strictly read-only.
+- **Verification**: 29 focused tests in
+  `tests/test_web_global_actions.py` plus the reverted
+  `tests/test_web_search.py` live-region assertion; full suite
+  **3371 passed** (only the known `audioop` warning) with
+  `manage.py check`, `makemigrations --check` (0015 still the head,
+  no new migration) and `git diff --check` clean. All subprocess/pipeline
+  calls are mocked; no real Finder/MacWhisper/oMLX/network/audio is used.
 
 ## Web summary model selector + copy refinement (delivered in the working tree)
 

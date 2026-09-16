@@ -225,6 +225,49 @@ Non-negotiable principles:
   eligibility/validation probes reject obviously invalid submissions
   before any lock/network; execution under the lock remains
   authoritative.
+- Global Library controls (`workflow/views/global_actions.py`, routes
+  `POST /recordings/run-now/` and `POST /recordings/open-inbox/`):
+  POST-only, CSRF-protected, direct execution on the FIRST POST, PRG
+  back to the plain Library. **Run now** runs the shared read-only
+  migration-readiness inspection (`brainlib.migrations.unapplied_migrations`)
+  BEFORE any lock/recovery/file/network/ORM pipeline work; pending or
+  uninspectable migrations are ONE fixed sanitized actionable 400 naming
+  `uv run python src/manage.py migrate` with zero lock/pipeline calls.
+  Otherwise it holds the exclusive pipeline lock and calls
+  `run_pipeline(config, respect_stability_window=False)` — the exact
+  semantic equivalent of `brain run --now`, never ingest-only;
+  `run_pipeline` performs `recover_interruptions` itself and the view
+  NEVER duplicates recovery. Busy lock ⇒ the existing friendly 409.
+  The raw `run_pipeline` report (its ingest section contains paths) and
+  any exception are never flashed, rendered or logged: success is one
+  fixed message and failure is one fixed sanitized message. No state
+  fingerprint is needed for these global controls; the lock constrains
+  concurrent POSTs. **Open inbox** launches Finder on the server-loaded
+  `config.storage.inbox` only — no client path/URL/destination, no
+  lock/recovery/ORM/migration preflight, fixed argv
+  `/usr/bin/open <configured inbox>` with a 5-second timeout, suppressed
+  stdout/stderr and a checked return code (never `shell=True`, never a
+  PATH lookup, configurable executable or `file://` URL); every failure
+  is one fixed sanitized message with no path or process output and a
+  successful dispatch flashes NOTHING. Both controls are rendered
+  directly in the STANDARD base header (`base.html`) on EVERY normal
+  page (Library, recording detail, transcript, section detail, History,
+  Ask, Review, Status, …) as the LEFTMOST controls within
+  `.topbar-right`, ordered **Run now**, **Open inbox**, **Ask**,
+  **Review**, **Status** (no `{% block %}` hook, no Library-only
+  override). They are plain POST forms
+  (`form[data-action-form="run-now"]` / `"open-inbox"]`) with a
+  `csrf_token`, styled as accent (primary) header buttons via the
+  dedicated `.topbar-action-btn` class (existing `--color-accent`
+  background + white text, `--color-accent-2` hover, header-compatible
+  height/radius; no content-area layout styles), and render NO live
+  region and NO visible pending text: the only pending feedback is the
+  submit-button label changing (`Run now` → `Running…`, `Open inbox` →
+  `Opening…`) while `app.js` really sets `control.disabled = true` (with
+  a `.topbar-action-btn:disabled` opacity/not-allowed visual and a
+  disabled hover that keeps the accent identity, never the active
+  hover). Without JS they are plain POST forms; GET is a 405 with zero
+  work.
 
 ## Content identity, versioning, active-record invariants
 
@@ -599,6 +642,15 @@ Non-negotiable principles:
 
 - Only ever READ user audio. Never move, rename, delete, truncate, or
   transcribe-with-side-effects files in `data/inbox`.
+- The Library's "Open inbox" control only OPENS the configured inbox
+  folder in Finder (`/usr/bin/open`); it never reads, moves, renames,
+  deletes or modifies any file. The destination is always the
+  server-loaded `config.storage.inbox` (accepted only when it is a
+  directory) — a client-supplied path, URL or destination is never
+  accepted. The launcher is a fixed argv array with a 5-second timeout,
+  suppressed stdout/stderr and a checked return code; failures are one
+  fixed sanitized message and nothing about the path or process output
+  is logged or returned.
 - `brain run` honors `macwhisper.file_stable_seconds`: a newly
   discovered or changed source must stay unchanged for that window
   before it is hashed. `brain run --now` is the explicit one-pass
