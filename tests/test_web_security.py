@@ -143,6 +143,23 @@ def test_versioned_static_assets(client):
     assert '/static/workflow/app.js?v=6' in content
 
 
+def test_favicon_referenced_and_served(client):
+    """The shared base template references the generated PNG favicon
+    with an explicit type and size, and the static asset exists so the
+    link resolves on every normal page."""
+    content = client.get("/recordings/").content.decode("utf-8")
+    assert 'rel="icon"' in content
+    assert 'type="image/png"' in content
+    assert 'sizes="32x32"' in content
+    assert "/static/workflow/favicon.png" in content
+
+    from django.contrib.staticfiles import finders
+
+    path = finders.find("workflow/favicon.png")
+    assert path is not None
+    assert Path(path).is_file()
+
+
 class TestSecretHygiene:
     def test_no_secrets_on_pages(self, client, monkeypatch):
         monkeypatch.setenv("BRAIN_TEST_LLM_API_KEY", "super-secret-value-42")

@@ -896,8 +896,8 @@ class TestTimestampValidation:
 
     def test_out_of_order_segments_rejected(self):
         assert self._ok([
-            {"start": 100, "end": 200, "text": "a"},
-            {"start": 50, "end": 90, "text": "b"},
+            {"start": 3000, "end": 3100, "text": "a"},
+            {"start": 100, "end": 200, "text": "b"},
         ]) is None
 
     def test_slight_overlap_tolerated(self):

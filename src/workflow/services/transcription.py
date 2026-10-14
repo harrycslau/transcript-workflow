@@ -43,7 +43,23 @@ from workflow.services.search_sync import schedule_recording_sync
 
 logger = logging.getLogger(__name__)
 
-PARSER_VERSION = "1"
+PARSER_VERSION = "3"
+# MacWhisper 15.0.2 diarization can emit a segment whose start is slightly
+# behind the greatest accepted start so far. Tolerate up to this many
+# milliseconds behind the running maximum (measured on the integer values
+# that are persisted) without ordering, clamping or rewriting emitted data;
+# larger regressions still fail.
+MAX_START_REGRESSION_MS = 2000
+# Privacy-safe regression-size buckets for a rejected non-monotonic start.
+# Inclusive ranges; since a regression of at most MAX_START_REGRESSION_MS is
+# accepted, every failing delta is at least 2001. Only the bucket LABEL is
+# ever persisted — never the exact delta, timestamps or rejected value.
+# Historical context rows may retain older bucket labels; they are data and
+# are never rewritten.
+_START_REGRESSION_BUCKETS = (
+    ("2001_5000_ms", 2001, 5000),
+    ("over_5000_ms", 5001, None),
+)
 STDOUT_CAP_BYTES = 32 * 1024 * 1024
 DEFAULT_SAMPLE_TIMEOUT = 600
 # Startup/model-load allowance: short audio never gets less than this.
@@ -217,42 +233,63 @@ class ParsedTranscript:
     language_observed: str = ""
 
 
-def parse_mw_json(raw: str) -> ParsedTranscript | None:
-    """Validate MacWhisper JSON output (schema observed in MacWhisper 14.7.1):
+@dataclass(frozen=True)
+class _JsonValidationFailure:
+    """Stable structural reason a MacWhisper payload was rejected.
 
-    {"segments": [{"start": ms, "end": ms, "id": ..., "text": str,
-                   "words": [{"start": ms, "end": ms, "text": str}]}],
-     "text": str}
+    Deliberately carries ONLY an allowlisted category plus, for
+    segment-specific failures, the zero-based segment ordinal; a rejected
+    non-monotonic start additionally carries one fixed allowlisted
+    regression-size bucket label. Rejected values, exact timestamps,
+    exact deltas, raw output, transcript text, parser exception messages,
+    top-level keys, counts, paths and hashes are never retained.
+    """
 
-    Timestamps must be finite, non-negative numbers (booleans rejected)
-    with ``end >= start``; segment starts must be non-decreasing.
-    Slight overlap between segments is tolerated (real MacWhisper
-    output may overlap by a few ms), but regressions in start times are
-    rejected.
+    category: str
+    segment_ordinal: int | None = None
+    regression_bucket: str | None = None
+
+
+def _start_regression_bucket(delta_ms: int) -> str:
+    """Map a positive non-monotonic start delta to one fixed bucket label."""
+    for label, lower, upper in _START_REGRESSION_BUCKETS:
+        if delta_ms >= lower and (upper is None or delta_ms <= upper):
+            return label
+    return _START_REGRESSION_BUCKETS[0][0]  # unreachable: delta_ms is always > 2000
+
+
+def _parse_mw_json_detailed(raw: str) -> ParsedTranscript | _JsonValidationFailure:
+    """Validate MacWhisper JSON and classify the first rejection branch.
+
+    The validation semantics are exactly those of ``parse_mw_json``;
+    this private variant additionally returns a stable structural
+    category (and segment ordinal where applicable) for diagnostics.
     """
     import math
 
     try:
         payload = json.loads(raw)
     except ValueError:
-        return None
+        return _JsonValidationFailure("malformed_json")
     if not isinstance(payload, dict):
-        return None
+        return _JsonValidationFailure("invalid_envelope")
     segments_raw = payload.get("segments")
     text = payload.get("text")
     if not isinstance(segments_raw, list) or not isinstance(text, str):
-        return None
+        return _JsonValidationFailure("invalid_envelope")
     segments: list[dict] = []
-    previous_start: float | None = None
+    # Greatest previously accepted non-null start (integer ms, as
+    # persisted). A null start neither fails nor resets this value.
+    running_max_start_ms: int | None = None
     for index, item in enumerate(segments_raw):
         if not isinstance(item, dict):
-            return None
+            return _JsonValidationFailure("invalid_segment_item", index)
         seg_text = item.get("text")
         if not isinstance(seg_text, str):
-            return None
+            return _JsonValidationFailure("invalid_segment_text", index)
         speaker = item.get("speaker")
         if speaker is not None and not isinstance(speaker, str):
-            return None
+            return _JsonValidationFailure("invalid_segment_speaker", index)
 
         def valid_timestamp(value) -> float | None:
             if value is None:
@@ -267,24 +304,66 @@ def parse_mw_json(raw: str) -> ParsedTranscript | None:
         start = valid_timestamp(item.get("start"))
         end = valid_timestamp(item.get("end"))
         if item.get("start") is not None and start is None:
-            return None
+            return _JsonValidationFailure("invalid_timestamp", index)
         if item.get("end") is not None and end is None:
-            return None
+            return _JsonValidationFailure("invalid_timestamp", index)
         if start is not None and end is not None and end < start:
-            return None
-        if start is not None and previous_start is not None and start < previous_start:
-            return None  # out-of-order segments
-        previous_start = start
+            return _JsonValidationFailure("end_before_start", index)
+        start_ms = int(start) if start is not None else None
+        end_ms = int(end) if end is not None else None
+        if (
+            start_ms is not None
+            and running_max_start_ms is not None
+            and start_ms < running_max_start_ms - MAX_START_REGRESSION_MS
+        ):
+            # Materially out-of-order: persist only a fixed regression-size
+            # bucket, never the exact timestamps or delta.
+            delta_ms = running_max_start_ms - start_ms
+            return _JsonValidationFailure(
+                "non_monotonic_start", index, _start_regression_bucket(delta_ms)
+            )
+        if start_ms is not None and (running_max_start_ms is None or start_ms > running_max_start_ms):
+            running_max_start_ms = start_ms
         segments.append(
             {
                 "ordinal": index,
-                "start_ms": int(start) if start is not None else None,
-                "end_ms": int(end) if end is not None else None,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
                 "speaker": speaker or "",
                 "text": seg_text,
             }
         )
     return ParsedTranscript(text=text, segments=segments)
+
+
+def _json_validation_context(failure: _JsonValidationFailure) -> dict:
+    """Bounded, secret-free diagnostic stored for one rejected payload."""
+    diagnostic: dict = {"category": failure.category}
+    if failure.segment_ordinal is not None:
+        diagnostic["segment_ordinal"] = failure.segment_ordinal
+    if failure.regression_bucket is not None:
+        diagnostic["regression_bucket"] = failure.regression_bucket
+    return diagnostic
+
+
+def parse_mw_json(raw: str) -> ParsedTranscript | None:
+    """Validate MacWhisper JSON output (schema observed in MacWhisper 14.7.1):
+
+    {"segments": [{"start": ms, "end": ms, "id": ..., "text": str,
+                   "words": [{"start": ms, "end": ms, "text": str}]}],
+     "text": str}
+
+    Timestamps must be finite, non-negative numbers (booleans rejected)
+    with ``end >= start``. Segment starts must be non-decreasing except
+    for a tolerance of at most ``MAX_START_REGRESSION_MS`` behind the
+    greatest accepted non-null start so far (measured on the integer
+    millisecond values that are persisted). Slight overlap between
+    segments is tolerated (real MacWhisper output may overlap by a few
+    ms); larger start regressions are rejected. Emitted segment order,
+    ordinals and original timestamps are never changed.
+    """
+    result = _parse_mw_json_detailed(raw)
+    return None if isinstance(result, _JsonValidationFailure) else result
 
 
 def sanitize_error(text: str, limit: int = 200) -> str:
@@ -471,8 +550,14 @@ def transcribe_recording(
         stdout = result.stdout or ""
         if len(stdout.encode("utf-8", errors="replace")) > STDOUT_CAP_BYTES:
             return _finish_failure(attempt, recording, AttemptOutcome.INVALID_OUTPUT, "stdout_too_large", "")
-        parsed = parse_mw_json(stdout)
-        if parsed is None:
+        parsed = _parse_mw_json_detailed(stdout)
+        if isinstance(parsed, _JsonValidationFailure):
+            # Structural diagnostics only: the public failure outcome and
+            # error code stay unchanged; context_json gains one bounded
+            # category (plus the segment ordinal and, for a non-monotonic
+            # start, one fixed regression-size bucket).
+            context["json_validation"] = _json_validation_context(parsed)
+            attempt.context_json = context
             return _finish_failure(attempt, recording, AttemptOutcome.INVALID_OUTPUT, "invalid_mw_json", "")
 
         _persist_transcript(attempt, recording, parsed, stdout)

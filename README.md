@@ -582,6 +582,30 @@ uv run brain serve --host 127.0.0.1 --port 9000
   local transcript segments or summaries with stable version links.
   See the "Ask with citations" section above.
 
+### Desktop launcher (Brain.app)
+
+The repository root contains a small `Brain.app` bundle. **Keep
+`Brain.app` in the project root** — the launcher derives the project
+location from the bundle's own path, so an ordinary drag that moves the
+bundle breaks it. To launch from the Desktop, select the bundle in
+Finder and choose **File ▸ Make Alias** (or right-click ▸ **Make
+Alias**), then move that *alias* to the Desktop; alternatively, add the
+original `Brain.app` to the Dock. Double-click it to open the web UI at
+`http://127.0.0.1:8787/`. If a healthy server is already running it just
+opens the page; otherwise it starts `.venv/bin/brain serve` in the
+background (no Terminal window) and opens the page once the server's
+health endpoint responds.
+
+The bundle's Finder entry point is a native AppleScript applet (built
+with macOS's `/usr/bin/osacompile`), not a text shell script, so macOS
+never asks for Rosetta on Apple Silicon. The launch logic lives in the
+bundled `Contents/Resources/Brain-launch.zsh` resource (its
+human-readable source is `Contents/Resources/Brain-launch.applescript`).
+
+Run `uv sync` first so `.venv/bin/brain` exists. If the launcher cannot
+start the server it shows a short guidance dialog and writes startup
+output to `data/temp/brain-app.log`.
+
 ### Tests
 
 ```sh
